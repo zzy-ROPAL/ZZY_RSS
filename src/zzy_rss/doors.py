@@ -55,6 +55,22 @@ class SigmaDisc:
     vanishing: frozenset = field(default_factory=frozenset)
     pages: tuple = ()
     detail: str = ""
+    # EXACT analytic door location, when known. The disc centre may be merged
+    # or grid-snapped, which is fine for covering but NOT for evaluating the
+    # self-motion fiber: the counter-rotation of q1/q3 is a true self-motion
+    # only where q2 = 0 exactly. Measured drift of the tool tip along the
+    # fiber: 7.85e-14 mm anchored at the exact door, 0.65 mm anchored 6.3e-4
+    # rad off it. Anchoring off the door scans configurations that have left
+    # the weld line, so the fiber must always be anchored here when available.
+    exact_y: float | None = None
+    exact_theta: float | None = None
+
+    @property
+    def anchor(self) -> tuple:
+        """(y, theta) at which to evaluate the fiber: exact if known."""
+        if self.exact_y is not None and self.exact_theta is not None:
+            return self.exact_y, self.exact_theta
+        return self.y, self.theta
 
     def contains(self, y: float, theta: float) -> bool:
         return (y - self.y) ** 2 + (theta - self.theta) ** 2 <= self.radius ** 2
@@ -180,6 +196,8 @@ def find_interior_doors_analytic(
                 theta=theta,
                 radius=radius,
                 vanishing=frozenset({sign_index}),
+                exact_y=y,
+                exact_theta=theta,
                 detail=f"q{joint}=0 door (analytic) on page {pm.name}",
             )
         )
@@ -347,6 +365,10 @@ def _merge_discs(discs: list[SigmaDisc], radius: float) -> list[SigmaDisc]:
                     vanishing=e.vanishing | d.vanishing,
                     pages=e.pages,
                     detail=e.detail,
+                    # keep the exact anchor from whichever disc carries one
+                    exact_y=e.exact_y if e.exact_y is not None else d.exact_y,
+                    exact_theta=(e.exact_theta if e.exact_theta is not None
+                                 else d.exact_theta),
                 )
                 break
         else:
@@ -403,7 +425,7 @@ def build_sigma(
             SigmaDisc(
                 kind=d.kind, y=d.y, theta=d.theta, radius=d.radius,
                 vanishing=d.vanishing, pages=assign_pages(d, pm.signs),
-                detail=d.detail,
+                detail=d.detail, exact_y=d.exact_y, exact_theta=d.exact_theta,
             )
             for d in discs
         ]
@@ -456,8 +478,9 @@ def certify_fiber(
     if not cfg.sigma_policy.enable_fiber_certification:
         return None
 
-    pos, rot = weld.pose(disc.y)
-    res = arm.ik_branch(pos, rot, disc.theta, page)
+    anchor_y, anchor_theta = disc.anchor
+    pos, rot = weld.pose(anchor_y)
+    res = arm.ik_branch(pos, rot, anchor_theta, page)
     if not res.ok:
         return FiberReport(disc.kind, disc.y, disc.theta, True, 0.0,
                            "no IK at door; left open", 0)
@@ -521,8 +544,9 @@ def door_fiber_validity(
     Returns the valid fraction and the valid delta-intervals.
     """
     n = n or cfg.sigma_policy.fiber_samples
-    pos, rot = weld.pose(disc.y)
-    res = arm.ik_branch(pos, rot, disc.theta, page)
+    anchor_y, anchor_theta = disc.anchor
+    pos, rot = weld.pose(anchor_y)
+    res = arm.ik_branch(pos, rot, anchor_theta, page)
     if not res.ok:
         return {"ok": False, "reason": "no IK at door", "valid_fraction": 0.0,
                 "intervals": []}
