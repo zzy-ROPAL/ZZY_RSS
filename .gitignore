@@ -1,0 +1,30 @@
+# Build output
+build/
+dist/
+out/
+*.o
+*.so
+*.a
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*.swp
+
+# Local scratch — never committed
+scratch/
+
+# Environment
+.env
+.env.local
