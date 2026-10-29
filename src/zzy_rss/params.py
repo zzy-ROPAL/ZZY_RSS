@@ -125,32 +125,36 @@ class SceneParams:
 
     @staticmethod
     def worked_illustration(gap_open: bool) -> "SceneParams":
-        """The feasible / infeasible pair, placed by measured transition.
+        """The feasible / infeasible pair, chosen for RESOLUTION ROBUSTNESS.
 
         The box sits in the elbow's swing path at mid-weld (the elbow sweeps
-        x in [-0.06, 0.33], z in [0.56, 0.74] over the valid set). Widening it
-        along y is what takes the problem across the feasibility boundary.
+        x in [-0.06, 0.33], z in [0.56, 0.74] over the valid set).
 
-        Measured at 41x41, averaged over all eight pages:
+        Scene selection must be checked across grid resolutions, because grid
+        connectivity can MISS a thin valid passage and report infeasibility
+        that is a discretisation artifact. An earlier pair chosen from a single
+        41x41 sweep was wrong: half (0.08, 0.060, 0.08) read infeasible at
+        res=41 and FEASIBLE at 31, 51, 61, 81 and 101. The error is
+        non-monotone in resolution, so "refine until stable" does not catch it.
 
-          box half (x, y, z)     mean valid    spanning regions   verdict
-          none                     36.82%             4           feasible
-          (0.08, 0.035, 0.08)      13.24%             4           feasible
-          (0.08, 0.060, 0.08)      10.47%             0           INFEASIBLE
+        In-page start->goal connectivity, by half-extent and resolution:
 
-        So gap_open must NOT be reported infeasible, and gap_closed must be
-        proven. Two earlier placements were wrong in instructive ways and are
-        documented in docs/findings.md: one gave zero doors, and one made the
-        weld middle unreachable through q4's limit so the problem was already
-        infeasible with no obstacle at all.
+          box half (x, y, z)   valid    31     51     71     91
+          (0.08, 0.060, 0.08)  12.73%  FEAS   FEAS   FEAS   FEAS
+          (0.10, 0.080, 0.09)   5.92%  infeas infeas infeas infeas
+          (0.12, 0.080, 0.10)   4.24%  infeas infeas infeas infeas
+
+        Note what this is and is not: agreement across resolutions is
+        EVIDENCE, never a proof. The proof is the verified wall per region.
+        Grid connectivity is only a sample source and a sanity check.
         """
-        half_y = 0.035 if gap_open else 0.060
+        half = (0.08, 0.060, 0.08) if gap_open else (0.10, 0.080, 0.09)
         return SceneParams(
             gap_open=gap_open,
             obstacles=(
                 BoxObstacle(
                     center=(0.13, 0.0, 0.68),
-                    half_extent=(0.08, half_y, 0.08),
+                    half_extent=half,
                     label="mid_block",
                 ),
             ),

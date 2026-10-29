@@ -137,15 +137,14 @@ def run(res: int, gap_open: bool, fiber: bool) -> dict:
     dt = time.time() - t0
     print("\n" + "-" * 76)
     if hit:
-        print(f"VERDICT [{tag}]: NO PROOF -- goal set reachable at region "
+        print(f"[heuristic] {tag}: goal set reachable at region "
               f"{hit[0]}/{hit[1]}")
         print("          the planner returns a path; nothing to prove")
     else:
-        print(f"VERDICT [{tag}]: goal set UNREACHABLE in the door graph")
+        print(f"[heuristic] {tag}: goal set UNREACHABLE in the grid door graph")
         print(f"          {len(seen)} region(s) reachable from the start, "
               f"none touches the goal")
-        print("          -> infeasibility follows once a wall is verified for "
-              "each of those regions")
+        print("          NOT A PROOF: grid connectivity can miss a thin valid\n          passage and report infeasibility that is a discretisation\n          artifact. Only the verified walls prove anything.")
     print(f"          ({dt:.1f}s)")
     print("-" * 76)
 
