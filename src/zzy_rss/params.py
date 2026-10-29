@@ -18,26 +18,47 @@ import numpy as np
 
 @dataclass(frozen=True)
 class ArmParams:
-    """3R-1R-3R (spherical-revolute-spherical) arm, Schunk LWA4D-like.
+    """Schunk LWA 4D, 7-DOF 3R-1R-3R (S-R-S) -- the arm used in [IROS].
 
-    Link lengths follow the standard S-R-S decomposition:
-      base -> shoulder point (d_bs), shoulder -> elbow (d_se),
-      elbow -> wrist (d_ew), wrist -> tool tip (d_wt).
+    Kinematics taken from the ROS description package, file
+    schunk_description/urdf/lwa4d/lwa4d.urdf.xacro (ipa320/schunk_modular_robotics).
+    The joint chain there is:
+
+        1_joint   0 0 0        shoulder roll (base z)
+        2_joint   0 0 0.240    shoulder pitch   -- j1, j2, j3 all pass through
+        3_joint   0 0 0        shoulder roll       the point (0, 0, 0.240)
+        4_joint   0 0 0.328    ELBOW pitch
+        5_joint   0 0 0        wrist roll, collinear with the forearm
+        6_joint   0 0 0.323    wrist pitch      -- j5, j6, j7 all pass through
+        7_joint   0 0 0        wrist roll          the wrist point
+        ee_joint  0 0 0.0824   flange
+
+    so it is genuinely S-R-S and maps onto this module's convention directly.
+    An optional 0.140 m podest pedestal sits below the base; omitted here.
+
+    Joint limits are the URDF values, i.e. the hardware limit minus the
+    package's 0.02 rad safety_offset. Hardware limits are given alongside
+    because the difference decides whether a sign door is admissible at all.
     """
 
-    d_bs: float = 0.340
-    d_se: float = 0.400
-    d_ew: float = 0.400
-    d_wt: float = 0.126
+    d_bs: float = 0.240
+    d_se: float = 0.328
+    d_ew: float = 0.323
+    d_wt: float = 0.0824
 
-    # Joint limits, radians, index 0..6 for q1..q7.
-    q_min: tuple = (-2.967, -2.094, -2.967, -2.094, -2.967, -2.094, -2.967)
-    q_max: tuple = (2.967, 2.094, 2.967, 2.094, 2.967, 2.094, 2.967)
+    # URDF limits (hardware minus 0.02 safety offset), radians, q1..q7.
+    q_min: tuple = (-3.1216, -2.12, -3.1216, -2.16, -3.1216, -2.07, -2.94)
+    q_max: tuple = (3.1216, 2.12, 3.1216, 2.16, 3.1216, 2.07, 2.94)
+    # Hardware limits, for the admissibility lemma.
+    q_min_hw: tuple = (-3.14159, -2.14, -3.14159, -2.18, -3.14159, -2.09, -2.96)
+    q_max_hw: tuple = (3.14159, 2.14, 3.14159, 2.18, 3.14159, 2.09, 2.96)
 
-    # Collision model: capsule radius per link, in metres.
-    r_upper_arm: float = 0.075
-    r_forearm: float = 0.070
-    r_tool: float = 0.035
+    # Capsule radii. APPROXIMATE: the real collision geometry is a set of STL
+    # meshes not available here. These are fitted to the PowerBall module
+    # diameters and should be replaced if the meshes are obtained.
+    r_upper_arm: float = 0.070
+    r_forearm: float = 0.060
+    r_tool: float = 0.040
 
     # Off-axis geometry switches.
     #
@@ -82,29 +103,27 @@ class WeldParams:
     tool z-axis held along `approach` (pointing from the tool into the work).
     """
 
-    # Placement is NOT free. Two conditions must hold simultaneously, and
-    # getting either wrong silently destroys the experiment.
+    # Placement for the REAL LWA 4D. Three conditions must hold at once.
     #
-    # (1) A q2 door needs the wrist centre at distance d_ew from the pinned
-    #     elbow E* = (0, 0, d_bs + d_se), i.e. the weld must cross the sphere
-    #     |p - (0, 0, d_bs + d_se - d_wt)| = d_ew. With this arm that sphere is
-    #     centred at (0, 0, 0.614) with radius 0.400. An earlier placement at
-    #     x=0.45, z=0.32 missed it entirely (|W - E*| was 0.54-0.58) and gave
-    #     8 pages with ZERO doors -- the door machinery was wholly inert.
+    # (1) q2 door: the weld must cross the sphere |p - (E* - d_wt*taxis)| = d_ew
+    #     with E* = (0, 0, d_bs + d_se) = (0, 0, 0.568) and d_ew = 0.323.
+    # (2) q4 limit (+/-2.16 rad): |W - S| must stay in [0.307, 0.651].
+    # (3) The door must be admissible on BOTH s6 pages. At a q2 door the whole
+    #     configuration is pinned, so q5 is determined, and the s6 mirror
+    #     shifts it by pi. With a VERTICAL torch q5 = 0 exactly, so the paired
+    #     page needs q5 = +/-pi = 3.14159, which exceeds the URDF limit of
+    #     3.1216 (= pi - 0.02 safety offset) and merely touches the hardware
+    #     limit of pi. Every door is then dead. Tilting the torch moves q5 off
+    #     zero; a 20-40 deg torch tilt is standard welding practice.
     #
-    # (2) The weld must stay far enough from the shoulder that the elbow bend
-    #     never exceeds q4's limit: |W - S| >= 0.400 for a +/-120 deg q4. A
-    #     placement at x=0.30, z=0.45 put |W - S| at 0.382 mid-weld, forcing
-    #     |q4| = 123 deg, so the MIDDLE of the weld was unreachable on every
-    #     page even with no obstacle at all -- the problem was infeasible for
-    #     a reason having nothing to do with the obstacle.
-    #
-    # x=0.34, z=0.614, y in [-0.38, 0.38] satisfies both: doors land at
-    # normalised y = 0.223 and 0.777, and |W - S| stays in [0.525, 0.648].
-    p0: tuple = (0.34, -0.38, 0.614)
-    p1: tuple = (0.34, 0.38, 0.614)
-    approach: tuple = (0.0, 0.0, -1.0)   # tool z-axis in world frame
-    reference: tuple = (1.0, 0.0, 0.0)   # fixes the tool roll about `approach`
+    # At x=0.34, z=0.48, y in [-0.26, 0.26] with a 30 deg tilt:
+    #   doors at normalised y = 0.2663 and 0.7337
+    #   q5 = +12.6 deg on -++ and -167.4 deg on -+-, both inside +/-178.85
+    #   |W - S| stays within reach
+    p0: tuple = (0.34, -0.26, 0.48)
+    p1: tuple = (0.34, 0.26, 0.48)
+    approach: tuple = (0.500000, 0.0, -0.866025)
+    reference: tuple = (0.866025, 0.0, 0.500000)
 
 
 @dataclass(frozen=True)
