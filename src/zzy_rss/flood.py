@@ -70,8 +70,22 @@ class ProofResult:
 
 
 def label_regions(cfg: Config, pm: PageMap) -> tuple[np.ndarray, list]:
-    """Connected components of the valid mask, 4-connectivity."""
+    """Connected components of the valid mask, 4-connectivity.
+
+    theta is an ARM ANGLE, so the page is a cylinder, not a rectangle: the
+    columns at theta = -pi and theta = +pi are adjacent. Labelling the grid
+    flat splits regions that are actually joined around the seam. Measured on
+    the real LWA 4D at the q6-door placement, four of the eight pages changed
+    region count once the seam was joined (4 -> 2, 2 -> 1, 4 -> 2, 2 -> 1),
+    which changes how many walls the proof needs and which regions the flood
+    fill visits.
+
+    Set PageMapParams.theta_periodic False when joint limits bound theta, in
+    which case the page really is a rectangle (see the handoff, Stage 0).
+    """
     lab, n = ndimage.label(pm.valid_mask)
+    if getattr(cfg.pagemap, "theta_periodic", True) and n > 1:
+        lab, n = _join_theta_seam(lab, n)
     regions = []
     for k in range(1, n + 1):
         mask = lab == k
@@ -86,6 +100,34 @@ def label_regions(cfg: Config, pm: PageMap) -> tuple[np.ndarray, list]:
             )
         )
     return lab, regions
+
+
+
+def _join_theta_seam(lab: np.ndarray, n: int) -> tuple[np.ndarray, int]:
+    """Merge components that touch across the periodic theta boundary."""
+    parent = list(range(n + 1))
+
+    def find(a: int) -> int:
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for i in range(lab.shape[0]):
+        a, b = int(lab[i, 0]), int(lab[i, -1])
+        if a > 0 and b > 0:
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[max(ra, rb)] = min(ra, rb)
+
+    out = np.zeros_like(lab)
+    remap: dict = {}
+    for k in range(1, n + 1):
+        r = find(k)
+        if r not in remap:
+            remap[r] = len(remap) + 1
+        out[lab == k] = remap[r]
+    return out, len(remap)
 
 
 def region_points(pm: PageMap, lab: np.ndarray, k: int) -> np.ndarray:

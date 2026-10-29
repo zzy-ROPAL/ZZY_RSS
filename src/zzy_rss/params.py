@@ -196,6 +196,11 @@ class PageMapParams:
     y_min: float = 0.0
     y_max: float = 1.0
 
+    # theta is an arm angle, so a page is a CYLINDER and the theta = -pi and
+    # +pi columns are adjacent. Set False only when joint limits genuinely
+    # bound theta, making the page a rectangle.
+    theta_periodic: bool = True
+
     # Numerical tolerance for the IK existence test (arccos argument).
     ik_tol: float = 1e-9
     # Treated as Sigma_coord when |u . e_z| exceeds this (arm-angle reference
