@@ -361,7 +361,7 @@ def run_case(tag, tilt, obstacles, args, out):
         # retraining on any facet centre that turns out valid.
         poly, rep, wall, iters, rounds = find_inf_proof_region(
             cfg, arm, weld, scene, sg, seed, other, inv, live,
-            max_iters=args.iters, verbose=False)
+            max_iters=args.iters, verbose=True)
         data[START_PAGE]["wall"] = poly.loops
         print(f"  alg4: {iters} iteration(s), alg2 {rounds} round(s), "
               f"gamma={wall.gamma:.2f}", flush=True)
