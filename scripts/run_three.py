@@ -420,55 +420,58 @@ def fig8(pms, sigma, walls, title, note, out_path, path=None):
 
 def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
                       door, fiber, pathA, pathB, out_path, drift_mm=None,
-                      pageA=START_PAGE, pageB=PARTNER_PAGE):
-    """How the infeasibility proof gets from one page to the next.
+                      pageA=START_PAGE, pageB=PARTNER_PAGE, q_route=None,
+                      rep_a=None, rep_b=None):
+    """How the proof gets from one page to the next, and what it costs.
 
-    1. the start page. Wall #1 seals the start region everywhere EXCEPT at the
-       door -- a wall may not cross a door (invariant 7), because a door is a
-       real way out.
-    2. the robot at the door, in space. Nothing here moves: measured over the
-       whole sweep, every link point travels 0.000 mm and the tool 1e-13 mm.
-    3. where the motion actually is -- joint space. q1 and q3 each slide 180
-       deg in opposite directions. The product is a GIMBAL NULL-MOTION: with
-       q2 = 0 the q1 and q3 axes are collinear, so the two rotations cancel
-       exactly and the arm holds still while its coordinates travel. At
-       delta = 180 deg the s2 sign has flipped, so the identical physical
-       posture is now read on the partner page. Changing page costs no motion
-       at all -- only joint range, which is why the torch tilt (a joint-limit
-       effect) is what opens and closes these doors (findings 12, 30).
-    4. the partner page, where the proof builds wall #2. Both walls together
-       are the certificate.
+    Left   page A: wall #1 seals the start region but stops at the door; the
+           robot's route runs along the seam and then down to that door.
+    Mid-1  the robot standing at the door.
+    Mid-2  THE SINGULARITY: q2 along the route, reaching exactly 0 at the
+           door. q2 = 0 is what makes the sign s2 meaningless, so one posture
+           is read by two pages.
+    Mid-3  THE PAGE CHANGE, and its price: the two charts' readings of that
+           ONE posture, joint by joint. They agree everywhere except q1 and
+           q3, which differ by exactly 180 deg -- and page B's q1 = -180 deg
+           is 1.15 deg outside the real limit, so B's own cell at the door is
+           INVALID. The door still counts as open (its fiber has usable
+           points), which is the conservative direction: the proof must seal
+           page B anyway, and it does.
+    Right  page B: wall #2.
     """
     from matplotlib.patches import ConnectionPatch
 
-    fig = plt.figure(figsize=(22, 7.6))
-    gs = fig.add_gridspec(2, 3, width_ratios=(1.0, 1.12, 1.0),
-                          height_ratios=(1.25, 1.0), wspace=0.28, hspace=0.42)
+    fig = plt.figure(figsize=(23, 8.6))
+    gs = fig.add_gridspec(3, 3, width_ratios=(1.0, 1.15, 1.0),
+                          height_ratios=(0.92, 0.66, 1.05),
+                          wspace=0.30, hspace=0.70)
     axA = fig.add_subplot(gs[:, 0])
     ax3 = fig.add_subplot(gs[0, 1], projection="3d")
-    axq = fig.add_subplot(gs[1, 1])
+    axq2 = fig.add_subplot(gs[1, 1])
+    axrep = fig.add_subplot(gs[2, 1])
     axB = fig.add_subplot(gs[:, 2])
     ay, at = door.anchor
 
-    # ---- 1. start page, wall #1 -----------------------------------------
+    # ---- page A, wall #1, and the route that reaches the door ------------
     draw_page(axA, pmA, path=pathA, wall=wallA, discs=discsA,
-              title=f"1.  page ({pageA}):  wall #1 seals the start region")
+              title=f"1.  page ({pageA}):  wall #1 seals the start region,\n"
+                    f"the robot drives to the door")
     axA.scatter([0.0], [0.0], marker="*", s=300, color="#ffffff",
                 edgecolor="#111", zorder=9)
     axA.annotate("START\ny=0", xy=(0.0, 0.0), xytext=(0.07, 0.55),
                  fontsize=9, fontweight="bold", color="#111",
                  arrowprops=dict(arrowstyle="-|>", lw=1.8, color="#111"))
-    for ax_ in (axA,):
-        ax_.axvline(1.0, color="#111", lw=2.4, ls=":")
-        ax_.text(0.985, -2.55, "GOAL  y=1\n(end of the weld)", fontsize=9,
-                 fontweight="bold", ha="right", color="#111")
-    axA.annotate("OPEN DOOR\nthe wall is forbidden\nto cross it",
-                 xy=(ay, at), xytext=(min(ay + 0.20, 0.52), at + 1.45),
+    axA.axvline(1.0, color="#111", lw=2.4, ls=":")
+    axA.text(0.985, -2.55, "GOAL  y=1\n(end of the weld)", fontsize=9,
+             fontweight="bold", ha="right", color="#111")
+    axA.annotate(f"OPEN DOOR  $q_2=0$\nhere the robot is AT the\n"
+                 f"singular posture\n(the wall may not cross it)",
+                 xy=(ay, at), xytext=(min(ay + 0.17, 0.46), at + 1.35),
                  fontsize=9, fontweight="bold", color="#1d3557",
                  ha="left", arrowprops=dict(arrowstyle="-|>", lw=2.0,
                                             color="#1d3557"))
 
-    # ---- 2. the robot at the door, in space: it does not move ------------
+    # ---- the robot at the door -------------------------------------------
     p0, p1 = weld.p0, weld.p1
     ax3.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
              color="#e9c46a", lw=9, solid_capstyle="round", zorder=0)
@@ -477,94 +480,121 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
     for c, h, _l in scene.boxes:
         draw_box(ax3, c, h)
     n = len(fiber)
-    step = max(1, n // 8)
-    for idx in list(range(0, n, step)) + [n - 1]:
+    for idx in list(range(0, n, max(1, n // 8))) + [n - 1]:
         f = arm.frames(fiber[idx])
         pts = [f["shoulder"], f["elbow"], f["wrist"], f["tool"]]
         for i, col in enumerate(("#1d3557", "#4895ef", "#e76f51")):
             u, v = pts[i], pts[i + 1]
             ax3.plot([u[0], v[0]], [u[1], v[1]], [u[2], v[2]], color=col,
                      lw=5.5, alpha=0.9, solid_capstyle="round")
-    tip = arm.fk(fiber[0])[0]
-    ax3.scatter(*tip, color="#e63946", s=190, depthshade=False,
-                edgecolor="#111", zorder=10)
+    ax3.scatter(*arm.fk(fiber[0])[0], color="#e63946", s=190,
+                depthshade=False, edgecolor="#111", zorder=10)
     ax3.set_xlim(-0.25, 0.60); ax3.set_ylim(-0.42, 0.42); ax3.set_zlim(0, 0.80)
     ax3.set_box_aspect((0.85, 0.84, 0.80))
     ax3.set_xlabel("x [m]"); ax3.set_ylabel("y [m]"); ax3.set_zlabel("z [m]")
     ax3.view_init(elev=20, azim=-72)
-    drift = ("" if drift_mm is None else f"tool {drift_mm:.0e} mm")
-    ax3.set_title(f"2.  at the door, y={ay:.3f}: all {n} usable fiber postures "
-                  f"are drawn\nand they COINCIDE -- every link point moves "
-                  f"0.000 mm ({drift})", fontsize=10.5, pad=10)
+    ax3.set_title(f"2.  the robot at the door (y={ay:.3f}): ONE posture,\n"
+                  f"and both pages describe it", fontsize=10.5, pad=8)
 
-    # ---- 3. where the motion is: joint space -----------------------------
-    # Re-derive the FULL sweep so the panel can show the part that joint
-    # limits exclude; `fiber` itself is already clipped to the usable part.
-    q0 = np.asarray(fiber)[0].copy()
-    full = []
-    for d_ in np.linspace(0.0, np.pi, 181):
-        qq = q0.copy(); qq[0] += d_; qq[2] -= d_
-        full.append(qq)
-    q = np.asarray(full)
-    dlt = np.degrees(np.linspace(0.0, np.pi, len(q)))
-    ok = np.array([arm.within_limits(qq) for qq in q])
-    axq.plot(dlt, np.degrees(q[:, 0]), lw=2.6, color="#1d3557", label=r"$q_1$")
-    axq.plot(dlt, np.degrees(q[:, 2]), lw=2.6, color="#e76f51", label=r"$q_3$")
-    axq.plot(dlt, np.degrees(q[:, 0] + q[:, 2]), lw=2.0, ls="--",
-             color="#2a9d8f", label=r"$q_1+q_3$  (constant)")
-    bad = ~ok
-    if bad.any():
-        axq.fill_between(dlt, -200, 200, where=bad, color="#e9c46a",
-                         alpha=0.55, step="mid",
-                         label="outside joint limits")
-    axq.set_xlim(0, 180); axq.set_ylim(-210, 210)
-    axq.set_xlabel(r"self-motion parameter $\delta$  [deg]")
-    axq.set_ylabel("joint angle [deg]")
-    n_bad = int((~ok).sum())
-    axq.set_title(r"3.  the motion is in JOINT space: $q_1$ and $q_3$ slide "
-                  r"and cancel ($q_1+q_3$ fixed)" "\n"
-                  + (r"the $s_2$ mirror at $\delta=180^\circ$ needs "
-                     r"$|q_1|=180^\circ$ > the $178.85^\circ$ limit: door open "
-                     r"only in the CONSERVATIVE sense"
-                     if n_bad else
-                     r"($q_2=0$ makes their axes collinear, so the arm holds "
-                     r"still; at $\delta=180^\circ$ the $s_2$ sign flips)"),
-                  fontsize=10.5)
-    axq.legend(fontsize=8, loc="upper center", ncol=2, framealpha=0.9)
-    axq.grid(alpha=0.25)
+    # ---- 3. the singularity: q2 reaches zero ------------------------------
+    if q_route is not None and len(q_route):
+        qr = np.degrees(np.asarray(q_route))
+        step = np.arange(len(qr))
+        axq2.axhline(0.0, color="#9d0208", lw=2.0, ls="--")
+        axq2.plot(step, qr[:, 1], lw=2.8, color="#1d3557")
+        axq2.scatter([step[-1]], [qr[-1, 1]], s=130, color="#e63946",
+                     edgecolor="#111", zorder=6)
+        axq2.annotate(f"$q_2=0$  SINGULAR\n($s_2$ undefined here)",
+                      xy=(step[-1], qr[-1, 1]),
+                      xytext=(step[-1] * 0.45, max(qr[:, 1]) * 0.55 + 4),
+                      fontsize=9, fontweight="bold", color="#9d0208",
+                      arrowprops=dict(arrowstyle="-|>", lw=1.8,
+                                      color="#9d0208"))
+        axq2.fill_between(step, 0, qr[:, 1], where=qr[:, 1] > 0,
+                          color="#2a9d8f", alpha=0.25)
+        axq2.text(step[len(step) // 6], max(qr[:, 1]) * 0.45,
+                  r"$q_2>0 \Rightarrow s_2=+$, page " f"({pageA})",
+                  fontsize=8.5, color="#1b6b60")
+        axq2.set_xlabel("step along the robot's route on page " f"({pageA})")
+        axq2.set_ylabel(r"$q_2$  [deg]")
+        axq2.set_title(r"3.  the robot PASSES INTO THE SINGULARITY: $q_2$ "
+                       r"falls to exactly $0$", fontsize=10.5, pad=6)
+        axq2.grid(alpha=0.25)
 
-    # ---- 4. partner page, wall #2 ---------------------------------------
+    # ---- 4. the page change, joint by joint, and its price ---------------
+    if rep_a is not None and rep_b is not None:
+        idx = np.arange(7)
+        a_deg, b_deg = np.degrees(rep_a), np.degrees(rep_b)
+        lim = np.degrees(arm.q_max)
+        w = 0.38
+        axrep.bar(idx - w / 2, a_deg, w, color="#1d3557",
+                  label=f"page ({pageA}) reading")
+        axrep.bar(idx + w / 2, b_deg, w, color="#e76f51",
+                  label=f"page ({pageB}) reading")
+        axrep.plot(idx, lim, "_", ms=22, color="#9d0208", mew=2.2)
+        axrep.plot(idx, -lim, "_", ms=22, color="#9d0208", mew=2.2,
+                   label="joint limit")
+        for i in idx:
+            if abs(b_deg[i]) > lim[i] + 1e-9:
+                axrep.annotate(f"{b_deg[i]:.0f}°  OUTSIDE the limit\n"
+                               f"by {abs(b_deg[i]) - lim[i]:.2f}° -- so page "
+                               f"({pageB})'s own\ncell at the door is INVALID",
+                               xy=(i + w / 2, b_deg[i]),
+                               xytext=(i + 0.45, -455),
+                               fontsize=8.5, fontweight="bold", color="#9d0208",
+                               arrowprops=dict(arrowstyle="-|>", lw=1.6,
+                                               color="#9d0208"))
+            if abs(a_deg[i]) < 1.0:
+                axrep.text(i - w / 2, 16, "0°", fontsize=7.5, ha="center",
+                           color="#1d3557", fontweight="bold")
+        axrep.set_xticks(idx)
+        axrep.set_xticklabels([f"$q_{i+1}$" for i in idx])
+        axrep.set_ylabel("angle [deg]")
+        axrep.set_ylim(-520, 300)
+        axrep.axhline(0, color="#777", lw=0.8)
+        axrep.set_title(r"4.  THE PAGE CHANGE: the two charts' readings of that "
+                        r"ONE posture." "\n"
+                        r"Identical except $q_1,q_3$, which differ by exactly "
+                        r"$180^\circ$ -- the $s_2$ mirror", fontsize=10.5, pad=6)
+        axrep.legend(fontsize=8, loc="upper left", ncol=3, framealpha=0.95)
+        axrep.grid(alpha=0.2, axis="y")
+
+    # ---- page B, wall #2 --------------------------------------------------
     if pmB is not None:
         draw_page(axB, pmB, path=pathB, wall=wallB, discs=discsB,
-                  title=f"4.  page ({pageB}):  wall #2 seals it there too")
+                  title=f"5.  page ({pageB}):  wall #2 seals it too, so the\n"
+                        f"proof is complete across BOTH pages")
         axB.axvline(1.0, color="#111", lw=2.4, ls=":")
         axB.text(0.985, -2.55, "GOAL  y=1\nunreachable here too", fontsize=9,
                  fontweight="bold", ha="right", color="#111")
-        axB.annotate("arrive here\nsame posture in space,\nflipped $s_2$",
-                     xy=(ay, at), xytext=(min(ay + 0.20, 0.50), at - 2.1),
-                     fontsize=9, fontweight="bold", color="#1d3557",
+        axB.plot([ay], [at], marker="s", ms=13, mfc="none", mec="#9d0208",
+                 mew=2.8, zorder=10)
+        axB.annotate("the door's own cell is\nINVALID on this page\n"
+                     "($q_1=-180°$, past the limit)",
+                     xy=(ay, at), xytext=(min(ay + 0.16, 0.44), at - 2.15),
+                     fontsize=9, fontweight="bold", color="#9d0208",
                      ha="left", arrowprops=dict(arrowstyle="-|>", lw=2.0,
-                                                color="#1d3557"))
-    for (src, dst) in ((axA, ax3), (axq, axB)):
+                                                color="#9d0208"))
+    for (src, dst) in ((axA, ax3), (axrep, axB)):
         try:
-            con = ConnectionPatch(
+            fig.add_artist(ConnectionPatch(
                 xyA=(1.03, 0.5), coordsA=src.transAxes,
                 xyB=(-0.05, 0.5), coordsB=dst.transAxes,
-                arrowstyle="-|>", mutation_scale=26, lw=2.6, color="#1d3557")
-            fig.add_artist(con)
+                arrowstyle="-|>", mutation_scale=26, lw=2.6, color="#1d3557"))
         except Exception:                 # 3-D axes transforms can refuse
             pass
 
     fig.suptitle(
         "HOW THE PROOF PASSES THROUGH THE DOOR\n"
-        "A door is a posture where a sign vanishes, so ONE robot configuration is "
-        "read by two pages at once.\nThe wall may not cross it, so the PROOF "
-        "crosses it instead: it follows the robot onto the partner page\nand "
-        "closes a second wall there.   Certificate = wall #1 + the door + wall #2.\n"
-        "A door counts as open when ANY point of its fiber is usable -- the "
-        "conservative direction, since assuming\na door might be passable can "
-        "only make the proof do more work, never less.",
-        fontsize=11.5, y=1.13)
+        "The robot drives to a posture where $q_2$ reaches 0. There the sign "
+        "$s_2$ is undefined, so that ONE posture is described by two pages at "
+        "once --\nwhich is why a wall may not cross it. The PROOF crosses "
+        "instead: it follows the robot onto the partner page and closes a "
+        "second wall there.\nPage B's own reading of the posture needs "
+        r"$q_1=-180°$, past the $178.85°$ limit, so the door is open only in "
+        "the CONSERVATIVE sense\n(its fiber has usable points) -- and that "
+        "direction only ever makes the proof do more work.",
+        fontsize=11.5, y=1.04)
     fig.savefig(out_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
     print(f"[fig] {out_path}")
@@ -770,6 +800,7 @@ def main():
         # i.e. the partner page. This segment exists only in Q -- in Y+ it is ONE
         # point, which is exactly where the [IROS] bijection fails.
         kB, fiber, drift, mirror, to_door = None, None, None, {}, None
+        q_route_A, rep_a, rep_b = None, None, None
         if door is not None:
             ay, at = door.anchor
             # Walk from where the robot stalled to the door, INSIDE the start
@@ -782,6 +813,7 @@ def main():
             to_door = bfs_route(pmA, labA == kA, stall, (di, dj))
             if to_door is not None:
                 qD, keepD = qs_from_path(arm3, weld3, to_door, START_SIGNS)
+                q_route_A = qD
                 print(f"[3] walk to the door: {len(to_door)} cells inside "
                       f"region {kA}, {len(qD)} with IK")
                 segs.append(dict(
@@ -821,6 +853,7 @@ def main():
                 # be passable and the proof must assume it is). Saying so is
                 # the difference between a sound certificate and an overclaim.
                 rp = arm3.ik_branch(*weld3.pose(ay), at, PARTNER_SIGNS)
+                rep_a, rep_b = r0.q.copy(), (rp.q.copy() if rp.ok else None)
                 mirror = {"ik_ok": bool(rp.ok),
                           "within_limits": bool(rp.ok and arm3.within_limits(rp.q)),
                           "q_deg": ([round(float(v), 3)
@@ -932,7 +965,8 @@ def main():
                               polyA.loops, polyB.loops if polyB else None,
                               sig3[START_PAGE], sig3[PARTNER_PAGE], door, fiber,
                               routeA, pathB, out / "exp3_door_crossing.png",
-                              drift_mm=drift * 1e3 if drift is not None else None)
+                              drift_mm=drift * 1e3 if drift is not None else None,
+                              q_route=q_route_A, rep_a=rep_a, rep_b=rep_b)
         t_s = lap("exp3_figures", t_s)
         render(segs, out / "exp3_infeasible_twopage.mp4")
         t_s = lap("exp3_video", t_s)
