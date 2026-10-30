@@ -274,8 +274,13 @@ def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polyt
 
     pm = cfg.pagemap
     eps = cfg.wall.virtual_band
-    ys = np.linspace(pm.y_min - 2 * eps, pm.y_max + 2 * eps, grid_res)
-    ts = np.linspace(pm.theta_min - 2 * eps, pm.theta_max + 2 * eps, grid_res)
+    # The traced domain must be STRICTLY WIDER than the virtual-valid ring at
+    # 2*eps. With both at 2*eps the zero set ran along the domain edge and the
+    # contour came back as an open arc with both endpoints at y = -0.060, so
+    # the closure test failed and Definition 1 (I) was never established.
+    m = cfg.wall.recon_margin * eps
+    ys = np.linspace(pm.y_min - m, pm.y_max + m, grid_res)
+    ts = np.linspace(pm.theta_min - m, pm.theta_max + m, grid_res)
     yy, tt = np.meshgrid(ys, ts, indexing="ij")
     pts = np.column_stack([yy.ravel(), tt.ravel()])
     vals = wall.decision(pts).reshape(yy.shape)

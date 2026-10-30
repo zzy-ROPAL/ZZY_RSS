@@ -296,6 +296,10 @@ class WallParams:
     # Virtual-boundary band thickness (IJRR Fig. 5). Lets a wall close against
     # the page edge instead of running off it.
     virtual_band: float = 0.03
+    # Reconstruction window, in multiples of virtual_band. Must exceed 2 (the
+    # ring's own offset) or the wall closes on the domain edge instead of
+    # around the ring, and the traced contour is an open arc.
+    recon_margin: float = 5.0
     # A traced loop whose endpoints are further apart than this is NOT closed,
     # which fails Definition 1 (I) exactly as a failed triangulation does.
     closure_tol: float = 1.0e-6
