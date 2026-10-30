@@ -320,6 +320,7 @@ class PageLabeller:
         self.scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
         self.n_topological = 0
         self.n_fallback = 0
+        self.n_virtual = 0
 
     # -- geometry on a cylinder -------------------------------------------
 
@@ -351,6 +352,19 @@ class PageLabeller:
 
     def label(self, m: np.ndarray) -> int:
         """+1 start class, -1 rest, 0 undecided (caller falls back)."""
+        # The virtual band is "outside" BY CONSTRUCTION (IJRR Fig. 5): it is a
+        # fictitious obstacle that lets a wall close against the page edge, not
+        # a part of the page. Connectivity says nothing about it -- a band
+        # point at y < y_min sits on a valid continuation of the weld and so
+        # reaches the start region, which would label it +1 and destroy the
+        # very boundary it exists to provide. Measured: every disagreement
+        # between this rule and the metric one on EXP 2 was a band point
+        # (y in [-0.050, -0.030]), and labelling them +1 drove gamma from
+        # 14.8 to 192.4. See findings 21.
+        mm = np.asarray(m, dtype=float).reshape(1, 2)
+        if in_virtual_invalid(self.cfg, mm)[0]:
+            self.n_virtual += 1
+            return -1
         ny, nt = self.lab.shape
         i0 = int(np.argmin(np.abs(self.y_grid - float(m[0]))))
         j0 = int(np.argmin(np.abs(
