@@ -60,6 +60,7 @@ class WallModel:
     n_seed: int
     n_rest: int
     accuracy: float
+    gamma_capped: bool = False
     projection: str = "newton"
     newton_iters: int = 30
     newton_tol: float = 1.0e-10
@@ -112,14 +113,33 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
     gamma = wp.gamma_init
     svm = None
     acc = 0.0
-    while gamma <= wp.gamma_max:
+    capped = False
+    while True:
         svm = SVC(kernel="rbf", gamma=gamma, C=wp.svm_C)
         svm.fit(x, y)
         acc = float(svm.score(x, y))
         if acc >= 1.0:
             break
+        if gamma + wp.gamma_step > wp.gamma_max:
+            capped = True
+            break
         gamma += wp.gamma_step
-    return WallModel(svm=svm, gamma=gamma, scale=scale,
+    if capped:
+        # Accuracy < 1 means the wall does not separate its own training data,
+        # so it is not a separator at all. Say so loudly; Algorithm 3 will
+        # then report the facets it costs.
+        print(f"[stage1] WARNING gamma hit gamma_max={wp.gamma_max:g} with "
+              f"accuracy {acc:.4f} < 1: the wall does not separate its own "
+              f"training data (findings 29)")
+    elif gamma > getattr(wp, "gamma_warn", float("inf")):
+        # Separated, but with a kernel narrow enough that IJRR Fig. 7 would
+        # worry about the zero set breaking into islands. Closedness and the
+        # facet checks are what actually decide, so this is a flag, not a
+        # refusal.
+        print(f"[stage1] note gamma={gamma:.1f} exceeds gamma_warn="
+              f"{wp.gamma_warn:g} (accuracy {acc:.4f}); relying on closedness "
+              f"and facet checks")
+    return WallModel(svm=svm, gamma=gamma, scale=scale, gamma_capped=capped,
                      n_seed=len(seed_pts), n_rest=len(rest_pts), accuracy=acc,
                      projection=wp.projection, newton_iters=wp.newton_iters,
                      newton_tol=wp.newton_tol)
@@ -451,16 +471,46 @@ def sample_wall(
         # add-point (SDCL addToTraining): the point joins the class it is
         # CONNECTED to, with nearest-class as the fallback when nothing in
         # reach connects.
+        #
+        # These points sit ON the wall, i.e. in the corridor between the two
+        # classes, so they are the ones most likely to contradict the class
+        # they are not given -- and this loop runs up to max_rounds times per
+        # Algorithm 4 iteration, so an inconsistency here compounds fastest.
+        # A point closer than feedback_margin to the opposite class is dropped
+        # rather than allowed to make the training data inseparable below the
+        # fragmentation limit (findings 29).
         free_hits = np.asarray(free_hits, dtype=float)
         lb = labeller if cfg.wall.label_mode == LABEL_TOPOLOGICAL else None
+        margin = float(cfg.wall.feedback_margin)
+        n_added = n_skipped = 0
         for m in free_hits:
-            if assign_label(m, seed_pts, rest_pts, wall.scale, lb) > 0:
+            lab_m = assign_label(m, seed_pts, rest_pts, wall.scale, lb)
+            other = rest_pts if lab_m > 0 else seed_pts
+            if len(other):
+                d_other = float(np.min(np.linalg.norm(
+                    (other - m) * wall.scale, axis=1)))
+                if d_other < margin:
+                    n_skipped += 1
+                    continue
+            if lab_m > 0:
                 seed_pts = np.vstack([seed_pts, m])
             else:
                 rest_pts = np.vstack([rest_pts, m])
+            n_added += 1
+        if not n_added:
+            # Nothing can be learned from this round: every free hit would
+            # contradict the data. Stop and let Algorithm 3 report the facets
+            # this costs, instead of retraining into a fragmented wall.
+            if verbose:
+                print(f"[stage3] alg2 round {rounds}: all {n_skipped} free "
+                      f"hit(s) contradict the training data -> stop "
+                      f"retraining (gamma {wall.gamma:.2f})")
+            return wall, wall_pts, seed_pts, rest_pts, rounds
         if verbose:
-            print(f"[stage3] alg2 round {rounds}: {len(free_hits)} wall points "
-                  f"landed VALID -> retrain (gamma was {wall.gamma:.2f})")
+            print(f"[stage3] alg2 round {rounds}: {n_added} wall points landed "
+                  f"VALID -> retrain (gamma was {wall.gamma:.2f})"
+                  + (f", skipped {n_skipped} within the {margin:g} margin"
+                     if n_skipped else ""))
         wall = train_wall(cfg, seed_pts, rest_pts)
     return wall, np.zeros((0, 2)), seed_pts, rest_pts, rounds
 

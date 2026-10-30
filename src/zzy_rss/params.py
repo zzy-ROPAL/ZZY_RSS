@@ -277,7 +277,23 @@ class WallParams:
 
     gamma_init: float = 1.0        # IJRR: gamma = 1.0
     gamma_step: float = 0.1        # IJRR: delta-gamma = 0.1
-    gamma_max: float = 400.0       # guard against a runaway over-fit loop
+    # findings 29: invariant 14's "gamma ~ 40 fragments the manifold" is
+    # IJRR's number in IJRR's units, and it does NOT transfer here. This page
+    # is scaled to y in [0,1], theta/pi in [-1,1], where opposite-class points
+    # stand about 0.060 apart; an RBF needs gamma ~ 1/d^2 ~ 280 to resolve
+    # that, so gamma = 30 is a very WIDE kernel in these units, not a fine
+    # one. Capping at 30 made the hard pages unseparable (accuracy 0.96 < 1,
+    # i.e. the wall no longer separated its own training data) and no amount
+    # of Algorithm 4 feed-back could recover.
+    #
+    # Fragmentation is not policed by a gamma number anyway: reconstruct_wall
+    # requires the zero set to be a single CLOSED curve and check_polytope
+    # verifies every facet lies in C_obs, so a wall that has broken into
+    # islands fails closedness or fails facets. gamma stays a cost and
+    # robustness signal -- reported, and warned about past gamma_warn -- while
+    # the certificate rests on closedness and the facet checks.
+    gamma_max: float = 400.0
+    gamma_warn: float = 40.0       # report, do not refuse, above this
     svm_C: float = 10.0            # findings 20: 1e6 pins gamma at 1.0
 
     # Page-coordinate scaling applied before the SVM. Without this a single
@@ -301,6 +317,28 @@ class WallParams:
     # edge of the classifier's input space. Fix that disagreement before
     # judging the rule itself -- on method, SDCL's rule is the right one.
     label_mode: str = "metric"
+    # Which valid cells form the 'rest' class. "goal_only" is IJRR's split
+    # (start component vs goal component); "all_valid" also throws in
+    # components that reach neither, which can force the wall to thread
+    # between region k and a small neighbour -- gamma 2 -> 10 on EXP 3's
+    # partner page, with facets landing in valid cells (findings 29).
+    rest_mode: str = "goal_only"
+    # Algorithm 4 feeds a failed facet centre back into the training data. If
+    # that centre sits closer than this (in SCALED page units) to a point of
+    # the class it is NOT being given, the two classes stop being separable at
+    # any gamma below the fragmentation limit, and every later retrain makes it
+    # worse: measured accuracy decay 0.9993 -> 0.9796 with facets going
+    # 138/167 -> 128/165 (findings 29). Such a centre is routed to Algorithm
+    # 4's other branch -- shrink the facets -- instead of poisoning the fit.
+    # One cell diagonal is ~0.037 scaled units on a 61-cell page and the two
+    # classes start ~0.060 apart, so half a cell is the natural floor.
+    #
+    # Default 0 = off, which is IJRR Algorithm 2/4 as written. It is kept
+    # because it is what isolated the decay: with gamma capped, turning this on
+    # held the facets at ~150/170 instead of letting them fall to 128/165. With
+    # gamma free the classes separate and the guard is not needed, so it stays
+    # available as a diagnostic rather than running by default.
+    feedback_margin: float = 0.0
     label_search_cells: int = 3     # grid radius searched for a connectable cell
     label_motion_samples: int = 8   # samples per checkMotion segment
 

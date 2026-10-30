@@ -137,8 +137,37 @@ def region_points(pm: PageMap, lab: np.ndarray, k: int) -> np.ndarray:
     return np.column_stack([pm.y_grid[idx[:, 0]], pm.theta_grid[idx[:, 1]]])
 
 
-def other_valid_points(pm: PageMap, lab: np.ndarray, k: int) -> np.ndarray:
-    idx = np.argwhere(pm.valid_mask & (lab != k))
+def other_valid_points(pm: PageMap, lab: np.ndarray, k: int,
+                       regions: list | None = None,
+                       mode: str = "all_valid") -> np.ndarray:
+    """The 'rest' class: what the wall has to keep on the far side.
+
+    mode "all_valid" takes every valid cell outside region k. mode "goal_only"
+    takes only the cells of components that REACH THE GOAL, which is IJRR's
+    actual split -- Li trains the start component against the goal component,
+    not against every other vertex on the page.
+
+    The difference matters when a small component sits next to region k and
+    reaches neither start nor goal. Including it forces the wall to thread a
+    hair between the two, which drives gamma up and, worse, puts facets in
+    valid cells so Algorithm 3 rejects them. Enclosing it instead costs the
+    certificate nothing: it does not reach the goal, so a closed wall lying in
+    C_obs with region k AND that component inside still proves the goal
+    unreachable. Measured on EXP 3's partner page, where a 16-cell neighbour
+    of region 2 pushed the separating gamma from 2 to 10 (findings 29).
+
+    Falls back to "all_valid" on a page where nothing reaches the goal, since
+    the rest class would otherwise be only the virtual boundary ring.
+    """
+    mask = pm.valid_mask & (lab != k)
+    if mode == "goal_only" and regions:
+        goal_k = [r.index for r in regions if r.reaches_goal]
+        if goal_k:
+            gm = np.zeros_like(lab, dtype=bool)
+            for g in goal_k:
+                gm |= (lab == g)
+            mask = pm.valid_mask & gm & (lab != k)
+    idx = np.argwhere(mask)
     if idx.size == 0:
         return np.zeros((0, 2))
     return np.column_stack([pm.y_grid[idx[:, 0]], pm.theta_grid[idx[:, 1]]])
@@ -265,18 +294,43 @@ def find_inf_proof_region(
         if valid_centres:
             add = np.asarray(valid_centres, dtype=float).reshape(-1, 2)
             lb = labeller if cfg.wall.label_mode == LABEL_TOPOLOGICAL else None
+            margin = float(cfg.wall.feedback_margin)
+            n_fed = n_skipped = 0
             for m in add:
-                if assign_label(m, seed_pts, rest_pts, wall.scale, lb) > 0:
+                lab_m = assign_label(m, seed_pts, rest_pts, wall.scale, lb)
+                # Refuse a centre that contradicts the class it is NOT given:
+                # adding it would make the training data inseparable below the
+                # fragmentation limit, and Algorithm 1 would then either cap
+                # out (accuracy < 1, so the wall no longer separates its own
+                # data) or run gamma up until the zero set breaks into islands.
+                # IJRR Algorithm 4 has a branch for a facet that cannot be
+                # fixed by retraining -- shrink the facets -- so use it.
+                other = rest_pts if lab_m > 0 else seed_pts
+                if len(other):
+                    d_other = float(np.min(np.linalg.norm(
+                        (other - m) * wall.scale, axis=1)))
+                    if d_other < margin:
+                        n_skipped += 1
+                        continue
+                if lab_m > 0:
                     seed_pts = np.vstack([seed_pts, m])
                 else:
                     rest_pts = np.vstack([rest_pts, m])
-            wall = train_wall(cfg, seed_pts, rest_pts)
-            tc_ok = False
+                n_fed += 1
+            if n_fed:
+                wall = train_wall(cfg, seed_pts, rest_pts)
+                tc_ok = False
+                if verbose:
+                    print(f"[stage3] alg4 iter {it}: fed {n_fed} valid facet "
+                          f"centre(s) back into training"
+                          + (f", skipped {n_skipped} within the "
+                             f"{margin:g} margin" if n_skipped else "")
+                          + f" -> retrain (gamma={wall.gamma:.2f})")
+                continue
             if verbose:
-                print(f"[stage3] alg4 iter {it}: fed {len(add)} valid facet "
-                      f"centre(s) back into training -> retrain "
-                      f"(gamma={wall.gamma:.2f})")
-            continue
+                print(f"[stage3] alg4 iter {it}: all {n_skipped} failed facet "
+                      f"centre(s) contradict the training data -> shrinking "
+                      f"facets instead of poisoning the fit")
 
         cfg = dataclasses.replace(
             cfg,
@@ -294,7 +348,7 @@ def find_inf_proof_region(
 def run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
-    verbose: bool = True, alg4_iters: int = 4,
+    verbose: bool = True, alg4_iters: int = 4, seeds: list | None = None,
 ) -> ProofResult:
     """IJRR Algorithm 4 wrapped in the page/door flood fill.
 
@@ -314,16 +368,28 @@ def run_proof(
         labels[name] = lab
         regions_by_page[name] = regs
 
-    # Seed the queue with every region that touches the start of the weld.
-    queue = []
-    for name, regs in regions_by_page.items():
-        for r in regs:
-            if r.reaches_start:
-                queue.append((name, r.index))
+    # Seed the queue. By default: every region that touches the start of the
+    # weld, on every page -- which proves the STRONGER claim that no posture
+    # anywhere at y = 0 can finish. Pass `seeds` to prove the claim the task
+    # actually makes: the robot starts in ONE posture, so the proof starts in
+    # the one region holding it and reaches the other pages only through doors
+    # it can actually cross. That is the same claim EXP 2's single wall makes,
+    # and it does not ask the method to wall regions the robot can never be in.
+    if seeds is not None:
+        queue = [(n, k) for n, k in seeds if n in pages]
+        if verbose:
+            print(f"\n[stage4] seeding from the start posture's region(s) "
+                  f"only: {queue}")
+    else:
+        queue = []
+        for name, regs in regions_by_page.items():
+            for r in regs:
+                if r.reaches_start:
+                    queue.append((name, r.index))
     if not queue:
         return ProofResult(True, "no region touches the start; trivially infeasible")
 
-    if verbose:
+    if verbose and seeds is None:
         print(f"\n[stage4] seeding queue with {len(queue)} start-touching region(s): "
               f"{[(n, k) for n, k in queue]}")
 
@@ -356,11 +422,24 @@ def run_proof(
             )
 
         seed_pts = thin(pts, n_train_max, rng)
-        rest = other_valid_points(pm, lab, k)
-        ring = virtual_boundary_samples(cfg)
+        rest = other_valid_points(pm, lab, k, regions_by_page[name],
+                                  cfg.wall.rest_mode)
+        ring = virtual_boundary_samples(cfg, 80)
         rest_pts = np.vstack([thin(rest, n_train_max, rng), ring])
         inv = thin(invalid_points(pm), n_invalid_max, rng)
-        discs = sigma.get(name, [])
+        # Discharge the doors that fiber certification has proved impassable,
+        # exactly as the demo's prove() does. A disc exists to stop the wall
+        # routing through a door that MIGHT be passable (invariant 7); a door
+        # whose whole fiber is invalid carries no such risk, and leaving its
+        # disc in forces the wall to dodge an opening nothing can use. On this
+        # page that is 8 of 16 doors, and the detour is what drove gamma from
+        # 1.3 to 334 while prove() -- which does discharge them -- settled at
+        # 1.3 (findings 29).
+        discs, discharged = live_discs(cfg, arm, weld, scene, pm.signs,
+                                       sigma.get(name, []), verbose=False)
+        if verbose and discharged:
+            print(f"[stage5-fiber] {len(discharged)} disc(s) discharged on "
+                  f"{name}: their doors are certified blocked")
 
         # Teach the wall where the doors are, so it cannot route through one.
         tol_d = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],

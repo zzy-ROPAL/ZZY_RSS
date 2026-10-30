@@ -74,6 +74,7 @@ from zzy_rss.weld import WeldLine  # noqa: E402
 PAGES = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")
 START_PAGE, START_SIGNS = "++-", (1, 1, -1)
 PARTNER_PAGE = "-+-"                      # differs from START_PAGE in s2 only
+PARTNER_SIGNS = (-1, 1, -1)
 # Two 12 cm cubes stacked at x = 0.14 with a 16 cm vertical gap between them
 # (z = 0.38 and z = 0.66). findings 24: a SINGLE box cannot work here. Shrink
 # it and the arm threads through (feasible); grow it slightly and the weld
@@ -93,39 +94,57 @@ ZGAP = (BoxObstacle(center=(0.14, 0.0, 0.38),
                     half_extent=(0.06, 0.06, 0.06), label="high"))
 OBS_CLOSED = ZGAP
 
-# EXP 3: its own weld placement and its own obstacle (findings 26-28).
+# EXP 3: its own weld placement and its own obstacle (findings 26-29).
 #
-# Weld pushed to x = 0.32, z = 0.40, tilt 15 deg. Door position is set by
-# |W(y) - E*| = d_ew, so the placement -- not the obstacle -- decides where the
+# Weld at x = 0.32, z = 0.40, tilt 15 deg. Door position is set by
+# |W(y) - E*| = d_ew, so the PLACEMENT -- not the obstacle -- decides where the
 # pages touch. At the EXP 1/2 placement the doors sit at y = 0.088, hard
 # against the start, and ZGAP at y = 0 lies straight across their fiber: all 16
 # shut, witness collision:forearm/high, and EXP 3 collapsed into a copy of
 # EXP 2. Here the door lands at y = 0.336 -- a third of the way down the seam,
-# with 94.7% of its fiber valid, so an obstacle would have to block nearly the
-# whole elbow swing to close it.
+# with 94.7% of its fiber valid, so an obstacle has to block nearly the whole
+# elbow swing to close it.
 #
 # Obstacle: ZGAP's two-box idea slid to y = +0.10. The pair still blocks the
-# HIGH and LOW elbow arcs, so the elbow cannot cross from one side of the gap
-# to the other (connectivity failure, findings 24), but it now sits over the
-# GOAL half of the seam and clears the door's fiber cone entirely.
+# HIGH and LOW elbow arcs so the elbow cannot cross the gap (connectivity
+# failure, findings 24), but it now sits over the GOAL half of the seam and
+# clears the door's fiber cone entirely.
 #
-# Measured at res 61 / 91 / 121 (all three agree, invariant 8 / findings 24):
-#   no common curtain       (A)  curtain 0, pinch 10 / 15 / 20 cells -- the
-#                                margin GROWS with resolution, so it is a real
-#                                channel and not a grid artefact
-#   start cannot reach goal (B)  no spanning region on any page
-#   one door open           (C)  8 of 16 doors open, exactly ONE of them out of
-#                                the start region: y = 0.3356, theta = 0,
-#                                vanishing s2, fiber 94.7% valid
-#   partner is blocked too  (D)  it lands in region 2 of (-+-), which does not
-#                                reach the goal -- so the door is a real escape
-#                                route that does NOT rescue the robot
+# Measured at res 61 / 91 / 121 -- all three agree (invariant 8, findings 24):
+#   (A) no common curtain    curtain 0; pinch 10 / 15 / 20 cells. The channel
+#                            WIDENS with resolution, so it is a real gap and
+#                            not the grid noise that flipped every single-box
+#                            candidate in findings 24. Widest margin of the
+#                            ten scenes that qualified.
+#   (B) start cannot reach   no spanning region on any page.
+#       the goal
+#   (C) a door is open       8 of 16 doors open, and exactly ONE of them lies
+#                            in the start region: y = 0.3356, theta = 0,
+#                            vanishing s2, fiber 94.7% valid. Exactly one is
+#                            what makes the certificate genuinely two-page.
+#   (D) the partner is       it lands in region 2 of (-+-), which does not
+#       blocked too          reach the goal. Without this the door would
+#                            RESCUE the robot and the task would be feasible.
+#   theta seam clear         no valid cell touches theta = +/-pi on any page at
+#                            any of the three resolutions, so the flat
+#                            rectangle is exactly the cylinder (invariant 5).
+#
+# Of the ten scenes satisfying (A)-(D), this one's start page is by far the
+# cheapest to wall: 162/162 facets in 7 Algorithm 4 iterations at gamma 1.10.
+# The runner-up (weld x = 0.36, door y = 0.429, fiber 97.4%) looked better on
+# geometry and on initial separability, but its start-page wall drives gamma to
+# 229 and stalls near 250/274 facets (findings 29).
 EXP3_TILT = 15.0
 EXP3_WELD = dict(x=0.32, z=0.40)
 OBS_OPEN = (BoxObstacle(center=(0.20, 0.10, 0.34),
                         half_extent=(0.06, 0.08, 0.06), label="low"),
             BoxObstacle(center=(0.20, 0.10, 0.62),
                         half_extent=(0.06, 0.08, 0.06), label="high"))
+
+
+# Algorithm 4 feed-back labelling; set from --label-mode in main().
+LABEL_MODE = "metric"
+REST_MODE = "goal_only"
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
 
 
@@ -152,7 +171,9 @@ def make(tilt, obstacles, res, weld_kw=None):
         scene=SceneParams(gap_open=True, obstacles=tuple(obstacles or ())),
         sigma_policy=dataclasses.replace(base.sigma_policy,
                                          enable_fiber_certification=True),
-        wall=dataclasses.replace(base.wall, pd_mode="lipschitz"))
+        wall=dataclasses.replace(base.wall, pd_mode="lipschitz",
+                                 label_mode=LABEL_MODE,
+                                 rest_mode=REST_MODE))
     return cfg, SrsArm(cfg.arm), WeldLine(cfg.weld), Scene(cfg.arm, cfg.scene)
 
 
@@ -213,7 +234,7 @@ def bfs_path(pm, lab=None, region=None, to_goal=True):
     return np.array([[pm.y_grid[i], pm.theta_grid[j]] for i, j in out])
 
 
-def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6):
+def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6, verbose=False):
     sg = tuple(1 if c == "+" else -1 for c in pm.name)
     rng = np.random.default_rng(0)
     pts = region_points(pm, lab, k)
@@ -222,7 +243,9 @@ def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6):
                          pm.theta_grid[1] - pm.theta_grid[0]))
     se, re_ = sigma_disc_samples(live, pts, tol)
     seed = thin(pts, 450, rng)
-    rest = np.vstack([thin(other_valid_points(pm, lab, k), 450, rng),
+    _, regs_here = label_regions(cfg, pm)
+    rest = np.vstack([thin(other_valid_points(pm, lab, k, regs_here,
+                                              cfg.wall.rest_mode), 450, rng),
                       virtual_boundary_samples(cfg, 80)])
     if len(se):
         seed = np.vstack([seed, se])
@@ -234,7 +257,7 @@ def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6):
                             motion_samples=cfg.wall.label_motion_samples)
     poly, rep, w, it, rr = find_inf_proof_region(
         cfg, arm, weld, scene, sg, seed, rest, inv, live, max_iters=iters,
-        verbose=False, labeller=labeller)
+        verbose=verbose, labeller=labeller)
     return poly, rep, live, disch
 
 
@@ -364,23 +387,31 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
                       pageA=START_PAGE, pageB=PARTNER_PAGE):
     """How the infeasibility proof gets from one page to the next.
 
-    Left:   the start page. Wall #1 seals the start region everywhere EXCEPT
-            at the door -- a wall may not cross a door (invariant 7), because
-            a door is a real way out.
-    Middle: the way out, in the robot's own joint space. q1 and q3
-            counter-rotate; the tool never leaves the weld point. At the end
-            of the swing the s2 sign has flipped, so the SAME posture is now
-            read on the partner page.
-    Right:  the partner page, where the proof builds wall #2. Both walls
-            together are the certificate.
+    1. the start page. Wall #1 seals the start region everywhere EXCEPT at the
+       door -- a wall may not cross a door (invariant 7), because a door is a
+       real way out.
+    2. the robot at the door, in space. Nothing here moves: measured over the
+       whole sweep, every link point travels 0.000 mm and the tool 1e-13 mm.
+    3. where the motion actually is -- joint space. q1 and q3 each slide 180
+       deg in opposite directions. The product is a GIMBAL NULL-MOTION: with
+       q2 = 0 the q1 and q3 axes are collinear, so the two rotations cancel
+       exactly and the arm holds still while its coordinates travel. At
+       delta = 180 deg the s2 sign has flipped, so the identical physical
+       posture is now read on the partner page. Changing page costs no motion
+       at all -- only joint range, which is why the torch tilt (a joint-limit
+       effect) is what opens and closes these doors (findings 12, 30).
+    4. the partner page, where the proof builds wall #2. Both walls together
+       are the certificate.
     """
     from matplotlib.patches import ConnectionPatch
 
-    fig = plt.figure(figsize=(21, 7.4))
-    gs = fig.add_gridspec(1, 3, width_ratios=(1.0, 1.12, 1.0), wspace=0.26)
-    axA = fig.add_subplot(gs[0, 0])
+    fig = plt.figure(figsize=(22, 7.6))
+    gs = fig.add_gridspec(2, 3, width_ratios=(1.0, 1.12, 1.0),
+                          height_ratios=(1.25, 1.0), wspace=0.28, hspace=0.42)
+    axA = fig.add_subplot(gs[:, 0])
     ax3 = fig.add_subplot(gs[0, 1], projection="3d")
-    axB = fig.add_subplot(gs[0, 2])
+    axq = fig.add_subplot(gs[1, 1])
+    axB = fig.add_subplot(gs[:, 2])
     ay, at = door.anchor
 
     # ---- 1. start page, wall #1 -----------------------------------------
@@ -395,7 +426,7 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
                  ha="left", arrowprops=dict(arrowstyle="-|>", lw=2.0,
                                             color="#1d3557"))
 
-    # ---- 2. the self-motion fiber ---------------------------------------
+    # ---- 2. the robot at the door, in space: it does not move ------------
     p0, p1 = weld.p0, weld.p1
     ax3.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
              color="#e9c46a", lw=9, solid_capstyle="round", zorder=0)
@@ -406,15 +437,12 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
     n = len(fiber)
     step = max(1, n // 8)
     for idx in list(range(0, n, step)) + [n - 1]:
-        q = fiber[idx]
-        f = arm.frames(q)
+        f = arm.frames(fiber[idx])
         pts = [f["shoulder"], f["elbow"], f["wrist"], f["tool"]]
-        a = 0.22 + 0.78 * (idx / max(1, n - 1))
         for i, col in enumerate(("#1d3557", "#4895ef", "#e76f51")):
             u, v = pts[i], pts[i + 1]
             ax3.plot([u[0], v[0]], [u[1], v[1]], [u[2], v[2]], color=col,
-                     lw=5.5, alpha=a, solid_capstyle="round")
-        ax3.scatter(*pts[1], color="#222", s=18, alpha=a, depthshade=False)
+                     lw=5.5, alpha=0.9, solid_capstyle="round")
     tip = arm.fk(fiber[0])[0]
     ax3.scatter(*tip, color="#e63946", s=190, depthshade=False,
                 edgecolor="#111", zorder=10)
@@ -422,26 +450,61 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
     ax3.set_box_aspect((0.85, 0.84, 0.80))
     ax3.set_xlabel("x [m]"); ax3.set_ylabel("y [m]"); ax3.set_zlabel("z [m]")
     ax3.view_init(elev=20, azim=-72)
-    drift = ("" if drift_mm is None
-             else f"\ntool drift over the whole swing: {drift_mm:.1e} mm")
-    ax3.set_title(f"2.  crossing it: a SELF-MOTION at y={ay:.3f}\n"
-                  r"$q_1$ and $q_3$ counter-rotate, tool pinned to the weld"
-                  f"{drift}", fontsize=11)
+    drift = ("" if drift_mm is None else f"tool {drift_mm:.0e} mm")
+    ax3.set_title(f"2.  at the door, y={ay:.3f}: all {n} usable fiber postures "
+                  f"are drawn\nand they COINCIDE -- every link point moves "
+                  f"0.000 mm ({drift})", fontsize=10.5, pad=10)
 
-    # ---- 3. partner page, wall #2 ---------------------------------------
+    # ---- 3. where the motion is: joint space -----------------------------
+    # Re-derive the FULL sweep so the panel can show the part that joint
+    # limits exclude; `fiber` itself is already clipped to the usable part.
+    q0 = np.asarray(fiber)[0].copy()
+    full = []
+    for d_ in np.linspace(0.0, np.pi, 181):
+        qq = q0.copy(); qq[0] += d_; qq[2] -= d_
+        full.append(qq)
+    q = np.asarray(full)
+    dlt = np.degrees(np.linspace(0.0, np.pi, len(q)))
+    ok = np.array([arm.within_limits(qq) for qq in q])
+    axq.plot(dlt, np.degrees(q[:, 0]), lw=2.6, color="#1d3557", label=r"$q_1$")
+    axq.plot(dlt, np.degrees(q[:, 2]), lw=2.6, color="#e76f51", label=r"$q_3$")
+    axq.plot(dlt, np.degrees(q[:, 0] + q[:, 2]), lw=2.0, ls="--",
+             color="#2a9d8f", label=r"$q_1+q_3$  (constant)")
+    bad = ~ok
+    if bad.any():
+        axq.fill_between(dlt, -200, 200, where=bad, color="#e9c46a",
+                         alpha=0.55, step="mid",
+                         label="outside joint limits")
+    axq.set_xlim(0, 180); axq.set_ylim(-210, 210)
+    axq.set_xlabel(r"self-motion parameter $\delta$  [deg]")
+    axq.set_ylabel("joint angle [deg]")
+    n_bad = int((~ok).sum())
+    axq.set_title(r"3.  the motion is in JOINT space: $q_1$ and $q_3$ slide "
+                  r"and cancel ($q_1+q_3$ fixed)" "\n"
+                  + (r"the $s_2$ mirror at $\delta=180^\circ$ needs "
+                     r"$|q_1|=180^\circ$ > the $178.85^\circ$ limit: door open "
+                     r"only in the CONSERVATIVE sense"
+                     if n_bad else
+                     r"($q_2=0$ makes their axes collinear, so the arm holds "
+                     r"still; at $\delta=180^\circ$ the $s_2$ sign flips)"),
+                  fontsize=10.5)
+    axq.legend(fontsize=8, loc="upper center", ncol=2, framealpha=0.9)
+    axq.grid(alpha=0.25)
+
+    # ---- 4. partner page, wall #2 ---------------------------------------
     if pmB is not None:
         draw_page(axB, pmB, path=pathB, wall=wallB, discs=discsB,
-                  title=f"3.  page ({pageB}):  wall #2 seals it there too")
-        axB.annotate("arrive here\n(same posture,\nflipped $s_2$)",
-                     xy=(ay, at), xytext=(min(ay + 0.20, 0.52), at - 2.0),
+                  title=f"4.  page ({pageB}):  wall #2 seals it there too")
+        axB.annotate("arrive here\nsame posture in space,\nflipped $s_2$",
+                     xy=(ay, at), xytext=(min(ay + 0.20, 0.50), at - 2.1),
                      fontsize=9, fontweight="bold", color="#1d3557",
                      ha="left", arrowprops=dict(arrowstyle="-|>", lw=2.0,
                                                 color="#1d3557"))
-    for (src, dst) in ((axA, ax3), (ax3, axB)):
+    for (src, dst) in ((axA, ax3), (axq, axB)):
         try:
             con = ConnectionPatch(
-                xyA=(1.02, 0.5), coordsA=src.transAxes,
-                xyB=(-0.04, 0.5), coordsB=dst.transAxes,
+                xyA=(1.03, 0.5), coordsA=src.transAxes,
+                xyB=(-0.05, 0.5), coordsB=dst.transAxes,
                 arrowstyle="-|>", mutation_scale=26, lw=2.6, color="#1d3557")
             fig.add_artist(con)
         except Exception:                 # 3-D axes transforms can refuse
@@ -449,14 +512,18 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
 
     fig.suptitle(
         "HOW THE PROOF PASSES THROUGH THE DOOR\n"
-        "A door is a posture where a sign vanishes, so one robot "
-        "configuration is read by two pages at once. The wall may not cross "
-        "it, so the PROOF crosses it instead: it follows the robot's "
-        "self-motion onto the partner page and closes a second wall there. "
-        "Certificate = wall #1 + the door + wall #2.", fontsize=12)
+        "A door is a posture where a sign vanishes, so ONE robot configuration is "
+        "read by two pages at once.\nThe wall may not cross it, so the PROOF "
+        "crosses it instead: it follows the robot onto the partner page\nand "
+        "closes a second wall there.   Certificate = wall #1 + the door + wall #2.\n"
+        "A door counts as open when ANY point of its fiber is usable -- the "
+        "conservative direction, since assuming\na door might be passable can "
+        "only make the proof do more work, never less.",
+        fontsize=11.5, y=1.13)
     fig.savefig(out_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
     print(f"[fig] {out_path}")
+
 
 
 # -------------------------------------------------------------- video ----
@@ -505,9 +572,24 @@ def main():
     ap.add_argument("--iters", type=int, default=14)
     ap.add_argument("--only", default="123",
                     help="which experiments to run, e.g. 3 or 23 (default all)")
+    ap.add_argument("--rest-mode", default="goal_only",
+                    choices=("goal_only", "all_valid"),
+                    help="which valid cells the wall must keep outside: "
+                         "'goal_only' = IJRR's start-vs-goal split, "
+                         "'all_valid' = every other component too")
+    ap.add_argument("--label-mode", default="metric",
+                    choices=("metric", "topological"),
+                    help="how Algorithm 4 classes a fed-back facet centre: "
+                         "'metric' = nearest class (the IJRR heuristic), "
+                         "'topological' = which component it connects to")
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     want = args.only
+    global LABEL_MODE, REST_MODE
+    LABEL_MODE = args.label_mode
+    REST_MODE = args.rest_mode
+    print(f"[cfg] rest class: {REST_MODE}")
+    print(f"[cfg] Algorithm 4 feed-back labelling: {LABEL_MODE}")
     # keep the other experiments' entries when only some are re-run
     rpath = out / "three_report.json"
     report = json.loads(rpath.read_text()) if rpath.exists() else {}
@@ -626,19 +708,51 @@ def main():
         # the tool stands still on the weld; at delta = pi we are on the s2 mirror,
         # i.e. the partner page. This segment exists only in Q -- in Y+ it is ONE
         # point, which is exactly where the [IROS] bijection fails.
-        kB, fiber, drift = None, None, None
+        kB, fiber, drift, mirror = None, None, None, {}
         if door is not None:
             ay, at = door.anchor
             r0 = arm3.ik_branch(*weld3.pose(ay), at, START_SIGNS)
             if r0.ok:
-                fiber = []
+                # Only the part of the fiber the robot can actually occupy.
+                # The sweep is a GIMBAL NULL-MOTION -- q2 = 0 makes the q1 and
+                # q3 axes collinear, so the two rotations cancel and the arm
+                # does not move in space at all (measured: every link point
+                # 0.000 mm, tool 1e-13 mm). What varies along it is only the
+                # joint VALUES, so joint limits are the whole story, which is
+                # why the torch tilt is the door switch (findings 12, 30).
+                fiber, deltas = [], []
                 for dlt in np.linspace(0.0, np.pi, 26):
                     q = r0.q.copy(); q[0] += dlt; q[2] -= dlt
-                    fiber.append(q)
+                    if not arm3.within_limits(q):
+                        continue
+                    fiber.append(q); deltas.append(dlt)
                 tip0 = arm3.fk(r0.q)[0]
                 drift = max(float(np.linalg.norm(arm3.fk(q)[0] - tip0)) for q in fiber)
-                print(f"[3] door crossing: {len(fiber)}-step self-motion, "
-                      f"tool drift {drift*1e3:.2e} mm (it never leaves the weld)")
+                print(f"[3] door crossing: {len(fiber)}-step self-motion over "
+                      f"delta 0..{np.degrees(deltas[-1]):.1f} deg, tool drift "
+                      f"{drift*1e3:.2e} mm (the arm does not move at all)")
+
+                # The partner page's own representative of this same posture.
+                # s2 flips it by exactly pi in q1, and every door in this task
+                # sits at theta = 0 where q1 = 0, so the mirror lands at
+                # |q1| = 180 deg -- 1.15 deg outside the real +/-178.85 limit.
+                # The door is therefore OPEN only in the conservative sense
+                # invariant 2 demands (its fiber has valid points, so it MIGHT
+                # be passable and the proof must assume it is). Saying so is
+                # the difference between a sound certificate and an overclaim.
+                rp = arm3.ik_branch(*weld3.pose(ay), at, PARTNER_SIGNS)
+                mirror = {"ik_ok": bool(rp.ok),
+                          "within_limits": bool(rp.ok and arm3.within_limits(rp.q)),
+                          "q_deg": ([round(float(v), 3)
+                                     for v in np.degrees(rp.q)] if rp.ok else None),
+                          "delta_valid_max_deg": float(np.degrees(deltas[-1]))}
+                print(f"[3] partner-page representative of the SAME posture: "
+                      f"q1={mirror['q_deg'][0] if mirror['q_deg'] else float('nan'):+.2f} "
+                      f"deg, within_limits={mirror['within_limits']}"
+                      + ("" if mirror["within_limits"] else
+                         "  <- the s2 mirror is outside the q1 limit, so the "
+                         "door is open only in the CONSERVATIVE sense "
+                         "(invariant 2); the proof must still cross it"))
                 segs.append(dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3,
                                  pm=pmA, q_list=fiber, path=pathA,
                                  upto_list=[len(keepA) - 1] * len(fiber),
@@ -664,14 +778,18 @@ def main():
                                  f"EXP 3  now on page ({PARTNER_PAGE})   "
                                  f"still blocked, at y={p[k[i],0]:.2f}")))
 
+        print(f"[3] training wall #1 on ({START_PAGE}) region {kA} ...")
         polyA, repA, liveA, dischA = prove(cfg3, arm3, weld3, scene3, pmA, labA, kA,
-                                           sig3[START_PAGE], iters=args.iters)
+                                           sig3[START_PAGE], iters=args.iters,
+                                           verbose=True)
         print(f"[3] wall on ({START_PAGE}) region {kA}: {repA.n_passed}/{repA.n_facets} "
               f"facets, closed={polyA.closed}")
         walls3 = {START_PAGE: polyA.loops}
         if kB is not None:
+            print(f"[3] training wall #2 on ({PARTNER_PAGE}) region {kB} ...")
             polyB, repB, liveB, dischB = prove(cfg3, arm3, weld3, scene3, pmB, labB,
-                                               kB, sig3[PARTNER_PAGE], iters=args.iters)
+                                               kB, sig3[PARTNER_PAGE],
+                                               iters=args.iters, verbose=True)
             walls3[PARTNER_PAGE] = polyB.loops
             print(f"[3] wall on ({PARTNER_PAGE}) region {kB}: "
                   f"{repB.n_passed}/{repB.n_facets} facets, closed={polyB.closed}")
@@ -684,8 +802,14 @@ def main():
         # while a third region sits unvisited would be the same class of error as
         # calling this experiment "doors OPEN" while all 16 were shut.
         print("\n[3] --- verdict from flood.run_proof (all pages, all doors) ---")
+        # Same training budget as prove() above, so the verdict is about the
+        # same two walls the figure and the video show. run_proof's default of
+        # 900 seeds puts twice as many cells in the fit, and on this region
+        # that alone drives gamma from 1.3 to 323 (findings 29).
         res3 = run_proof(cfg3, arm3, weld3, scene3, pms3, sig3,
-                         verbose=True, alg4_iters=args.iters)
+                         verbose=True, alg4_iters=args.iters,
+                         seeds=[(START_PAGE, kA)],
+                         n_train_max=450, n_invalid_max=150)
         print(f"[3] run_proof: proven={res3.proven} -- {res3.reason}")
         print(f"[3] regions visited {len(res3.regions_visited)}, "
               f"walls in certificate {len(res3.certificate)}, "
@@ -726,6 +850,7 @@ def main():
             "facetsB": ([repB.n_passed, repB.n_facets] if repB else None),
             "closedB": (bool(polyB.closed) if polyB else None),
             "theta_seam_touching_pages": [n for n, _, _ in seam3],
+        "partner_representative": mirror,
             "verdict": {"proven": bool(res3.proven), "reason": res3.reason,
                         "regions_visited": len(res3.regions_visited),
                         "certificate": res3.certificate,
