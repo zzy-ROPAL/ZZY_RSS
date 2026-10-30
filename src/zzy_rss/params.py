@@ -289,6 +289,21 @@ class WallParams:
     net_keep_fraction: float = 0.5
     net_d_min: float = 0.02
 
+    # Class of a point Algorithms 2 and 4 feed back into the training set.
+    # "topological" is SDCL's rule (makeTrainingDataFromGraph): the point
+    # joins the class it is CONNECTED to through valid page space.
+    # "metric" is the nearest-class heuristic it replaces.
+    #
+    # Default is "metric" only because "topological" MEASURED WORSE on EXP 2
+    # (findings 21) and the cause is not yet settled: the labeller is
+    # cylinder-aware via label_regions, the SVM is trained on a flat
+    # rectangle, so a point connected across the theta seam lands at the far
+    # edge of the classifier's input space. Fix that disagreement before
+    # judging the rule itself -- on method, SDCL's rule is the right one.
+    label_mode: str = "metric"
+    label_search_cells: int = 3     # grid radius searched for a connectable cell
+    label_motion_samples: int = 8   # samples per checkMotion segment
+
     # Facet check (IJRR Algorithm 3).
     # Recursion cap on segment decomposition. The last facets to fail do so
     # at r ~ 2e-6 page units with pd ~ 4e-8, i.e. the wall grazes the boundary

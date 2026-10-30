@@ -47,7 +47,8 @@ from zzy_rss.params import (  # noqa: E402
     BoxObstacle, Config, PageMapParams, SceneParams, WeldParams,
 )
 from zzy_rss.scene import Scene  # noqa: E402
-from zzy_rss.wall import sigma_disc_samples, virtual_boundary_samples  # noqa: E402
+from zzy_rss.wall import (  # noqa: E402
+    PageLabeller, sigma_disc_samples, virtual_boundary_samples)  # noqa: E402
 from zzy_rss.weld import WeldLine  # noqa: E402
 
 PAGES = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")
@@ -123,9 +124,12 @@ def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6):
     if len(re_):
         rest = np.vstack([rest, re_])
     inv = thin(invalid_points(pm), 150, rng)
+    labeller = PageLabeller(cfg, arm, weld, scene, sg, pm, lab, k,
+                            search_cells=cfg.wall.label_search_cells,
+                            motion_samples=cfg.wall.label_motion_samples)
     poly, rep, w, it, rr = find_inf_proof_region(
         cfg, arm, weld, scene, sg, seed, rest, inv, live, max_iters=iters,
-        verbose=False)
+        verbose=False, labeller=labeller)
     return poly, rep, live, disch
 
 

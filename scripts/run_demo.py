@@ -48,7 +48,8 @@ from zzy_rss.params import (  # noqa: E402
     BoxObstacle, Config, PageMapParams, SceneParams, WeldParams,
 )
 from zzy_rss.scene import Scene  # noqa: E402
-from zzy_rss.wall import sigma_disc_samples, virtual_boundary_samples  # noqa: E402
+from zzy_rss.wall import (  # noqa: E402
+    PageLabeller, sigma_disc_samples, virtual_boundary_samples)  # noqa: E402
 from zzy_rss.weld import WeldLine  # noqa: E402
 
 PAGES = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")

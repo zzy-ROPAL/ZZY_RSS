@@ -41,6 +41,9 @@ from .weld import WeldLine
 PD_IJRR = "ijrr_local_opt"     # strict IJRR Eq. 3, lifted to Y+
 PD_LIPSCHITZ = "lipschitz"     # hardened: exact workspace PD + Lipschitz transfer
 
+LABEL_TOPOLOGICAL = "topological"   # SDCL rule: connectivity decides the class
+LABEL_METRIC = "metric"             # the nearest-class heuristic it replaces
+
 
 # --------------------------------------------------------------------------
 # IJRR 4.1 -- Algorithm 1, Train-Manifold
@@ -273,11 +276,135 @@ def _project_slsqp(wall: WallModel, start: np.ndarray) -> np.ndarray | None:
     return np.asarray(res.x, dtype=float)
 
 
+# --------------------------------------------------------------------------
+# Label assignment for fed-back points -- SDCL's rule, transplanted
+# --------------------------------------------------------------------------
+
+
+class PageLabeller:
+    """Class a fed-back point by CONNECTIVITY to the start region, not distance.
+
+    IJRR's released implementation (dyalab/SDCL, makeTrainingDataFromGraph)
+    never measures a distance to assign a label. A manifold point that turns
+    out valid is inserted into the roadmap by addToTraining, and on the next
+    round its class is read off the disjoint set: goal component -> -1,
+    otherwise +1. The label is a topological fact about the roadmap.
+
+    A page carries the same structure already -- label_regions gives the
+    connected components of the valid mask -- so the rule transplants
+    directly: a point joins the start class iff it is CONNECTED through valid
+    page space to the start region.
+
+    What this replaces is "whichever class has a nearer training point wins",
+    which is wrong exactly where it matters. Near the wall the two classes
+    interleave, so the nearest sample is a poor proxy for which side a point
+    is on, and a mislabelled point drags the retrained wall the wrong way.
+
+    `_connects` is the si_->checkMotion analogue: a straight page segment all
+    of whose samples must be valid. theta is periodic, so the segment takes
+    the short way around the cylinder.
+    """
+
+    def __init__(self, cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+                 signs: tuple, pm, lab: np.ndarray, k: int,
+                 search_cells: int = 3, motion_samples: int = 8):
+        self.cfg, self.arm, self.weld, self.scene = cfg, arm, weld, scene
+        self.signs = signs
+        self.y_grid = np.asarray(pm.y_grid, dtype=float)
+        self.theta_grid = np.asarray(pm.theta_grid, dtype=float)
+        self.lab = lab
+        self.k = int(k)
+        self.periodic = bool(getattr(cfg.pagemap, "theta_periodic", True))
+        self.search_cells = int(search_cells)
+        self.motion_samples = int(motion_samples)
+        self.scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+        self.n_topological = 0
+        self.n_fallback = 0
+
+    # -- geometry on a cylinder -------------------------------------------
+
+    def _dtheta(self, a: float, b: float) -> float:
+        d = b - a
+        if self.periodic:
+            d = (d + np.pi) % (2.0 * np.pi) - np.pi
+        return float(d)
+
+    def _cell_centre(self, i: int, j: int) -> np.ndarray:
+        return np.array([self.y_grid[i], self.theta_grid[j]])
+
+    def _connects(self, a: np.ndarray, b: np.ndarray) -> bool:
+        """Every sample strictly between a and b is valid (checkMotion)."""
+        dy = float(b[0] - a[0])
+        dt = self._dtheta(float(a[1]), float(b[1]))
+        for t in np.linspace(0.0, 1.0, self.motion_samples + 1)[1:]:
+            y = float(a[0]) + t * dy
+            th = float(a[1]) + t * dt
+            if self.periodic:
+                th = (th + np.pi) % (2.0 * np.pi) - np.pi
+            ok, _tag = classify(self.cfg, self.arm, self.weld, self.scene,
+                                y, th, self.signs)
+            if not ok:
+                return False
+        return True
+
+    # -- the rule ----------------------------------------------------------
+
+    def label(self, m: np.ndarray) -> int:
+        """+1 start class, -1 rest, 0 undecided (caller falls back)."""
+        ny, nt = self.lab.shape
+        i0 = int(np.argmin(np.abs(self.y_grid - float(m[0]))))
+        j0 = int(np.argmin(np.abs(
+            [self._dtheta(float(m[1]), t) for t in self.theta_grid])))
+
+        cand = []
+        r = self.search_cells
+        for di in range(-r, r + 1):
+            i = i0 + di
+            if not 0 <= i < ny:
+                continue
+            for dj in range(-r, r + 1):
+                j = j0 + dj
+                if self.periodic:
+                    j %= nt
+                elif not 0 <= j < nt:
+                    continue
+                if self.lab[i, j] <= 0:
+                    continue
+                c = self._cell_centre(i, j)
+                d = float(np.hypot((c[0] - m[0]) * self.scale[0],
+                                   self._dtheta(float(m[1]), float(c[1]))
+                                   * self.scale[1]))
+                cand.append((d, i, j))
+        cand.sort()
+
+        for _d, i, j in cand:
+            if self._connects(m, self._cell_centre(i, j)):
+                self.n_topological += 1
+                return 1 if int(self.lab[i, j]) == self.k else -1
+
+        self.n_fallback += 1
+        return 0
+
+
+def assign_label(m: np.ndarray, seed_pts: np.ndarray, rest_pts: np.ndarray,
+                 scale: np.ndarray, labeller=None) -> int:
+    """+1 seed / -1 rest: connectivity when available, nearest class otherwise."""
+    if labeller is not None:
+        lbl = labeller.label(m)
+        if lbl != 0:
+            return lbl
+    d_seed = (float(np.min(np.linalg.norm((seed_pts - m) * scale, axis=1)))
+              if len(seed_pts) else np.inf)
+    d_rest = (float(np.min(np.linalg.norm((rest_pts - m) * scale, axis=1)))
+              if len(rest_pts) else np.inf)
+    return 1 if d_seed <= d_rest else -1
+
+
 def sample_wall(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     wall: WallModel, invalid_pts: np.ndarray,
     seed_pts: np.ndarray, rest_pts: np.ndarray,
-    max_rounds: int = 8, verbose: bool = True,
+    max_rounds: int = 8, verbose: bool = True, labeller=None,
 ) -> tuple[WallModel, np.ndarray, np.ndarray, np.ndarray, int]:
     """IJRR Algorithm 2: project invalid seeds onto the wall and retrain if any
     projection lands in the valid region.
@@ -307,14 +434,13 @@ def sample_wall(
                       f"{len(wall_pts)} wall points, all invalid")
             return wall, wall_pts, seed_pts, rest_pts, rounds
 
-        # add-point: attach each violating point to the nearer class
+        # add-point (SDCL addToTraining): the point joins the class it is
+        # CONNECTED to, with nearest-class as the fallback when nothing in
+        # reach connects.
         free_hits = np.asarray(free_hits, dtype=float)
+        lb = labeller if cfg.wall.label_mode == LABEL_TOPOLOGICAL else None
         for m in free_hits:
-            d_seed = np.min(np.linalg.norm((seed_pts - m) * wall.scale, axis=1)) \
-                if len(seed_pts) else np.inf
-            d_rest = np.min(np.linalg.norm((rest_pts - m) * wall.scale, axis=1)) \
-                if len(rest_pts) else np.inf
-            if d_seed <= d_rest:
+            if assign_label(m, seed_pts, rest_pts, wall.scale, lb) > 0:
                 seed_pts = np.vstack([seed_pts, m])
             else:
                 rest_pts = np.vstack([rest_pts, m])

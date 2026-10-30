@@ -204,7 +204,7 @@ def live_discs(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
 def find_inf_proof_region(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     seed_pts: np.ndarray, rest_pts: np.ndarray, inv_pts: np.ndarray,
-    discs: list, max_iters: int = 4, verbose: bool = True,
+    discs: list, max_iters: int = 4, verbose: bool = True, labeller=None,
 ):
     """IJRR Algorithm 4: the loop that ties Algorithms 1-3 together.
 
@@ -236,7 +236,7 @@ def find_inf_proof_region(
     for it in range(1, max_iters + 1):
         wall, wall_pts, seed_pts, rest_pts, rounds = sample_wall(
             cfg, arm, weld, scene, signs, wall, inv_pts, seed_pts, rest_pts,
-            verbose=False,
+            verbose=False, labeller=labeller,
         )
         alg2_total += rounds
 
@@ -263,12 +263,9 @@ def find_inf_proof_region(
         valid_centres = [c for c, why in rep.failure_points if "VALID" in why]
         if valid_centres:
             add = np.asarray(valid_centres, dtype=float).reshape(-1, 2)
+            lb = labeller if cfg.wall.label_mode == LABEL_TOPOLOGICAL else None
             for m in add:
-                d_seed = (np.min(np.linalg.norm((seed_pts - m) * wall.scale, axis=1))
-                          if len(seed_pts) else np.inf)
-                d_rest = (np.min(np.linalg.norm((rest_pts - m) * wall.scale, axis=1))
-                          if len(rest_pts) else np.inf)
-                if d_seed <= d_rest:
+                if assign_label(m, seed_pts, rest_pts, wall.scale, lb) > 0:
                     seed_pts = np.vstack([seed_pts, m])
                 else:
                     rest_pts = np.vstack([rest_pts, m])
@@ -363,9 +360,14 @@ def run_proof(
         if len(r_extra):
             rest_pts = np.vstack([rest_pts, r_extra])
 
+        labeller = PageLabeller(
+            cfg, arm, weld, scene, pm.signs, pm, lab, k,
+            search_cells=cfg.wall.label_search_cells,
+            motion_samples=cfg.wall.label_motion_samples,
+        )
         poly, rep, wmodel, iters, rounds = find_inf_proof_region(
             cfg, arm, weld, scene, pm.signs, seed_pts, rest_pts, inv, discs,
-            verbose=verbose,
+            verbose=verbose, labeller=labeller,
         )
         if verbose:
             print(f"[stage3] region ({name}, {k}): alg4 done in {iters} iter(s); "
