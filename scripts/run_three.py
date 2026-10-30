@@ -42,6 +42,7 @@ import argparse
 import dataclasses
 import json
 import sys
+import time
 from collections import deque
 from pathlib import Path
 
@@ -234,6 +235,41 @@ def bfs_path(pm, lab=None, region=None, to_goal=True):
     return np.array([[pm.y_grid[i], pm.theta_grid[j]] for i, j in out])
 
 
+def bfs_route(pm, mask, start_ij, goal_ij=None):
+    """Shortest 4-connected route inside `mask`, in grid cells.
+
+    With goal_ij: the route to that cell. Without: the route to the cell of
+    largest y it can reach. Used to keep the animation CONTINUOUS -- the robot
+    has to walk to the door, not be cut to it.
+    """
+    ny, nt = mask.shape
+    if not mask[start_ij]:
+        return None
+    prev = {start_ij: None}
+    q = deque([start_ij])
+    best = start_ij
+    while q:
+        i, j = q.popleft()
+        if goal_ij is None and i > best[0]:
+            best = (i, j)
+        if goal_ij is not None and (i, j) == tuple(goal_ij):
+            best = (i, j)
+            break
+        for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ni, nj = i + di, (j + dj) % nt
+            if 0 <= ni < ny and mask[ni, nj] and (ni, nj) not in prev:
+                prev[(ni, nj)] = (i, j)
+                q.append((ni, nj))
+    if goal_ij is not None and tuple(goal_ij) not in prev:
+        return None
+    out, cur = [], best
+    while cur is not None:
+        out.append(cur)
+        cur = prev[cur]
+    out.reverse()
+    return np.array([[pm.y_grid[i], pm.theta_grid[j]] for i, j in out])
+
+
 def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6, verbose=False):
     sg = tuple(1 if c == "+" else -1 for c in pm.name)
     rng = np.random.default_rng(0)
@@ -417,9 +453,15 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
     # ---- 1. start page, wall #1 -----------------------------------------
     draw_page(axA, pmA, path=pathA, wall=wallA, discs=discsA,
               title=f"1.  page ({pageA}):  wall #1 seals the start region")
-    axA.scatter([0.0], [0.0], marker="*", s=260, color="#ffffff",
+    axA.scatter([0.0], [0.0], marker="*", s=300, color="#ffffff",
                 edgecolor="#111", zorder=9)
-    axA.text(0.03, 0.22, "start", fontsize=9, fontweight="bold")
+    axA.annotate("START\ny=0", xy=(0.0, 0.0), xytext=(0.07, 0.55),
+                 fontsize=9, fontweight="bold", color="#111",
+                 arrowprops=dict(arrowstyle="-|>", lw=1.8, color="#111"))
+    for ax_ in (axA,):
+        ax_.axvline(1.0, color="#111", lw=2.4, ls=":")
+        ax_.text(0.985, -2.55, "GOAL  y=1\n(end of the weld)", fontsize=9,
+                 fontweight="bold", ha="right", color="#111")
     axA.annotate("OPEN DOOR\nthe wall is forbidden\nto cross it",
                  xy=(ay, at), xytext=(min(ay + 0.20, 0.52), at + 1.45),
                  fontsize=9, fontweight="bold", color="#1d3557",
@@ -495,6 +537,9 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
     if pmB is not None:
         draw_page(axB, pmB, path=pathB, wall=wallB, discs=discsB,
                   title=f"4.  page ({pageB}):  wall #2 seals it there too")
+        axB.axvline(1.0, color="#111", lw=2.4, ls=":")
+        axB.text(0.985, -2.55, "GOAL  y=1\nunreachable here too", fontsize=9,
+                 fontweight="bold", ha="right", color="#111")
         axB.annotate("arrive here\nsame posture in space,\nflipped $s_2$",
                      xy=(ay, at), xytext=(min(ay + 0.20, 0.50), at - 2.1),
                      fontsize=9, fontweight="bold", color="#1d3557",
@@ -593,6 +638,14 @@ def main():
     # keep the other experiments' entries when only some are re-run
     rpath = out / "three_report.json"
     report = json.loads(rpath.read_text()) if rpath.exists() else {}
+    T0 = time.perf_counter()
+    timings = {}
+
+    def lap(label, since):
+        dt = time.perf_counter() - since
+        timings[label] = round(dt, 2)
+        print(f"[time] {label}: {dt:.1f} s")
+        return time.perf_counter()
 
     def pages_and_sigma(cfg, arm, weld, scene):
         pms = {n: build_page_map(cfg, arm, weld, scene,
@@ -612,6 +665,7 @@ def main():
     if "1" in want:
         # ------------------------------- EXP 1 -------------------------------
         print("\n=== EXP 1 : no obstacle -> the robot FINISHES the weld ===")
+        t_e = time.perf_counter()
         cfg, arm, weld, scene = make(0.0, None, args.res)
         pms, sig, no_, nb = pages_and_sigma(cfg, arm, weld, scene)
         pm = pms[START_PAGE]
@@ -629,12 +683,15 @@ def main():
                          f"EXP 1  no obstacle   weld "
                          f"{100*p[k[i],0]:.0f}% complete"))],
                out / "exp1_feasible.mp4")
+        lap("exp1_total", t_e)
         report["exp1"] = {"verdict": "feasible", "waypoints": len(path),
-                          "doors_open": no_, "doors_blocked": nb}
+                          "doors_open": no_, "doors_blocked": nb,
+                          "seconds": timings.get("exp1_total")}
 
     if "2" in want:
         # ------------------------------- EXP 2 -------------------------------
         print("\n=== EXP 2 : obstacle, doors CLOSED -> proof in ONE page ===")
+        t_e = time.perf_counter()
         cfg2, arm2, weld2, scene2 = make(0.0, OBS_CLOSED, args.res)
         pms2, sig2, no2, nb2 = pages_and_sigma(cfg2, arm2, weld2, scene2)
         pm2 = pms2[START_PAGE]
@@ -660,17 +717,21 @@ def main():
                          f"EXP 2  obstacle, doors CLOSED   "
                          f"blocked at y={p[k[i],0]:.2f}"))],
                out / "exp2_infeasible_onepage.mp4")
+        lap("exp2_total", t_e)
         report["exp2"] = {"verdict": "proven_one_page" if ok2 else "incomplete",
                           "facets": [rep2.n_passed, rep2.n_facets],
                           "closed": bool(poly2.closed),
                           "doors_open": no2, "doors_blocked": nb2,
-                          "discs_discharged": len(disch2)}
+                          "discs_discharged": len(disch2),
+                          "seconds": timings.get("exp2_total")}
 
     if "3" in want:
         # ------------------------------- EXP 3 -------------------------------
         print("\n=== EXP 3 : obstacle, door OPEN -> the proof CROSSES to a 2nd page ===")
+        t_e = t_s = time.perf_counter()
         cfg3, arm3, weld3, scene3 = make(EXP3_TILT, OBS_OPEN, args.res, EXP3_WELD)
         pms3, sig3, no3, nb3 = pages_and_sigma(cfg3, arm3, weld3, scene3)
+        t_s = lap("exp3_pages_and_doors", t_s)
         seam3 = theta_seam_check(pms3, " exp3")
         pmA, pmB = pms3[START_PAGE], pms3[PARTNER_PAGE]
         labA, regsA = label_regions(cfg3, pmA)
@@ -701,16 +762,35 @@ def main():
                      q_list=qA, path=pathA, upto_list=keepA,
                      discs=sig3[START_PAGE], page=START_PAGE,
                      caption=lambda i, p=pathA, k=keepA: (
-                         f"EXP 3  obstacle, door OPEN   "
-                         f"page ({START_PAGE}) blocked at y={p[k[i],0]:.2f}"))]
+                         f"1/4  page ({START_PAGE}): welding along the seam, "
+                         f"y={p[k[i],0]:.2f} -- stopped by wall #1"))]
 
         # the door crossing itself: a SELF-MOTION. q1 and q3 counter-rotate while
         # the tool stands still on the weld; at delta = pi we are on the s2 mirror,
         # i.e. the partner page. This segment exists only in Q -- in Y+ it is ONE
         # point, which is exactly where the [IROS] bijection fails.
-        kB, fiber, drift, mirror = None, None, None, {}
+        kB, fiber, drift, mirror, to_door = None, None, None, {}, None
         if door is not None:
             ay, at = door.anchor
+            # Walk from where the robot stalled to the door, INSIDE the start
+            # region, so the animation is continuous. Cutting straight to the
+            # door would hide a 336 deg joint-space / 311 mm tool jump.
+            di = int(np.argmin(np.abs(pmA.y_grid - ay)))
+            dj = int(np.argmin(np.abs(pmA.theta_grid - at)))
+            stall = (int(np.argmin(np.abs(pmA.y_grid - pathA[keepA[-1], 0]))),
+                     int(np.argmin(np.abs(pmA.theta_grid - pathA[keepA[-1], 1]))))
+            to_door = bfs_route(pmA, labA == kA, stall, (di, dj))
+            if to_door is not None:
+                qD, keepD = qs_from_path(arm3, weld3, to_door, START_SIGNS)
+                print(f"[3] walk to the door: {len(to_door)} cells inside "
+                      f"region {kA}, {len(qD)} with IK")
+                segs.append(dict(
+                    cfg=cfg3, arm=arm3, weld=weld3, scene=scene3, pm=pmA,
+                    q_list=qD, path=to_door, upto_list=keepD,
+                    discs=sig3[START_PAGE], page=START_PAGE,
+                    caption=lambda i, p=to_door, k=keepD: (
+                        f"2/4  page ({START_PAGE}): driving to the OPEN DOOR at "
+                        f"y={ay:.3f}  (now at y={p[k[i],0]:.2f})")))
             r0 = arm3.ik_branch(*weld3.pose(ay), at, START_SIGNS)
             if r0.ok:
                 # Only the part of the fiber the robot can actually occupy.
@@ -758,8 +838,9 @@ def main():
                                  upto_list=[len(keepA) - 1] * len(fiber),
                                  discs=sig3[START_PAGE], page=START_PAGE,
                                  caption=lambda i, n=len(fiber): (
-                                     "EXP 3  CROSSING THE DOOR: self-motion, "
-                                     f"tool fixed  ({100*i/(n-1):.0f}%)")))
+                                     "3/4  AT THE DOOR: gimbal self-motion -- "
+                                     "q1 and q3 slide, the arm does NOT move  "
+                                     f"({100*i/max(1,n-1):.0f}%)")))
             i = int(np.argmin(np.abs(pmB.y_grid - ay)))
             j = int(np.argmin(np.abs(pmB.theta_grid - at)))
             sub = labB[max(0, i-2):i+3, max(0, j-2):j+3]
@@ -768,20 +849,27 @@ def main():
 
         pathB, polyB, repB = None, None, None
         if kB is not None:
-            pathB = bfs_path(pmB, labB, kB, to_goal=False)
-            qB, keepB = qs_from_path(arm3, weld3, pathB,
-                                     tuple(1 if c == "+" else -1 for c in PARTNER_PAGE))
+            # Start the partner-page walk AT the door's own cell, so the two
+            # halves of the story meet at the same (y, theta).
+            bi = int(np.argmin(np.abs(pmB.y_grid - door.anchor[0])))
+            bj = int(np.argmin(np.abs(pmB.theta_grid - door.anchor[1])))
+            pathB = bfs_route(pmB, labB == kB, (bi, bj))
+            if pathB is None:
+                pathB = bfs_path(pmB, labB, kB, to_goal=False)
+            qB, keepB = qs_from_path(arm3, weld3, pathB, PARTNER_SIGNS)
             segs.append(dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3, pm=pmB,
                              q_list=qB, path=pathB, upto_list=keepB,
                              discs=sig3[PARTNER_PAGE], page=PARTNER_PAGE,
                              caption=lambda i, p=pathB, k=keepB: (
-                                 f"EXP 3  now on page ({PARTNER_PAGE})   "
-                                 f"still blocked, at y={p[k[i],0]:.2f}")))
+                                 f"4/4  page ({PARTNER_PAGE}): the proof must "
+                                 f"seal this page too -- y={p[k[i],0]:.2f}, "
+                                 f"wall #2")))
 
         print(f"[3] training wall #1 on ({START_PAGE}) region {kA} ...")
         polyA, repA, liveA, dischA = prove(cfg3, arm3, weld3, scene3, pmA, labA, kA,
                                            sig3[START_PAGE], iters=args.iters,
                                            verbose=True)
+        t_s = lap("exp3_wall1", t_s)
         print(f"[3] wall on ({START_PAGE}) region {kA}: {repA.n_passed}/{repA.n_facets} "
               f"facets, closed={polyA.closed}")
         walls3 = {START_PAGE: polyA.loops}
@@ -791,6 +879,7 @@ def main():
                                                kB, sig3[PARTNER_PAGE],
                                                iters=args.iters, verbose=True)
             walls3[PARTNER_PAGE] = polyB.loops
+            t_s = lap("exp3_wall2", t_s)
             print(f"[3] wall on ({PARTNER_PAGE}) region {kB}: "
                   f"{repB.n_passed}/{repB.n_facets} facets, closed={polyB.closed}")
 
@@ -822,6 +911,7 @@ def main():
         for d in res3.doors_followed:
             print(f"[3]   door followed: {d['from']} -> {d['to']} "
                   f"at y={d['y']:.4f}, th={d['theta']:+.4f}")
+        t_s = lap("exp3_run_proof", t_s)
         write_certificate(res3, sig3, out / "exp3_certificate.json")
 
         # the video panel draws seg["wall"], so hand each segment the wall of
@@ -834,12 +924,19 @@ def main():
              "EXPERIMENT 3 — obstacle, door OPEN: the proof CROSSES a door and "
              "EXPANDS to a second page", PAGE_NOTE, out / "exp3_pages.png")
         if door is not None and fiber is not None:
+            # draw the route the robot actually drives: along the seam until
+            # wall #1 stops it, then on to the door
+            routeA = (np.vstack([pathA, to_door]) if to_door is not None
+                      else pathA)
             fig_door_crossing(arm3, weld3, scene3, pmA, pmB if kB is not None else None,
                               polyA.loops, polyB.loops if polyB else None,
                               sig3[START_PAGE], sig3[PARTNER_PAGE], door, fiber,
-                              pathA, pathB, out / "exp3_door_crossing.png",
+                              routeA, pathB, out / "exp3_door_crossing.png",
                               drift_mm=drift * 1e3 if drift is not None else None)
+        t_s = lap("exp3_figures", t_s)
         render(segs, out / "exp3_infeasible_twopage.mp4")
+        t_s = lap("exp3_video", t_s)
+        lap("exp3_total", t_e)
         report["exp3"] = {
             "weld": dict(EXP3_WELD, tilt=EXP3_TILT),
             "doors_open": no3, "doors_blocked": nb3,
@@ -856,6 +953,10 @@ def main():
                         "certificate": res3.certificate,
                         "doors_followed": res3.doors_followed}}
 
+    report.setdefault("timings_seconds", {}).update(timings)
+    report["timings_seconds"]["script_total"] = round(time.perf_counter() - T0, 2)
+    print(f"\n[time] script total: {time.perf_counter() - T0:.1f} s "
+          f"(res {args.res}, iters {args.iters}, only {want})")
     rpath.write_text(json.dumps(report, indent=2, default=str))
     print(f"\n[out] {rpath}")
 
