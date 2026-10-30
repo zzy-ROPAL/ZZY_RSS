@@ -290,7 +290,10 @@ class WallParams:
     net_d_min: float = 0.02
 
     # Facet check (IJRR Algorithm 3).
-    facet_max_depth: int = 12      # recursion cap on segment decomposition
+    # Recursion cap on segment decomposition. The last facets to fail do so
+    # at r ~ 2e-6 page units with pd ~ 4e-8, i.e. the wall grazes the boundary
+    # of the invalid region; clearing those needs ~6 halvings beyond 12.
+    facet_max_depth: int = 20
     contour_level: float = 0.0
 
     # Virtual-boundary band thickness (IJRR Fig. 5). Lets a wall close against

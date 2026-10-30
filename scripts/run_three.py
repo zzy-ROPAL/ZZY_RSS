@@ -115,14 +115,14 @@ def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6):
     tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                          pm.theta_grid[1] - pm.theta_grid[0]))
     se, re_ = sigma_disc_samples(live, pts, tol)
-    seed = thin(pts, 350, rng)
-    rest = np.vstack([thin(other_valid_points(pm, lab, k), 350, rng),
-                      virtual_boundary_samples(cfg, 60)])
+    seed = thin(pts, 450, rng)
+    rest = np.vstack([thin(other_valid_points(pm, lab, k), 450, rng),
+                      virtual_boundary_samples(cfg, 80)])
     if len(se):
         seed = np.vstack([seed, se])
     if len(re_):
         rest = np.vstack([rest, re_])
-    inv = thin(invalid_points(pm), 100, rng)
+    inv = thin(invalid_points(pm), 150, rng)
     poly, rep, w, it, rr = find_inf_proof_region(
         cfg, arm, weld, scene, sg, seed, rest, inv, live, max_iters=iters,
         verbose=False)
@@ -293,7 +293,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--res", type=int, default=61)
     ap.add_argument("--out", default="out/three")
-    ap.add_argument("--iters", type=int, default=10)
+    ap.add_argument("--iters", type=int, default=14)
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     report = {}
