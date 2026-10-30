@@ -148,8 +148,28 @@ def three_box_slot():
                             half_extent=(0.035, h[1], g), label="back")))
 
 
+def fine_1box():
+    """Fine grid around the measured transition.
+
+    At res 61 the coarse winners all turned out SPANNING (connected after
+    all) or CURTAINED (unreachable), with the boundary between them lying
+    between h = (0.025, 0.025, 0.080) and h = (0.040, 0.040, 0.040) near
+    x = 0.14, z = 0.50-0.58. The usable scene, if it exists, is in that gap.
+    """
+    xs = (0.14, 0.16)
+    zs = (0.50, 0.52, 0.54, 0.56, 0.58)
+    hs = ((0.040, 0.040, 0.040), (0.045, 0.045, 0.045),
+          (0.050, 0.050, 0.050), (0.040, 0.070, 0.040),
+          (0.045, 0.070, 0.045), (0.040, 0.040, 0.060),
+          (0.045, 0.045, 0.060))
+    for x, z, h in itertools.product(xs, zs, hs):
+        yield (f"fine x{x:.2f} z{z:.2f} h{h}",
+               (BoxObstacle(center=(x, 0.0, z), half_extent=h, label="post"),))
+
+
 FAMILIES = {"1box": one_box, "2box-zgap": two_box_zgap,
-            "2box-ygap": two_box_ygap, "3box-slot": three_box_slot}
+            "2box-ygap": two_box_ygap, "3box-slot": three_box_slot,
+            "fine": fine_1box}
 
 
 def main():
@@ -216,4 +236,5 @@ def main():
     print(f"\n[json] {args.out}   total {time.time()-t0:.0f}s")
 
 
-main()
+if __name__ == "__main__":
+    main()
