@@ -199,7 +199,7 @@ class PageMapParams:
     # theta is an arm angle, so a page is a CYLINDER and the theta = -pi and
     # +pi columns are adjacent. Set False only when joint limits genuinely
     # bound theta, making the page a rectangle.
-    theta_periodic: bool = True
+    theta_periodic: bool = False   # flat rectangle; see findings 23
 
     # Numerical tolerance for the IK existence test (arccos argument).
     ik_tol: float = 1e-9
@@ -278,7 +278,7 @@ class WallParams:
     gamma_init: float = 1.0        # IJRR: gamma = 1.0
     gamma_step: float = 0.1        # IJRR: delta-gamma = 0.1
     gamma_max: float = 400.0       # guard against a runaway over-fit loop
-    svm_C: float = 1.0e6           # hard-margin limit: separation is required
+    svm_C: float = 10.0            # findings 20: 1e6 pins gamma at 1.0
 
     # Page-coordinate scaling applied before the SVM. Without this a single
     # gamma is meaningless across the y and theta axes.
@@ -305,10 +305,11 @@ class WallParams:
     label_motion_samples: int = 8   # samples per checkMotion segment
 
     # Facet check (IJRR Algorithm 3).
-    # Recursion cap on segment decomposition. The last facets to fail do so
-    # at r ~ 2e-6 page units with pd ~ 4e-8, i.e. the wall grazes the boundary
-    # of the invalid region; clearing those needs ~6 halvings beyond 12.
-    facet_max_depth: int = 20
+    # Recursion cap on segment decomposition. Measured (findings 19): 66 of
+    # 73 invalid facets pass at depth 0 and the worst needs 5.2 halvings, so
+    # 8 is ample. Do NOT raise this -- a failing facet costs ~2^depth leaf
+    # checks, and depth 20 is what made EXP 2 grind for 18 CPU minutes.
+    facet_max_depth: int = 8
     contour_level: float = 0.0
 
     # Virtual-boundary band thickness (IJRR Fig. 5). Lets a wall close against

@@ -27,6 +27,7 @@ from .pagemap import PageMap, page_name
 from .scene import Scene
 from .doors import door_fiber_validity
 from .wall import (
+    LABEL_TOPOLOGICAL, PageLabeller, assign_label,
     sigma_disc_samples,
     CheckReport, Polytope, check_polytope, reconstruct_wall, sample_wall,
     train_wall, virtual_boundary_samples,
