@@ -54,10 +54,25 @@ from zzy_rss.weld import WeldLine  # noqa: E402
 PAGES = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")
 START_PAGE, START_SIGNS = "++-", (1, 1, -1)
 PARTNER_PAGE = "-+-"                      # differs from START_PAGE in s2 only
-OBS_CLOSED = (BoxObstacle(center=(0.14, 0.0, 0.62),
-                          half_extent=(0.07, 0.07, 0.07), label="block"),)
-OBS_OPEN = (BoxObstacle(center=(0.26, 0.0, 0.58),
-                        half_extent=(0.06, 0.06, 0.06), label="block"),)
+# Two 12 cm cubes stacked at x = 0.14 with a 16 cm vertical gap between them
+# (z = 0.38 and z = 0.66). findings 24: a SINGLE box cannot work here. Shrink
+# it and the arm threads through (feasible); grow it slightly and the weld
+# point becomes unreachable, which is infeasible for a trivial reason and
+# never exercises the wall (findings 22). The gap between those outcomes is
+# narrower than the grid resolves -- every single-box candidate flipped
+# verdict between 61, 91 and 121 cells.
+#
+# Two boxes separate the two effects: they block the HIGH and LOW elbow arcs
+# and leave a channel between them, so every weld point stays reachable
+# (curtain 0) while the elbow cannot cross from one side of the gap to the
+# other. That is connectivity failure without reachability failure, the only
+# kind that needs a wall. Verified stable at 61/91/121 cells and both tilts.
+ZGAP = (BoxObstacle(center=(0.14, 0.0, 0.38),
+                    half_extent=(0.06, 0.06, 0.06), label="low"),
+        BoxObstacle(center=(0.14, 0.0, 0.66),
+                    half_extent=(0.06, 0.06, 0.06), label="high"))
+OBS_CLOSED = ZGAP
+OBS_OPEN = ZGAP
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
 
 
