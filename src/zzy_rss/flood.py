@@ -294,9 +294,19 @@ def find_inf_proof_region(
 def run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
-    verbose: bool = True,
+    verbose: bool = True, alg4_iters: int = 4,
 ) -> ProofResult:
-    """IJRR Algorithm 4 wrapped in the page/door flood fill."""
+    """IJRR Algorithm 4 wrapped in the page/door flood fill.
+
+    alg4_iters is the Algorithm 4 budget PER REGION. It is the knob that
+    decides whether a wall gets pushed deep enough into C_obs to pass
+    Algorithm 3, because a facet that fails is only fixed by feeding its
+    centre back into the training data and retraining (invariant 11 --
+    subdividing cannot help, pd is a property of where the wall sits). Four
+    is enough for the easy regions and not enough for the ones that graze a
+    valid band, so callers that want a verdict rather than a picture should
+    raise it.
+    """
     rng = np.random.default_rng(cfg.planner.rng_seed)
     labels, regions_by_page = {}, {}
     for name, pm in pages.items():
@@ -368,7 +378,7 @@ def run_proof(
         )
         poly, rep, wmodel, iters, rounds = find_inf_proof_region(
             cfg, arm, weld, scene, pm.signs, seed_pts, rest_pts, inv, discs,
-            verbose=verbose, labeller=labeller,
+            max_iters=alg4_iters, verbose=verbose, labeller=labeller,
         )
         if verbose:
             print(f"[stage3] region ({name}, {k}): alg4 done in {iters} iter(s); "

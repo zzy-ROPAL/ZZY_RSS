@@ -93,20 +93,39 @@ ZGAP = (BoxObstacle(center=(0.14, 0.0, 0.38),
                     half_extent=(0.06, 0.06, 0.06), label="high"))
 OBS_CLOSED = ZGAP
 
-# EXP 3: its own weld placement and its own obstacle (findings 26-27).
-# The seam is pushed out to x = 0.36, which moves the start page's doors from
-# y = 0.088 (hard against the start, fiber 88% valid) to y = 0.429 -- mid-seam,
-# fiber 97.4% valid. The obstacle is ZGAP's two-box idea slid to +y: the pair
-# still blocks the high and low elbow arcs, so the elbow cannot cross from one
-# side of the gap to the other, but it now sits over the GOAL half of the seam
-# and clears the door's fiber cone entirely. ZGAP centred at y = 0 was the only
-# reason every door shut.
-EXP3_TILT = 30.0
-EXP3_WELD = dict(x=0.36, z=0.46)
-OBS_OPEN = (BoxObstacle(center=(0.16, 0.06, 0.42),
-                        half_extent=(0.06, 0.12, 0.06), label="low"),
-            BoxObstacle(center=(0.16, 0.06, 0.70),
-                        half_extent=(0.06, 0.12, 0.06), label="high"))
+# EXP 3: its own weld placement and its own obstacle (findings 26-28).
+#
+# Weld pushed to x = 0.32, z = 0.40, tilt 15 deg. Door position is set by
+# |W(y) - E*| = d_ew, so the placement -- not the obstacle -- decides where the
+# pages touch. At the EXP 1/2 placement the doors sit at y = 0.088, hard
+# against the start, and ZGAP at y = 0 lies straight across their fiber: all 16
+# shut, witness collision:forearm/high, and EXP 3 collapsed into a copy of
+# EXP 2. Here the door lands at y = 0.336 -- a third of the way down the seam,
+# with 94.7% of its fiber valid, so an obstacle would have to block nearly the
+# whole elbow swing to close it.
+#
+# Obstacle: ZGAP's two-box idea slid to y = +0.10. The pair still blocks the
+# HIGH and LOW elbow arcs, so the elbow cannot cross from one side of the gap
+# to the other (connectivity failure, findings 24), but it now sits over the
+# GOAL half of the seam and clears the door's fiber cone entirely.
+#
+# Measured at res 61 / 91 / 121 (all three agree, invariant 8 / findings 24):
+#   no common curtain       (A)  curtain 0, pinch 10 / 15 / 20 cells -- the
+#                                margin GROWS with resolution, so it is a real
+#                                channel and not a grid artefact
+#   start cannot reach goal (B)  no spanning region on any page
+#   one door open           (C)  8 of 16 doors open, exactly ONE of them out of
+#                                the start region: y = 0.3356, theta = 0,
+#                                vanishing s2, fiber 94.7% valid
+#   partner is blocked too  (D)  it lands in region 2 of (-+-), which does not
+#                                reach the goal -- so the door is a real escape
+#                                route that does NOT rescue the robot
+EXP3_TILT = 15.0
+EXP3_WELD = dict(x=0.32, z=0.40)
+OBS_OPEN = (BoxObstacle(center=(0.20, 0.10, 0.34),
+                        half_extent=(0.06, 0.08, 0.06), label="low"),
+            BoxObstacle(center=(0.20, 0.10, 0.62),
+                        half_extent=(0.06, 0.08, 0.06), label="high"))
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
 
 
@@ -665,7 +684,8 @@ def main():
         # while a third region sits unvisited would be the same class of error as
         # calling this experiment "doors OPEN" while all 16 were shut.
         print("\n[3] --- verdict from flood.run_proof (all pages, all doors) ---")
-        res3 = run_proof(cfg3, arm3, weld3, scene3, pms3, sig3, verbose=True)
+        res3 = run_proof(cfg3, arm3, weld3, scene3, pms3, sig3,
+                         verbose=True, alg4_iters=args.iters)
         print(f"[3] run_proof: proven={res3.proven} -- {res3.reason}")
         print(f"[3] regions visited {len(res3.regions_visited)}, "
               f"walls in certificate {len(res3.certificate)}, "
