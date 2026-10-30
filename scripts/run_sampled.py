@@ -412,7 +412,11 @@ def main():
     ap.add_argument("--samples", type=int, default=1200)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--res", type=int, default=61)
-    ap.add_argument("--fig-res", dest="fig_res", type=int, default=241,
+    # Shading cost is res^2. At 241 it was ~17 s per page, 2.3 min of the
+    # 3 min EXP 1 run -- the picture cost more than the proof, which defeats
+    # the point of demoting the grid to a renderer. 121 is still twice as
+    # fine as the proof grid, which is all the marker fix needed.
+    ap.add_argument("--fig-res", dest="fig_res", type=int, default=121,
                     help="grid resolution used ONLY to shade the figure")
     ap.add_argument("--iters", type=int, default=14)
     ap.add_argument("--out", default="out/sampled")
