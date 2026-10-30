@@ -89,37 +89,105 @@ def analyse(tilt, obs, res):
                 pages=pages)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--res", type=int, default=31)
-    ap.add_argument("--out", default="out/search.json")
-    ap.add_argument("--tilts", default="0,30")
-    args = ap.parse_args()
-
+def one_box():
+    """One box: the family the current EXP 2 / EXP 3 obstacles come from."""
     xs = (0.10, 0.14, 0.18, 0.22, 0.26, 0.30)
     zs = (0.50, 0.54, 0.58, 0.62, 0.66)
     hs = ((0.030, 0.030, 0.030), (0.040, 0.040, 0.040),
           (0.050, 0.050, 0.050), (0.060, 0.060, 0.060),
           (0.035, 0.100, 0.035), (0.030, 0.180, 0.030),
           (0.025, 0.025, 0.080), (0.080, 0.030, 0.025))
+    for x, z, h in itertools.product(xs, zs, hs):
+        yield (f"1box x{x:.2f} z{z:.2f} h{h}",
+               (BoxObstacle(center=(x, 0.0, z), half_extent=h, label="block"),))
+
+
+def two_box_zgap():
+    """Two boxes stacked in z, leaving a GAP the elbow must thread.
+
+    theta swings the elbow around the shoulder-wrist axis, so blocking the
+    high and low elbow arcs while leaving a middle channel is the natural way
+    to split the valid set in theta WITHOUT making any weld point
+    unreachable -- condition (A) kept, condition (B) induced.
+    """
+    xs = (0.14, 0.20, 0.26)
+    z1s = (0.38, 0.44, 0.50)          # lower box
+    z2s = (0.60, 0.66, 0.72)          # upper box
+    hs = ((0.050, 0.120, 0.050), (0.040, 0.200, 0.040),
+          (0.060, 0.060, 0.060), (0.035, 0.260, 0.035))
+    for x, z1, z2, h in itertools.product(xs, z1s, z2s, hs):
+        yield (f"2box-zgap x{x:.2f} z{z1:.2f}/{z2:.2f} h{h}",
+               (BoxObstacle(center=(x, 0.0, z1), half_extent=h, label="low"),
+                BoxObstacle(center=(x, 0.0, z2), half_extent=h, label="high")))
+
+
+def two_box_ygap():
+    """Two boxes separated along y, pinching the middle of the weld."""
+    xs = (0.14, 0.20, 0.26)
+    zs = (0.52, 0.58, 0.64)
+    yoffs = (0.10, 0.16, 0.22)
+    hs = ((0.050, 0.060, 0.070), (0.040, 0.040, 0.120),
+          (0.060, 0.080, 0.050))
+    for x, z, yo, h in itertools.product(xs, zs, yoffs, hs):
+        yield (f"2box-ygap x{x:.2f} z{z:.2f} y+-{yo:.2f} h{h}",
+               (BoxObstacle(center=(x, -yo, z), half_extent=h, label="left"),
+                BoxObstacle(center=(x, +yo, z), half_extent=h, label="right")))
+
+
+def three_box_slot():
+    """Two in z plus one behind: a slot the arm must enter and cannot leave."""
+    xs = (0.16, 0.22)
+    gaps = (0.14, 0.20)
+    hs = ((0.045, 0.160, 0.045), (0.035, 0.240, 0.035))
+    for x, g, h in itertools.product(xs, gaps, hs):
+        zc = 0.55
+        yield (f"3box-slot x{x:.2f} gap{g:.2f} h{h}",
+               (BoxObstacle(center=(x, 0.0, zc - g), half_extent=h, label="low"),
+                BoxObstacle(center=(x, 0.0, zc + g), half_extent=h, label="high"),
+                BoxObstacle(center=(x + 0.12, 0.0, zc),
+                            half_extent=(0.035, h[1], g), label="back")))
+
+
+FAMILIES = {"1box": one_box, "2box-zgap": two_box_zgap,
+            "2box-ygap": two_box_ygap, "3box-slot": three_box_slot}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--res", type=int, default=31)
+    ap.add_argument("--out", default="out/search.json")
+    ap.add_argument("--tilts", default="0,30")
+    ap.add_argument("--families", default="2box-zgap,2box-ygap,3box-slot",
+                    help="comma-separated: " + ",".join(FAMILIES))
+    args = ap.parse_args()
+
     tilts = tuple(float(t) for t in args.tilts.split(","))
+    combos = []
+    for fam in args.families.split(","):
+        for tilt in tilts:
+            for tag, obs in FAMILIES[fam.strip()]():
+                combos.append((tilt, tag, obs))
 
     rows = []
     t0 = time.time()
-    combos = list(itertools.product(tilts, xs, zs, hs))
-    print(f"{len(combos)} candidates at res {args.res}", flush=True)
-    for i, (tilt, x, z, h) in enumerate(combos):
-        obs = (BoxObstacle(center=(x, 0.0, z), half_extent=h, label="block"),)
+    print(f"{len(combos)} candidates at res {args.res} "
+          f"(families: {args.families})", flush=True)
+    for i, (tilt, tag, obs) in enumerate(combos):
+        x = z = 0.0
+        h = []
         try:
             r = analyse(tilt, obs, args.res)
         except Exception as exc:                      # keep the sweep going
             print(f"   [{i}] FAILED {exc}", flush=True)
             continue
-        r.update(tilt=tilt, x=x, z=z, h=list(h))
+        r.update(tilt=tilt, tag=tag,
+                 obstacles=[dict(center=list(b.center),
+                                 half_extent=list(b.half_extent),
+                                 label=b.label) for b in obs])
         rows.append(r)
         good = (r["curtain_cols"] == 0 and not r["start_goal_same"])
         if good:
-            print(f"   *** tilt {tilt:4.0f} x {x:.2f} z {z:.2f} h {h}  "
+            print(f"   *** tilt {tilt:4.0f}  {tag}  "
                   f"curtain {r['curtain_cols']}  pinch {r['pinch']}/{args.res}  "
                   f"mean valid {100*r['mean_valid']:.1f}%", flush=True)
         if i % 40 == 0:
@@ -133,11 +201,18 @@ def main():
     keep = [r for r in rows if r["curtain_cols"] == 0 and not r["start_goal_same"]]
     print(f"\n{len(keep)} candidate(s) are infeasible by CONNECTIVITY "
           f"(no curtain, no spanning region) out of {len(rows)}")
-    for r in keep[:15]:
-        print(f"   tilt {r['tilt']:4.0f}  x {r['x']:.2f}  z {r['z']:.2f}  "
-              f"h {tuple(r['h'])}  pinch {r['pinch']}/{args.res}  "
+    for r in keep[:20]:
+        print(f"   tilt {r['tilt']:4.0f}  {r['tag']:<46}  "
+              f"pinch {r['pinch']}/{args.res}  "
               f"start-pages {r['start_pages']}/8  "
               f"mean valid {100*r['mean_valid']:.1f}%")
+    if not keep:
+        near = [r for r in rows if r["curtain_cols"] <= 2
+                and not r["start_goal_same"]][:10]
+        print("   nearest misses (small curtain, still disconnected):")
+        for r in near:
+            print(f"   tilt {r['tilt']:4.0f}  {r['tag']:<46}  "
+                  f"curtain {r['curtain_cols']}  pinch {r['pinch']}")
     print(f"\n[json] {args.out}   total {time.time()-t0:.0f}s")
 
 
