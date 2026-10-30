@@ -48,6 +48,21 @@ EXP 3 的判定由 `flood.run_proof` 给出,它走完整的页/门图:
 `proven=True`,访问 2 个区域、证书含 2 面墙(276/276 与 281/281)、走过 2 道门
 (`++-/1 → -+-/2`,再从伙伴页走回来)。手搭的两面墙只负责出图与视频。
 
+**耗时(res 61, iters 14, 4 核;`three_report.json` 的 `timings_seconds`)**:
+三个案例合计 **118 s**。EXP 1 21.4 s,EXP 2 20.2 s,EXP 3 **76.7 s**,其中
+
+| EXP 3 阶段 | s |
+|---|---|
+| 八页图 + 16 道门的纤维 | 7.3 |
+| 墙 #1(`++-`,162/162) | 8.3 |
+| 墙 #2(`-+-`,163/163) | **3.0** |
+| `run_proof`(真正的判定,两页) | 11.4 |
+| 出图 | 2.0 |
+| **出视频** | **44.7** |
+
+**证明本身只要 ~30 s,一半以上的时间花在渲染视频上。**
+§29 的四个修复不只是让墙闭合,也把墙 #2 从 **12 CPU 分钟不收敛**降到 **3.0 s**。
+
 **采样流水线(`scripts/run_sampled.py`,可扩展性路线,尚未可用)**
 
 PRM 驱动证明,网格只画图(§25)。EXP 1 正确判可行;EXP 2 正确判不可行,
@@ -105,7 +120,7 @@ python3 scripts/run_experiment.py --res 81 --fiber         # 完整泛洪证明�
 python3 scripts/run_e4.py --res 41                         # E4 强制变号搜索(未成功)
 
 python3 scripts/run_three.py --res 61 --iters 14 --out out/three    # 网格流水线 EXP1/2/3
-python3 scripts/run_three.py --only 3 --out out/three               # 只跑 EXP 3(约 9 分钟)
+python3 scripts/run_three.py --only 3 --out out/three               # 只跑 EXP 3(77 s)
 python3 scripts/search_scene.py --mode welds --res 61 --jobs 4      # 焊缝摆放的"门景观"
 python3 scripts/run_sampled.py --samples 1500 --only exp2           # 采样流水线
 python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
