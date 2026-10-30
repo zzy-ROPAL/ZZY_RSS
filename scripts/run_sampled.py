@@ -307,8 +307,13 @@ def fig8_sampled(cfg, data, title, out_path, res_note):
                      fontweight="bold" if name == START_PAGE else "normal")
         ax.set_xlabel("y  (weld coordinate)")
         ax.set_ylabel(r"$\theta$  (arm angle)")
-        ax.set_xlim(0, 1)
-        ax.set_ylim(pm.theta_grid[0], pm.theta_grid[-1])
+        # The wall runs out into the virtual band beyond the page, and so
+        # do some failing facets. Clamping to [0, 1] hid 19 of 20 of them.
+        pad = 3.0 * cfg.wall.virtual_band
+        ax.set_xlim(-pad, 1 + pad)
+        ax.set_ylim(pm.theta_grid[0] - pad, pm.theta_grid[-1] + pad)
+        ax.axvline(0.0, color="0.45", lw=0.8, ls=":")
+        ax.axvline(1.0, color="0.45", lw=0.8, ls=":")
 
     handles = [
         Line2D([], [], marker="D", color="#6a1b9a", ls="none", ms=9,
@@ -349,11 +354,13 @@ def run_case(tag, tilt, obstacles, args, out):
     for name in PAGES:
         signs = tuple(1 if c == "+" else -1 for c in name)
         verts, obs = sample_page(cfg, arm, weld, scene, signs, args.samples, rng)
+        # Exact y=0 / y=1 configurations are computed for the FIGURE only.
+        # Inserting them as roadmap vertices put training points exactly on
+        # the page boundary, where the IJRR Fig. 5 virtual band operates, and
+        # the wall could then no longer close against that band: 111/122
+        # closed became 132/152 OPEN. Cosmetic gain, broken proof -- so the
+        # roadmap is left alone.
         ends = exact_endpoints(cfg, arm, weld, scene, signs)
-        n_start = len(ends["start"])
-        anchors = np.vstack([ends["start"], ends["goal"]])
-        if len(anchors):
-            verts = np.vstack([anchors, verts]) if len(verts) else anchors
         lab, ncomp, edges = build_roadmap(cfg, arm, weld, scene, signs, verts,
                                           k=args.k)
         ing = goal_classes(verts, lab)
@@ -371,7 +378,6 @@ def run_case(tag, tilt, obstacles, args, out):
         data[name] = dict(verts=verts, obs=obs, lab=lab, ncomp=ncomp,
                           in_goal=ing, pm=pm, shade=shade, start_theta=0.0,
                           start_xy=None, edges=edges,
-                          n_anchor_start=n_start, n_anchor=len(anchors),
                           goal_pts=ends["goal"], bad=[])
         print(f"  page {name}: {len(verts)} valid / {args.samples} sampled, "
               f"{ncomp} component(s), {int(ing.sum())} reach the goal",
@@ -392,13 +398,11 @@ def run_case(tag, tilt, obstacles, args, out):
     # start vertex: page START_PAGE, y = 0
     sp = data[START_PAGE]
     sv = sp["verts"]
-    ns = sp["n_anchor_start"]
-    if ns:                              # exact y = 0 anchors come first
-        anch = sv[:ns]
-        start_xy = anch[int(np.argmin(np.abs(anch[:, 1] + 1.57)))]
+    near = sv[sv[:, 0] < 0.08] if len(sv) else np.zeros((0, 2))
+    if len(near):
+        start_xy = near[int(np.argmin(np.abs(near[:, 1] + 1.57)))]
     else:
-        near = sv[sv[:, 0] < 0.08] if len(sv) else np.zeros((0, 2))
-        start_xy = near[0] if len(near) else np.array([0.0, 0.0])
+        start_xy = np.array([0.0, 0.0])
     start_theta = float(start_xy[1])
     sp["start_theta"] = start_theta
     sp["start_xy"] = (float(start_xy[0]), float(start_xy[1]))
