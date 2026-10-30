@@ -95,6 +95,36 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
 # --------------------------------------------------------------------------
 
 
+def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
+                       n_ring: int = 12) -> tuple:
+    """Training points that stop the wall routing THROUGH a door.
+
+    The SVM separates two classes of valid points and knows nothing about
+    Sigma, so its zero set happily runs straight through a door disc -- in a
+    first run on the real arm, 18 of 182 facets failed for exactly this. A
+    facet may not cross a disc (a path would hop pages inside it and bypass
+    the wall), and shrinking facets cannot fix that, because the wall itself
+    is in the wrong place.
+
+    A door belonging to this region must end up INSIDE the wall, since the
+    flood fill follows it from here. So each such disc contributes its centre
+    and a ring of points to the SEED class; discs belonging elsewhere go to
+    the REST class. Returns (seed_extra, rest_extra).
+    """
+    seed_extra, rest_extra = [], []
+    for d in discs:
+        c = np.array([d.y, d.theta])
+        pts = [c]
+        for a in np.linspace(0.0, 2.0 * np.pi, n_ring, endpoint=False):
+            pts.append(c + d.radius * np.array([np.cos(a), np.sin(a)]))
+        near = (len(region_pts) > 0
+                and float(np.min(np.linalg.norm(region_pts - c, axis=1)))
+                <= max(tol, d.radius))
+        (seed_extra if near else rest_extra).extend(pts)
+    return (np.asarray(seed_extra, dtype=float).reshape(-1, 2),
+            np.asarray(rest_extra, dtype=float).reshape(-1, 2))
+
+
 def virtual_boundary_samples(cfg: Config, n_per_edge: int = 120) -> np.ndarray:
     """Virtual-VALID ring outside the page, sampled as training data.
 
@@ -143,9 +173,18 @@ def project_to_wall(wall: WallModel, start: np.ndarray) -> np.ndarray | None:
     def grad(z):
         return 2.0 * (z - start)
 
-    cons = {"type": "eq", "fun": lambda z: float(wall.decision(z)[0])}
-    res = minimize(obj, start.copy(), jac=grad, constraints=[cons],
-                   method="SLSQP", options={"maxiter": 60, "ftol": 1e-10})
+    def con(z):
+        # SLSQP can step to a non-finite iterate; sklearn then raises on NaN.
+        # Returning a large residual pushes the line search back instead.
+        if not np.all(np.isfinite(z)):
+            return 1.0e3
+        return float(wall.decision(np.asarray(z, dtype=float))[0])
+
+    res = minimize(obj, start.copy(), jac=grad, constraints=[{"type": "eq",
+                   "fun": con}], method="SLSQP",
+                   options={"maxiter": 60, "ftol": 1e-10})
+    if not np.all(np.isfinite(res.x)):
+        return None
     if not res.success:
         return None
     if abs(float(wall.decision(res.x)[0])) > 1e-5:
@@ -220,7 +259,7 @@ class Polytope:
     note: str = ""
 
 
-def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 401) -> Polytope:
+def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polytope:
     """Trace the wall's zero level set into ordered closed polylines.
 
     At d = 2 the manifold is 1-D, so IJRR's tangential Delaunay complex
@@ -291,12 +330,14 @@ class FacetResult:
 
 
 def segment_hits_disc(a: np.ndarray, b: np.ndarray, disc) -> bool:
-    """Does segment [a, b] come within disc.radius of the disc centre?"""
-    c = np.array([disc.y, disc.theta])
-    d = b - a
+    """Does segment [a, b] enter the disc? Elliptical: y and theta differ in units."""
+    sc = np.array([1.0 / max(disc.radius, 1e-12), 1.0 / max(disc.r_theta, 1e-12)])
+    c = np.array([disc.y, disc.theta]) * sc
+    aa, bb = a * sc, b * sc
+    d = bb - aa
     denom = float(np.dot(d, d))
-    t = 0.0 if denom < 1e-18 else float(np.clip(np.dot(c - a, d) / denom, 0.0, 1.0))
-    return bool(np.linalg.norm(a + t * d - c) <= disc.radius)
+    t = 0.0 if denom < 1e-18 else float(np.clip(np.dot(c - aa, d) / denom, 0.0, 1.0))
+    return bool(np.linalg.norm(aa + t * d - c) <= 1.0)
 
 
 def y_plus_penetration(

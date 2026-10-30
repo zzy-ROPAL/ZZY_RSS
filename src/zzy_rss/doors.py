@@ -50,7 +50,8 @@ class SigmaDisc:
     kind: str
     y: float
     theta: float
-    radius: float
+    radius: float          # in y units; theta uses radius_theta
+    radius_theta: float = 0.0
     # Which sign indices (0 -> s2, 1 -> s4, 2 -> s6) vanish inside this disc.
     vanishing: frozenset = field(default_factory=frozenset)
     pages: tuple = ()
@@ -72,8 +73,21 @@ class SigmaDisc:
             return self.exact_y, self.exact_theta
         return self.y, self.theta
 
+    @property
+    def r_theta(self) -> float:
+        return self.radius_theta if self.radius_theta > 0.0 else self.radius
+
     def contains(self, y: float, theta: float) -> bool:
-        return (y - self.y) ** 2 + (theta - self.theta) ** 2 <= self.radius ** 2
+        """Elliptical, because y and theta are in different units.
+
+        A circular disc using hypot(dy, dtheta) was 0.318 wide on a 51x51 grid
+        -- a third of the page -- because dtheta (0.126) dwarfs dy (0.02).
+        Walls could not route around it and 38 facets failed on that alone.
+        The analytic door location is exact, so the cover only needs to be a
+        few cells in each coordinate.
+        """
+        return (((y - self.y) / self.radius) ** 2
+                + ((theta - self.theta) / self.r_theta) ** 2) <= 1.0
 
 
 SIGN_INDEX = {0: "s2", 1: "s4", 2: "s6"}
@@ -87,7 +101,15 @@ def _cell_diag(pm: PageMap) -> float:
 
 
 def _disc_radius(cfg: Config, pm: PageMap) -> float:
-    return max(cfg.sigma.disc_radius_floor, cfg.sigma.disc_radius_scale * _cell_diag(pm))
+    """Cover radius in the y coordinate."""
+    dy = float(pm.y_grid[1] - pm.y_grid[0])
+    return max(cfg.sigma.disc_radius_floor, cfg.sigma.disc_radius_scale * dy)
+
+
+def _disc_radius_theta(cfg: Config, pm: PageMap) -> float:
+    """Cover radius in theta. Separate because the units differ by ~6x."""
+    dt = float(pm.theta_grid[1] - pm.theta_grid[0])
+    return max(cfg.sigma.disc_radius_floor, cfg.sigma.disc_radius_scale * dt)
 
 
 def _quadratic_roots_on_unit(a: float, b: float, c: float, tol: float = 1e-12) -> list:
@@ -153,6 +175,7 @@ def find_interior_doors_analytic(
     p = arm.p
     e_z = np.array([0.0, 0.0, 1.0])
     radius = _disc_radius(cfg, pm)
+    r_th = _disc_radius_theta(cfg, pm)
     p0 = np.asarray(cfg.weld.p0, dtype=float)
     p1 = np.asarray(cfg.weld.p1, dtype=float)
     rot = weld.rot
@@ -195,6 +218,7 @@ def find_interior_doors_analytic(
                 y=y,
                 theta=theta,
                 radius=radius,
+                radius_theta=r_th,
                 vanishing=frozenset({sign_index}),
                 exact_y=y,
                 exact_theta=theta,
@@ -215,6 +239,7 @@ def find_interior_doors_numeric(
     joint = JOINT_OF_SIGN[sign_index]
     field_map = {1: pm.q2, 3: pm.q4, 5: pm.q6}[joint]
     radius = _disc_radius(cfg, pm)
+    r_th = _disc_radius_theta(cfg, pm)
     tol = cfg.sigma.touch_tol
 
     mag = np.abs(field_map)
@@ -234,6 +259,7 @@ def find_interior_doors_numeric(
                     y=float(pm.y_grid[i]),
                     theta=float(pm.theta_grid[j]),
                     radius=radius,
+                radius_theta=r_th,
                     vanishing=frozenset({sign_index}),
                     detail=f"q{joint + 1}~0 local minimum on page {pm.name}",
                 )
@@ -263,6 +289,7 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
     configuration. The disc cover therefore spans the full theta range there.
     """
     radius = _disc_radius(cfg, pm)
+    r_th = _disc_radius_theta(cfg, pm)
     found: list[SigmaDisc] = []
 
     if arm is not None and weld is not None:
@@ -291,6 +318,7 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
                             y=float(min(max(y, 0.0), 1.0)),
                             theta=float(theta),
                             radius=radius,
+                radius_theta=r_th,
                             vanishing=frozenset({1}),
                             detail=f"q4 fold ({what}, analytic) on page {pm.name}",
                         )
@@ -306,6 +334,7 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
                 y=float(pm.y_grid[i]),
                 theta=float(pm.theta_grid[j]),
                 radius=radius,
+                radius_theta=r_th,
                 vanishing=frozenset({1}),
                 detail=f"q4 fold (grid) on page {pm.name}",
             )
@@ -316,6 +345,7 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
 def find_coord_discs(cfg: Config, pm: PageMap) -> list[SigmaDisc]:
     """Arm-angle reference breakdown: Sigma_coord."""
     radius = _disc_radius(cfg, pm)
+    r_th = _disc_radius_theta(cfg, pm)
     found = []
     for i, j in np.argwhere(pm.near_axis):
         found.append(
@@ -324,6 +354,7 @@ def find_coord_discs(cfg: Config, pm: PageMap) -> list[SigmaDisc]:
                 y=float(pm.y_grid[i]),
                 theta=float(pm.theta_grid[j]),
                 radius=radius,
+                radius_theta=r_th,
                 vanishing=frozenset(),
                 detail=f"arm-angle reference degenerate on page {pm.name}",
             )
@@ -334,6 +365,7 @@ def find_coord_discs(cfg: Config, pm: PageMap) -> list[SigmaDisc]:
 def find_kin_discs(cfg: Config, pm: PageMap) -> list[SigmaDisc]:
     """det(J J^T) zeros: Sigma_kin. RECORDED ONLY -- never invalidates a cell."""
     radius = _disc_radius(cfg, pm)
+    r_th = _disc_radius_theta(cfg, pm)
     found = []
     m = pm.kin_measure
     mask = np.isfinite(m) & (np.abs(m) < cfg.sigma.kin_det_tol)
@@ -344,6 +376,7 @@ def find_kin_discs(cfg: Config, pm: PageMap) -> list[SigmaDisc]:
                 y=float(pm.y_grid[i]),
                 theta=float(pm.theta_grid[j]),
                 radius=radius,
+                radius_theta=r_th,
                 vanishing=frozenset(),
                 detail=f"det(J J^T) ~ 0 on page {pm.name}",
             )
@@ -356,12 +389,14 @@ def _merge_discs(discs: list[SigmaDisc], radius: float) -> list[SigmaDisc]:
     out: list[SigmaDisc] = []
     for d in discs:
         for k, e in enumerate(out):
-            if (d.y - e.y) ** 2 + (d.theta - e.theta) ** 2 <= radius ** 2:
+            if ((d.y - e.y) / max(radius, 1e-12)) ** 2 + \
+                    ((d.theta - e.theta) / max(radius, 1e-12)) ** 2 <= 1.0:
                 out[k] = SigmaDisc(
                     kind=e.kind if e.kind == d.kind else f"{e.kind}+{d.kind}",
                     y=0.5 * (e.y + d.y),
                     theta=0.5 * (e.theta + d.theta),
                     radius=max(e.radius, d.radius),
+                    radius_theta=max(e.r_theta, d.r_theta),
                     vanishing=e.vanishing | d.vanishing,
                     pages=e.pages,
                     detail=e.detail,
@@ -424,6 +459,7 @@ def build_sigma(
         discs = [
             SigmaDisc(
                 kind=d.kind, y=d.y, theta=d.theta, radius=d.radius,
+                radius_theta=d.r_theta,
                 vanishing=d.vanishing, pages=assign_pages(d, pm.signs),
                 detail=d.detail, exact_y=d.exact_y, exact_theta=d.exact_theta,
             )

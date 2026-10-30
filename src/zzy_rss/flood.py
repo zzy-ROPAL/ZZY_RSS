@@ -27,6 +27,7 @@ from .pagemap import PageMap, page_name
 from .scene import Scene
 from .doors import door_fiber_validity
 from .wall import (
+    sigma_disc_samples,
     CheckReport, Polytope, check_polytope, reconstruct_wall, sample_wall,
     train_wall, virtual_boundary_samples,
 )
@@ -167,6 +168,39 @@ def discs_in_region(discs: list, pts: np.ndarray, tol: float) -> list:
 
 
 
+def live_discs(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+               signs: tuple, discs: list, verbose: bool = False) -> tuple:
+    """Split Sigma discs into those a wall must avoid and those it may cross.
+
+    The rule "a wall may not cross a Sigma disc" exists because a door MIGHT
+    be passable. A door whose whole self-motion fiber is invalid carries no
+    connectivity at all, so its disc constrains nothing and the wall is free
+    to cross it. Discharging those discs is exactly what lets an infeasibility
+    proof close inside a single page.
+
+    Only applies when fiber certification is switched on; with it off every
+    door is assumed open, which is the conservative default.
+
+    CAVEAT: the fiber test is a dense SAMPLE of a measure-zero set, not a
+    certificate. A proof that relies on a discharged disc is conditional on
+    it; a proof that never needs one is not.
+    """
+    if not cfg.sigma_policy.enable_fiber_certification:
+        return list(discs), []
+    live, discharged = [], []
+    for d in discs:
+        if not d.vanishing:
+            live.append(d)
+            continue
+        fib = door_fiber_validity(cfg, arm, weld, scene, d, signs)
+        (live if fib["ok"] else discharged).append(d)
+        if verbose:
+            ay, _ = d.anchor
+            print(f"[stage5-fiber] door y={ay:.4f}: "
+                  f"{'OPEN, wall must avoid it' if fib['ok'] else 'BLOCKED, disc discharged'}")
+    return live, discharged
+
+
 def find_inf_proof_region(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     seed_pts: np.ndarray, rest_pts: np.ndarray, inv_pts: np.ndarray,
@@ -210,7 +244,7 @@ def find_inf_proof_region(
             poly = reconstruct_wall(cfg, wall)
             tc_ok = poly.closed and bool(poly.loops)
         if not tc_ok:
-            poly = reconstruct_wall(cfg, wall, grid_res=601)
+            poly = reconstruct_wall(cfg, wall, grid_res=361)
             tc_ok = poly.closed and bool(poly.loops)
             if not tc_ok:
                 if verbose:
@@ -319,6 +353,15 @@ def run_proof(
         rest_pts = np.vstack([thin(rest, n_train_max, rng), ring])
         inv = thin(invalid_points(pm), n_invalid_max, rng)
         discs = sigma.get(name, [])
+
+        # Teach the wall where the doors are, so it cannot route through one.
+        tol_d = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
+                               pm.theta_grid[1] - pm.theta_grid[0]))
+        s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d)
+        if len(s_extra):
+            seed_pts = np.vstack([seed_pts, s_extra])
+        if len(r_extra):
+            rest_pts = np.vstack([rest_pts, r_extra])
 
         poly, rep, wmodel, iters, rounds = find_inf_proof_region(
             cfg, arm, weld, scene, pm.signs, seed_pts, rest_pts, inv, discs,

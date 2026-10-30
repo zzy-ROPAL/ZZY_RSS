@@ -252,7 +252,7 @@ class SigmaParams:
     # Bisection refinement for interior sign doors (q2, q6 crossing zero).
     bisect_iters: int = 40
     # A disc must strictly contain the true singular point: too large is safe.
-    disc_radius_scale: float = 2.5     # multiples of the grid cell diagonal
+    disc_radius_scale: float = 2.0     # cells, applied PER AXIS (y and theta)
     disc_radius_floor: float = 0.004   # absolute floor, page units
     # Sigma_kin threshold on det(J J^T).
     kin_det_tol: float = 1e-7
