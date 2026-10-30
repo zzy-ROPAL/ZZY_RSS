@@ -53,8 +53,21 @@ from zzy_rss.weld import WeldLine  # noqa: E402
 
 PAGES = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")
 START_PAGE, START_SIGNS = "++-", (1, 1, -1)
-OBSTACLE = (BoxObstacle(center=(0.14, 0.0, 0.62),
-                        half_extent=(0.07, 0.07, 0.07), label="block"),)
+# Two obstacles: the two cases need different things of them.
+#
+# The q2 door's elbow sits at (0, 0, 0.568), directly above the shoulder,
+# so any obstacle near the base closes every door. Case B WANTS that
+# (doors blocked -> proof inside one page). Case C must keep a door OPEN,
+# so its obstacle is pushed out to x = 0.26, clear of that elbow, while
+# still cutting the arm's route along the weld.
+#
+#   measured on page (++-) at tilt 30:
+#     (0.14, 0, 0.62) h=0.07 -> does not span, 0 doors open
+#     (0.26, 0, 0.58) h=0.06 -> does not span, 2 doors OPEN
+OBSTACLE_B = (BoxObstacle(center=(0.14, 0.0, 0.62),
+                          half_extent=(0.07, 0.07, 0.07), label="block"),)
+OBSTACLE_C = (BoxObstacle(center=(0.26, 0.0, 0.58),
+                          half_extent=(0.06, 0.06, 0.06), label="block"),)
 TAGCMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
 LEG = [mpatches.Patch(color="#2a9d8f", label="valid"),
        mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
@@ -69,11 +82,11 @@ def weld_for(tilt_deg: float) -> WeldParams:
                       reference=(float(np.cos(a)), 0.0, float(np.sin(a))))
 
 
-def make(tilt: float, obstacle: bool, res: int):
+def make(tilt: float, obstacle, res: int):
     base = Config()
     cfg = dataclasses.replace(
         base, weld=weld_for(tilt), pagemap=PageMapParams(n_y=res, n_theta=res),
-        scene=SceneParams(gap_open=True, obstacles=OBSTACLE if obstacle else ()),
+        scene=SceneParams(gap_open=True, obstacles=(tuple(obstacle) if obstacle else ())),
         sigma_policy=dataclasses.replace(base.sigma_policy,
                                          enable_fiber_certification=True),
         wall=dataclasses.replace(base.wall, pd_mode="lipschitz"))
@@ -242,7 +255,7 @@ def make_video(cfg, arm, weld, scene, pm, path, out_path, fps=20):
 
 # --------------------------------------------------------------- proof ----
 
-def prove_region(cfg, arm, weld, scene, pms, sigma, page, k, lab, iters=6):
+def prove_region(cfg, arm, weld, scene, pms, sigma, page, k, lab, iters=9):
     pm = pms[page]
     sg = tuple(1 if c == "+" else -1 for c in page)
     rng = np.random.default_rng(0)
@@ -278,7 +291,7 @@ def main() -> None:
 
     # ======================= case A : feasible ==========================
     print("\n=== CASE A : no obstacle, tilt 0 -> the robot finishes the weld ===")
-    cfg, arm, weld, scene = make(0.0, False, args.res)
+    cfg, arm, weld, scene = make(0.0, None, args.res)
     pms = all_pages(cfg, arm, weld, scene)
     sigma = build_sigma(cfg, arm, weld, pms, verbose=False)
     for n in PAGES:
@@ -309,7 +322,7 @@ def main() -> None:
 
     # ============ case B : obstacle, tilt 0, doors BLOCKED ==============
     print("\n=== CASE B : obstacle, tilt 0 -> infeasible, doors BLOCKED ===")
-    cfgB, armB, weldB, sceneB = make(0.0, True, args.res)
+    cfgB, armB, weldB, sceneB = make(0.0, OBSTACLE_B, args.res)
     pmsB = all_pages(cfgB, armB, weldB, sceneB)
     sigB = build_sigma(cfgB, armB, weldB, pmsB, verbose=False)
     nb = no_ = 0
@@ -352,7 +365,7 @@ def main() -> None:
 
     # ============ case C : obstacle, tilt 30, doors OPEN ================
     print("\n=== CASE C : obstacle, tilt 30 -> infeasible, doors OPEN ===")
-    cfgC, armC, weldC, sceneC = make(30.0, True, args.res)
+    cfgC, armC, weldC, sceneC = make(30.0, OBSTACLE_C, args.res)
     pmsC = all_pages(cfgC, armC, weldC, sceneC)
     sigC = build_sigma(cfgC, armC, weldC, pmsC, verbose=False)
     nb = no_ = 0
