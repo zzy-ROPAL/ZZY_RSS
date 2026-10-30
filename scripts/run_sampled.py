@@ -98,6 +98,24 @@ def motion_valid(cfg, arm, weld, scene, signs, a, b, n_steps=6):
     return True
 
 
+def exact_endpoints(cfg, arm, weld, scene, signs, n_scan=181):
+    """Valid configurations exactly at y = 0 and y = 1.
+
+    Li names her start and goal as roadmap vertices rather than hoping a
+    sample lands on them. Our goal is not one configuration but the whole
+    y = 1 edge, so we add every valid arm angle there. Without this the
+    animation stops at y = 0.98 and "reaches the goal" is a tolerance test
+    rather than a fact.
+    """
+    out = {}
+    for tag, yv in (("start", 0.0), ("goal", 1.0)):
+        th = np.linspace(-np.pi, np.pi, n_scan)
+        ok = np.array([classify(cfg, arm, weld, scene, yv, float(t),
+                                signs)[0] for t in th])
+        out[tag] = np.column_stack([np.full(int(ok.sum()), yv), th[ok]])
+    return out
+
+
 def build_roadmap(cfg, arm, weld, scene, signs, verts, k=8):
     """k-nearest-neighbour PRM over the valid samples. Returns labels, n_comp."""
     n = len(verts)
@@ -263,15 +281,25 @@ def fig8_sampled(cfg, data, title, out_path, res_note):
                     disc.__dict__.get("_state") == "open" else "#d62728",
                     ms=7, mfc="none" if disc.__dict__.get("_state") == "open"
                     else None, mew=1.6)
+        # facets Algorithm 3 could NOT certify -- this is where the wall
+        # leaves C_obs, i.e. the holes in the proof
+        for c, why in d.get("bad", []):
+            if "VALID" in why:          # the wall is in FREE space here
+                ax.plot([c[0]], [c[1]], "o", mfc="none", mec="#ff8c00",
+                        ms=13, mew=2.4, zorder=7)
+            else:                       # in C_obs but too shallow to certify
+                ax.plot([c[0]], [c[1]], "o", mfc="none", mec="#00a0a0",
+                        ms=11, mew=2.0, zorder=7)
+
+        # the GOAL is not a configuration, it is the whole y = 1 edge
+        gp = d.get("goal_pts")
+        if gp is not None and len(gp):
+            ax.plot(gp[:, 0], gp[:, 1], "-", color="#6a1b9a", lw=7,
+                    solid_capstyle="butt", alpha=0.95, zorder=8)
         if name == START_PAGE and d.get("start_xy") is not None:
             sx, sy = d["start_xy"]
-            ax.plot([sx], [sy], "D", color="#6a1b9a", ms=10,
-                    mec="white", mew=1.4)
-        gv = v[ing] if len(v) else np.zeros((0, 2))
-        gv = gv[gv[:, 0] >= 1.0 - GOAL_TOL] if len(gv) else gv
-        if len(gv):
-            ax.plot(gv[:, 0], gv[:, 1], "*", color="#6a1b9a", ms=13,
-                    mec="white", mew=1.0, linestyle="none")
+            ax.plot([sx], [sy], "D", color="#6a1b9a", ms=13,
+                    mec="white", mew=1.8, zorder=9)
         tag = "  <- START PAGE" if name == START_PAGE else ""
         ax.set_title(f"({name})  {len(v)} vertices, "
                      f"{d['ncomp']} component(s){tag}",
@@ -283,20 +311,24 @@ def fig8_sampled(cfg, data, title, out_path, res_note):
         ax.set_ylim(pm.theta_grid[0], pm.theta_grid[-1])
 
     handles = [
-        Line2D([], [], marker="*", color="#6a1b9a", ls="none", ms=12,
-               label="Goal and start conf"),
-        Line2D([], [], marker="D", color="#6a1b9a", ls="none", ms=8, label=""),
-        mpatches.Patch(facecolor=OBST_BLUE, label="Obstacle region"),
+        Line2D([], [], marker="D", color="#6a1b9a", ls="none", ms=9,
+               mec="white", mew=1.4, label="start configuration"),
+        Line2D([], [], color="#6a1b9a", lw=7, label="goal SET (all of y = 1)"),
+        mpatches.Patch(facecolor=OBST_BLUE, label="obstacle region"),
         Line2D([], [], marker="s", mfc="none", mec="#1f4eb8", ls="none",
-               ms=8, label="Graph components with goal"),
+               ms=8, label="graph component reaching the goal"),
         Line2D([], [], marker="x", color="#d62728", ls="none", ms=8,
-               label="Other vertices"),
-        Line2D([], [], color="black", lw=2.2, label="Learned manifold"),
+               label="other vertices"),
+        Line2D([], [], color="black", lw=2.2, label="learned manifold"),
+        Line2D([], [], marker="o", mfc="none", mec="#ff8c00", ls="none",
+               ms=11, mew=2.2, label="HOLE: wall in free space"),
+        Line2D([], [], marker="o", mfc="none", mec="#00a0a0", ls="none",
+               ms=10, mew=1.8, label="facet not certified (too shallow)"),
         Line2D([], [], marker="X", color="#d62728", ls="none", ms=8,
                label=r"$\Sigma$ door BLOCKED"),
     ]
-    fig.legend(handles=[h for h in handles if h.get_label()],
-               loc="lower center", ncol=6, frameon=True, fontsize=11)
+    fig.legend(handles=handles, loc="lower center", ncol=5, frameon=True,
+               fontsize=10.5)
     fig.suptitle(title + "\n" + res_note, fontsize=13)
     fig.tight_layout(rect=[0, 0.06, 1, 0.94])
     fig.savefig(out_path, dpi=135)
@@ -317,6 +349,11 @@ def run_case(tag, tilt, obstacles, args, out):
     for name in PAGES:
         signs = tuple(1 if c == "+" else -1 for c in name)
         verts, obs = sample_page(cfg, arm, weld, scene, signs, args.samples, rng)
+        ends = exact_endpoints(cfg, arm, weld, scene, signs)
+        n_start = len(ends["start"])
+        anchors = np.vstack([ends["start"], ends["goal"]])
+        if len(anchors):
+            verts = np.vstack([anchors, verts]) if len(verts) else anchors
         lab, ncomp, edges = build_roadmap(cfg, arm, weld, scene, signs, verts,
                                           k=args.k)
         ing = goal_classes(verts, lab)
@@ -333,7 +370,9 @@ def run_case(tag, tilt, obstacles, args, out):
             arm, weld, scene, signs, with_kin=False)
         data[name] = dict(verts=verts, obs=obs, lab=lab, ncomp=ncomp,
                           in_goal=ing, pm=pm, shade=shade, start_theta=0.0,
-                          start_xy=None, edges=edges)
+                          start_xy=None, edges=edges,
+                          n_anchor_start=n_start, n_anchor=len(anchors),
+                          goal_pts=ends["goal"], bad=[])
         print(f"  page {name}: {len(verts)} valid / {args.samples} sampled, "
               f"{ncomp} component(s), {int(ing.sum())} reach the goal",
               flush=True)
@@ -353,12 +392,13 @@ def run_case(tag, tilt, obstacles, args, out):
     # start vertex: page START_PAGE, y = 0
     sp = data[START_PAGE]
     sv = sp["verts"]
-    near = sv[sv[:, 0] < 0.08] if len(sv) else np.zeros((0, 2))
-    if len(near):
-        si0 = int(np.argmin(np.abs(near[:, 1] + 1.57)))
-        start_xy = near[si0]
+    ns = sp["n_anchor_start"]
+    if ns:                              # exact y = 0 anchors come first
+        anch = sv[:ns]
+        start_xy = anch[int(np.argmin(np.abs(anch[:, 1] + 1.57)))]
     else:
-        start_xy = np.array([0.0, 0.0])
+        near = sv[sv[:, 0] < 0.08] if len(sv) else np.zeros((0, 2))
+        start_xy = near[0] if len(near) else np.array([0.0, 0.0])
     start_theta = float(start_xy[1])
     sp["start_theta"] = start_theta
     sp["start_xy"] = (float(start_xy[0]), float(start_xy[1]))
@@ -417,6 +457,7 @@ def run_case(tag, tilt, obstacles, args, out):
             cfg, arm, weld, scene, sg, seed, other, inv, live,
             max_iters=args.iters, verbose=True, labeller=labeller)
         data[START_PAGE]["wall"] = poly.loops
+        data[START_PAGE]["bad"] = list(rep.failure_points)
         print(f"  alg4: {iters} iteration(s), alg2 {rounds} round(s), "
               f"gamma={wall.gamma:.2f} (cap {args.gamma_max:g}), "
               f"labels {labeller.n_topological} topological / "
