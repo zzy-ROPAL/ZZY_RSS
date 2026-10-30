@@ -60,7 +60,7 @@ from zzy_rss.flood import find_inf_proof_region, live_discs  # noqa: E402
 from zzy_rss.pagemap import build_page_map  # noqa: E402
 from zzy_rss.prm import classify  # noqa: E402
 from zzy_rss.wall import (  # noqa: E402
-    check_polytope, reconstruct_wall, sample_wall, sigma_disc_samples,
+    LABEL_TOPOLOGICAL, in_virtual_invalid, check_polytope, reconstruct_wall, sample_wall, sigma_disc_samples,
     train_wall, virtual_boundary_samples,
 )
 
@@ -165,6 +165,52 @@ def resample_path(path, n=61):
     t = np.linspace(0.0, d[-1], n)
     return np.column_stack([np.interp(t, d, path[:, 0]),
                             np.interp(t, d, path[:, 1])])
+
+
+class RoadmapLabeller:
+    """Class a fed-back point by the roadmap component it CONNECTS to.
+
+    This is SDCL's addToTraining -> disjoint-set rule (findings 21), finally
+    in the setting it was designed for. The grid version of it measured worse
+    this morning because a grid has no roadmap to consult; here the PRM is
+    the primary object and its components are the classes.
+
+    Returns +1 for the start side (not connected to the goal), -1 for the
+    goal side, 0 when nothing in reach connects so the caller falls back to
+    the nearest-class rule.
+    """
+
+    def __init__(self, cfg, arm, weld, scene, signs, verts, in_goal,
+                 n_try=6):
+        self.cfg, self.arm, self.weld, self.scene = cfg, arm, weld, scene
+        self.signs = signs
+        self.verts = verts
+        self.in_goal = in_goal
+        self.n_try = n_try
+        self.scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+        self.tree = cKDTree(verts * self.scale) if len(verts) else None
+        self.n_topological = self.n_fallback = self.n_virtual = 0
+
+    def label(self, m):
+        mm = np.asarray(m, dtype=float).reshape(1, 2)
+        # the virtual ring is "outside" by construction (IJRR Fig. 5) and
+        # belongs to the non-start class; connectivity says nothing about it
+        if in_virtual_invalid(self.cfg, mm)[0]:
+            self.n_virtual += 1
+            return -1
+        if self.tree is None:
+            self.n_fallback += 1
+            return 0
+        k = min(self.n_try, len(self.verts))
+        _d, idx = self.tree.query(mm[0] * self.scale, k=k)
+        for j in np.atleast_1d(idx):
+            j = int(j)
+            if motion_valid(self.cfg, self.arm, self.weld, self.scene,
+                            self.signs, np.asarray(m, float), self.verts[j]):
+                self.n_topological += 1
+                return -1 if self.in_goal[j] else 1
+        self.n_fallback += 1
+        return 0
 
 
 def goal_classes(verts, lab):
@@ -354,6 +400,14 @@ def run_case(tag, tilt, obstacles, args, out):
         if len(inv) > 200:
             inv = inv[rng.choice(len(inv), 200, replace=False)]
 
+        # gamma cap: IJRR Fig. 7 shows the manifold FRAGMENTING into
+        # disconnected islands by gamma = 40, which fails Definition 1 (I)
+        # whatever the facet count says. Better to stop with accuracy < 1
+        # and say so than to return a shattered wall.
+        cfg = dataclasses.replace(cfg, wall=dataclasses.replace(
+            cfg.wall, gamma_max=args.gamma_max,
+            label_mode=LABEL_TOPOLOGICAL))
+        labeller = RoadmapLabeller(cfg, arm, weld, scene, sg, v, ing)
         w0 = train_wall(cfg, seed, other)
         print(f"  alg1: gamma={w0.gamma:.2f} acc={w0.accuracy:.4f} "
               f"({len(seed)} start-side / {len(other)} goal-side)", flush=True)
@@ -361,10 +415,17 @@ def run_case(tag, tilt, obstacles, args, out):
         # retraining on any facet centre that turns out valid.
         poly, rep, wall, iters, rounds = find_inf_proof_region(
             cfg, arm, weld, scene, sg, seed, other, inv, live,
-            max_iters=args.iters, verbose=True)
+            max_iters=args.iters, verbose=True, labeller=labeller)
         data[START_PAGE]["wall"] = poly.loops
         print(f"  alg4: {iters} iteration(s), alg2 {rounds} round(s), "
-              f"gamma={wall.gamma:.2f}", flush=True)
+              f"gamma={wall.gamma:.2f} (cap {args.gamma_max:g}), "
+              f"labels {labeller.n_topological} topological / "
+              f"{labeller.n_virtual} virtual / {labeller.n_fallback} fallback",
+              flush=True)
+        if wall.gamma >= args.gamma_max - 1e-9:
+            print(f"  WARNING gamma hit the cap: the training classes are not "
+                  f"separable below it, so the wall may be fragmented",
+                  flush=True)
         print(f"  WALL: {rep.n_passed}/{rep.n_facets} facets, "
               f"closed={poly.closed} -> "
               f"{'PROOF COMPLETE' if rep.ok and poly.closed else 'incomplete'}",
@@ -419,21 +480,26 @@ def main():
     ap.add_argument("--fig-res", dest="fig_res", type=int, default=121,
                     help="grid resolution used ONLY to shade the figure")
     ap.add_argument("--iters", type=int, default=14)
+    ap.add_argument("--gamma-max", dest="gamma_max", type=float, default=30.0)
+    ap.add_argument("--only", choices=("all", "exp1", "exp2"), default="all")
     ap.add_argument("--out", default="out/sampled")
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
 
     report = {}
-    r1, d1, cfg1, arm1, weld1, scene1 = run_case(
-        "EXP1 no obstacle - the robot FINISHES the weld", 0.0, None, args, out)
-    report["exp1"] = r1
-    r2, d2, cfg2, arm2, weld2, scene2 = run_case(
-        "EXP2 two-box obstacle - INFEASIBLE, proof in one page", 0.0,
-        rt.ZGAP, args, out)
-    report["exp2"] = r2
+    if args.only in ("all", "exp1"):
+        report["exp1"] = run_case(
+            "EXP1 no obstacle - the robot FINISHES the weld",
+            0.0, None, args, out)[0]
+    if args.only in ("all", "exp2"):
+        report["exp2"] = run_case(
+            "EXP2 two-box obstacle - INFEASIBLE, proof in one page",
+            0.0, rt.ZGAP, args, out)[0]
 
-    json.dump(report, open(out / "sampled_report.json", "w"), indent=1)
-    print(f"\n[out] {out / 'sampled_report.json'}")
+    name = "sampled_report.json" if args.only == "all" \
+        else f"sampled_report_{args.only}.json"
+    json.dump(report, open(out / name, "w"), indent=1)
+    print(f"\n[out] {out / name}")
 
 
 if __name__ == "__main__":
