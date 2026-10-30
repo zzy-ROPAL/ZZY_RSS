@@ -347,13 +347,16 @@ def fig8_sampled(cfg, data, title, out_path, res_note):
 def run_case(tag, tilt, obstacles, args, out):
     print(f"\n=== {tag} ===", flush=True)
     t0 = time.time()
+    T = {}           # measured stage timings, not estimates
     cfg, arm, weld, scene = rt.make(tilt, obstacles, args.res)
     rng = np.random.default_rng(1)
 
     data, pms = {}, {}
     for name in PAGES:
         signs = tuple(1 if c == "+" else -1 for c in name)
+        _t = time.time()
         verts, obs = sample_page(cfg, arm, weld, scene, signs, args.samples, rng)
+        T["1 sample + classify"] = T.get("1 sample + classify", 0) + time.time() - _t
         # Exact y=0 / y=1 configurations are computed for the FIGURE only.
         # Inserting them as roadmap vertices put training points exactly on
         # the page boundary, where the IJRR Fig. 5 virtual band operates, and
@@ -361,20 +364,29 @@ def run_case(tag, tilt, obstacles, args, out):
         # closed became 132/152 OPEN. Cosmetic gain, broken proof -- so the
         # roadmap is left alone.
         ends = exact_endpoints(cfg, arm, weld, scene, signs)
+        _t = time.time()
         lab, ncomp, edges = build_roadmap(cfg, arm, weld, scene, signs, verts,
                                           k=args.k)
+        T["2 roadmap edges (checkMotion)"] = \
+            T.get("2 roadmap edges (checkMotion)", 0) + time.time() - _t
         ing = goal_classes(verts, lab)
+        _t = time.time()
         pm = page_background(cfg, arm, weld, scene, signs, args.res)
+        T["3 proof-side page map (Sigma)"] = \
+            T.get("3 proof-side page map (Sigma)", 0) + time.time() - _t
         pms[name] = pm
         # a finer grid for the picture only: at 61 cells imshow paints a
         # whole 0.0167 x 0.105 block one colour, which swallows valid
         # samples sitting in thin slivers and makes start/goal look as if
         # they are inside an obstacle.
+        _t = time.time()
         shade = build_page_map(
             dataclasses.replace(
                 cfg, pagemap=dataclasses.replace(
                     cfg.pagemap, n_y=args.fig_res, n_theta=args.fig_res)),
             arm, weld, scene, signs, with_kin=False)
+        T["4 shading grid (FIGURE ONLY)"] = \
+            T.get("4 shading grid (FIGURE ONLY)", 0) + time.time() - _t
         data[name] = dict(verts=verts, obs=obs, lab=lab, ncomp=ncomp,
                           in_goal=ing, pm=pm, shade=shade, start_theta=0.0,
                           start_xy=None, edges=edges,
@@ -383,7 +395,10 @@ def run_case(tag, tilt, obstacles, args, out):
               f"{ncomp} component(s), {int(ing.sum())} reach the goal",
               flush=True)
 
+    _t = time.time()
     sig = build_sigma(cfg, arm, weld, pms, verbose=False)
+    T["5 build Sigma"] = time.time() - _t
+    _t = time.time()
     n_open = n_blk = 0
     for name in PAGES:
         sg = tuple(1 if c == "+" else -1 for c in name)
@@ -393,6 +408,7 @@ def run_case(tag, tilt, obstacles, args, out):
                 d.__dict__["_state"] = "open" if ok else "blocked"
                 n_open += ok; n_blk += (not ok)
         data[name]["discs"] = sig.get(name, [])
+    T["6 door fibre certification"] = time.time() - _t
     print(f"  doors {n_open} open / {n_blk} blocked", flush=True)
 
     # start vertex: page START_PAGE, y = 0
@@ -452,14 +468,18 @@ def run_case(tag, tilt, obstacles, args, out):
             cfg.wall, gamma_max=args.gamma_max,
             label_mode=LABEL_TOPOLOGICAL))
         labeller = RoadmapLabeller(cfg, arm, weld, scene, sg, v, ing)
+        _t = time.time()
         w0 = train_wall(cfg, seed, other)
+        T["7 Alg 1 train wall"] = time.time() - _t
         print(f"  alg1: gamma={w0.gamma:.2f} acc={w0.accuracy:.4f} "
               f"({len(seed)} start-side / {len(other)} goal-side)", flush=True)
         # IJRR Algorithm 4: Alg 2 + reconstruction + Alg 3 in a feedback loop,
         # retraining on any facet centre that turns out valid.
+        _t = time.time()
         poly, rep, wall, iters, rounds = find_inf_proof_region(
             cfg, arm, weld, scene, sg, seed, other, inv, live,
             max_iters=args.iters, verbose=True, labeller=labeller)
+        T["8 Alg 4 loop (Alg 2 + recon + Alg 3)"] = time.time() - _t
         data[START_PAGE]["wall"] = poly.loops
         data[START_PAGE]["bad"] = list(rep.failure_points)
         print(f"  alg4: {iters} iteration(s), alg2 {rounds} round(s), "
@@ -484,6 +504,7 @@ def run_case(tag, tilt, obstacles, args, out):
     si = None
     if len(sv):
         si = int(np.argmin(np.linalg.norm(sv - start_xy, axis=1)))
+    _t = time.time()
     raw = path_from_roadmap(sv, sp["edges"], si, to_goal=True)
     path = resample_path(raw, 61)
     if path is not None:
@@ -497,6 +518,7 @@ def run_case(tag, tilt, obstacles, args, out):
                         wall=data[START_PAGE].get("wall"),
                         discs=sig[START_PAGE], page=START_PAGE, caption=cap)],
                   out / f"{tag.split()[0].lower()}_sampled.mp4")
+        T["9 video render"] = time.time() - _t
         result["path_waypoints"] = int(len(path))
         result["path_reaches"] = stall
         print(f"  roadmap path: {len(raw)} vertices, reaches y={stall:.2f}",
@@ -508,8 +530,15 @@ def run_case(tag, tilt, obstacles, args, out):
             f"{args.fig_res}) only shades the obstacle region.")
     fig8_sampled(cfg, data, tag, out / f"{result['tag'].split()[0].lower()}"
                  f"_sampled_pages.png", note)
+    _t = time.time()
     result["seconds"] = round(time.time() - t0, 1)
-    print(f"  [{time.time()-t0:.1f}s]", flush=True)
+    tot = time.time() - t0
+    T["10 figure"] = max(0.0, tot - sum(T.values()))
+    print(f"\n  --- MEASURED stage timings ---", flush=True)
+    for kk in sorted(T):
+        print(f"  {kk:<40} {T[kk]:7.1f} s  {100*T[kk]/tot:5.1f}%", flush=True)
+    print(f"  {'TOTAL':<40} {tot:7.1f} s", flush=True)
+    result["timings"] = {kk: round(vv, 2) for kk, vv in T.items()}
     return result, data, cfg, arm, weld, scene
 
 
