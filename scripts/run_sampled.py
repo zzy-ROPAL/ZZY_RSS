@@ -34,6 +34,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 import time
@@ -189,7 +190,7 @@ def fig8_sampled(cfg, data, title, out_path, res_note):
     fig, axes = plt.subplots(2, 4, figsize=(21, 10.2))
     for ax, name in zip(axes.ravel(), PAGES):
         d = data[name]
-        pm = d["pm"]
+        pm = d["shade"]
         ext = [0, 1, pm.theta_grid[0], pm.theta_grid[-1]]
         # obstacle region (grid, for display only)
         ax.imshow(np.where(pm.valid_mask.T, 0.0, 1.0), origin="lower",
@@ -216,14 +217,15 @@ def fig8_sampled(cfg, data, title, out_path, res_note):
                     disc.__dict__.get("_state") == "open" else "#d62728",
                     ms=7, mfc="none" if disc.__dict__.get("_state") == "open"
                     else None, mew=1.6)
-        if name == START_PAGE:
-            ax.plot([0.0], [d["start_theta"]], "D", color="#6a1b9a", ms=9,
-                    mec="black", mew=0.8)
+        if name == START_PAGE and d.get("start_xy") is not None:
+            sx, sy = d["start_xy"]
+            ax.plot([sx], [sy], "D", color="#6a1b9a", ms=10,
+                    mec="white", mew=1.4)
         gv = v[ing] if len(v) else np.zeros((0, 2))
         gv = gv[gv[:, 0] >= 1.0 - GOAL_TOL] if len(gv) else gv
         if len(gv):
-            ax.plot(gv[:, 0], gv[:, 1], "*", color="#6a1b9a", ms=11,
-                    mec="black", mew=0.6, linestyle="none")
+            ax.plot(gv[:, 0], gv[:, 1], "*", color="#6a1b9a", ms=13,
+                    mec="white", mew=1.0, linestyle="none")
         tag = "  <- START PAGE" if name == START_PAGE else ""
         ax.set_title(f"({name})  {len(v)} vertices, "
                      f"{d['ncomp']} component(s){tag}",
@@ -274,8 +276,18 @@ def run_case(tag, tilt, obstacles, args, out):
         ing = goal_classes(verts, lab)
         pm = page_background(cfg, arm, weld, scene, signs, args.res)
         pms[name] = pm
+        # a finer grid for the picture only: at 61 cells imshow paints a
+        # whole 0.0167 x 0.105 block one colour, which swallows valid
+        # samples sitting in thin slivers and makes start/goal look as if
+        # they are inside an obstacle.
+        shade = build_page_map(
+            dataclasses.replace(
+                cfg, pagemap=dataclasses.replace(
+                    cfg.pagemap, n_y=args.fig_res, n_theta=args.fig_res)),
+            arm, weld, scene, signs, with_kin=False)
         data[name] = dict(verts=verts, obs=obs, lab=lab, ncomp=ncomp,
-                          in_goal=ing, pm=pm, start_theta=0.0, edges=edges)
+                          in_goal=ing, pm=pm, shade=shade, start_theta=0.0,
+                          start_xy=None, edges=edges)
         print(f"  page {name}: {len(verts)} valid / {args.samples} sampled, "
               f"{ncomp} component(s), {int(ing.sum())} reach the goal",
               flush=True)
@@ -296,14 +308,22 @@ def run_case(tag, tilt, obstacles, args, out):
     sp = data[START_PAGE]
     sv = sp["verts"]
     near = sv[sv[:, 0] < 0.08] if len(sv) else np.zeros((0, 2))
-    start_theta = float(near[np.argmin(np.abs(near[:, 1] + 1.57)), 1]) \
-        if len(near) else 0.0
+    if len(near):
+        si0 = int(np.argmin(np.abs(near[:, 1] + 1.57)))
+        start_xy = near[si0]
+    else:
+        start_xy = np.array([0.0, 0.0])
+    start_theta = float(start_xy[1])
     sp["start_theta"] = start_theta
+    sp["start_xy"] = (float(start_xy[0]), float(start_xy[1]))
+    assert classify(cfg, arm, weld, scene, float(start_xy[0]),
+                    float(start_xy[1]), START_SIGNS)[0], \
+        "start marker must be a VALID configuration"
 
     start_comp = None
     if len(sv):
         i = int(np.argmin(np.linalg.norm(
-            sv - np.array([0.0, start_theta]), axis=1)))
+            sv - start_xy, axis=1)))
         start_comp = int(sp["lab"][i])
     reaches = bool(sp["in_goal"][sp["lab"] == start_comp].any()) \
         if start_comp is not None else False
@@ -357,8 +377,7 @@ def run_case(tag, tilt, obstacles, args, out):
     # ---- the motion, taken from the ROADMAP ------------------------------
     si = None
     if len(sv):
-        si = int(np.argmin(np.linalg.norm(
-            sv - np.array([0.0, start_theta]), axis=1)))
+        si = int(np.argmin(np.linalg.norm(sv - start_xy, axis=1)))
     raw = path_from_roadmap(sv, sp["edges"], si, to_goal=True)
     path = resample_path(raw, 61)
     if path is not None:
@@ -378,8 +397,9 @@ def run_case(tag, tilt, obstacles, args, out):
               flush=True)
 
     note = (f"roadmap: {args.samples} samples/page, k={args.k} neighbours, "
-            f"checkMotion on every edge.  The grid is used ONLY to shade the "
-            f"obstacle region.")
+            f"checkMotion on every edge.  Every plotted vertex is a VALID "
+            f"configuration by construction; the grid ({args.fig_res}x"
+            f"{args.fig_res}) only shades the obstacle region.")
     fig8_sampled(cfg, data, tag, out / f"{result['tag'].split()[0].lower()}"
                  f"_sampled_pages.png", note)
     result["seconds"] = round(time.time() - t0, 1)
@@ -392,6 +412,8 @@ def main():
     ap.add_argument("--samples", type=int, default=1200)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--res", type=int, default=61)
+    ap.add_argument("--fig-res", dest="fig_res", type=int, default=241,
+                    help="grid resolution used ONLY to shade the figure")
     ap.add_argument("--iters", type=int, default=14)
     ap.add_argument("--out", default="out/sampled")
     args = ap.parse_args()
