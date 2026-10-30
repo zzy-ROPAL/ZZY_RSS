@@ -255,7 +255,7 @@ def make_video(cfg, arm, weld, scene, pm, path, out_path, fps=20):
 
 # --------------------------------------------------------------- proof ----
 
-def prove_region(cfg, arm, weld, scene, pms, sigma, page, k, lab, iters=9):
+def prove_region(cfg, arm, weld, scene, pms, sigma, page, k, lab, iters=6):
     pm = pms[page]
     sg = tuple(1 if c == "+" else -1 for c in page)
     rng = np.random.default_rng(0)
@@ -335,7 +335,8 @@ def main() -> None:
                 no_ += ok; nb += (not ok)
     pmB = pmsB[START_PAGE]
     labB, regsB = label_regions(cfgB, pmB)
-    encl = [r for r in regsB if r.reaches_start and not r.reaches_goal]
+    encl = sorted([r for r in regsB if r.reaches_start and not r.reaches_goal],
+                  key=lambda r: -r.n_cells)
     spansB = [r.index for r in regsB if r.reaches_start and r.reaches_goal]
     print(f"[B] page ({START_PAGE}): valid {pmB.stats['frac_valid'] * 100:.1f}%, "
           f"{len(regsB)} region(s), spanning {spansB}, "
@@ -381,7 +382,8 @@ def main() -> None:
         labs[n] = label_regions(cfgC, pmsC[n])
     pmC = pmsC[START_PAGE]
     labC, regsC = labs[START_PAGE]
-    enclC = [r for r in regsC if r.reaches_start and not r.reaches_goal]
+    enclC = sorted([r for r in regsC if r.reaches_start and not r.reaches_goal],
+                   key=lambda r: -r.n_cells)
     print(f"[C] page ({START_PAGE}): valid {pmC.stats['frac_valid'] * 100:.1f}%, "
           f"{len(regsC)} region(s), enclosed start "
           f"{[r.index for r in enclC]}")
