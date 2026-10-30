@@ -1,21 +1,40 @@
-"""Search for a scene that is infeasible by CONNECTIVITY, not reachability.
+"""Search for a scene that is infeasible by CONNECTIVITY and has an OPEN DOOR.
 
-findings 22: the current EXP 2 / EXP 3 obstacles make a stretch of the weld
-unreachable on every page at every arm angle (a "common curtain"), so
-infeasibility follows from the page map alone and the SVM wall is decoration.
+findings 22: an obstacle that makes a stretch of the weld unreachable on every
+page at every arm angle (a "common curtain") is infeasible from the page map
+alone, and the SVM wall is decoration. findings 26: the EXP 3 obstacle ZGAP
+closes every door, so the proof never crosses a page boundary and EXP 3
+degenerates into a second copy of EXP 2.
 
-A scene that actually exercises the method must satisfy BOTH:
+A scene that exercises the cross-page part of the method must satisfy ALL of:
 
-  (A) no common curtain -- for every y, some page has at least one valid
-      arm angle, so no single weld point is unreachable; and
-  (B) the start region still cannot reach the goal -- the valid set is split
-      so that start and goal lie in different components.
+  (A) no common curtain -- for every y, some page has at least one valid arm
+      angle, so no single weld point is unreachable;
+  (B) the start region still cannot reach the goal, so the valid set is split;
+  (C) at least one door OUT OF THE START REGION is open, i.e. some point of
+      its self-motion fiber is collision-free and within limits; and
+  (D) the partner page reached through that door cannot reach the goal either
+      -- otherwise the door is an escape route and the task is FEASIBLE.
 
-(B) is checked here with grid connectivity, which per CLAUDE.md invariant 8
-is a SEARCH FILTER and a spot check, never a verdict. The verdict still comes
-from the learned wall.
+(B)/(D) are checked here with grid connectivity, which per CLAUDE.md invariant
+8 is a SEARCH FILTER and a spot check, never a verdict. The verdict still
+comes from the learned wall, and the transitive version of (D) -- every page
+reachable through any chain of open doors -- comes from flood.run_proof.
 
-Usage:  python3 scripts/search_scene.py --res 31 --out out/search.json
+Two modes:
+
+  --mode welds    sweep weld placements with NO obstacle and report the door
+                  landscape: how many doors are open, where they sit, and how
+                  much fiber margin each one has. Door position is set by
+                  |W(y) - E*| = d_ew, so the placement decides where the doors
+                  are before any obstacle exists.
+  --mode scenes   sweep obstacle families at a fixed placement and apply the
+                  (A)-(D) filter.
+
+Usage:
+  python3 scripts/search_scene.py --mode welds  --res 61 --jobs 4
+  python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
+      --families asym-zgap --weld-x 0.28 --weld-z 0.46 --tilts 30
 """
 
 from __future__ import annotations
@@ -33,7 +52,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from zzy_rss.arm import SrsArm  # noqa: E402
-from zzy_rss.flood import label_regions  # noqa: E402
+from zzy_rss.doors import build_sigma, door_fiber_validity  # noqa: E402
+from zzy_rss.flood import label_regions, region_points  # noqa: E402
 from zzy_rss.pagemap import build_page_map  # noqa: E402
 from zzy_rss.params import (  # noqa: E402
     BoxObstacle, Config, PageMapParams, SceneParams, WeldParams)
@@ -44,33 +64,51 @@ PAGES = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")
 START_PAGE = "++-"
 
 
-def weld_for(tilt_deg):
+def signs_of(name):
+    return tuple(1 if c == "+" else -1 for c in name)
+
+
+def partner_page(name, vanishing):
+    """The page on the other side of a door: flip every vanishing sign."""
+    s = list(name)
+    for idx in sorted(vanishing):
+        s[idx] = "-" if s[idx] == "+" else "+"
+    return "".join(s)
+
+
+def weld_for(tilt_deg, x=0.28, z=0.46, half_y=0.26):
     a = np.radians(tilt_deg)
-    return WeldParams(p0=(0.28, -0.26, 0.46), p1=(0.28, 0.26, 0.46),
+    return WeldParams(p0=(x, -half_y, z), p1=(x, +half_y, z),
                       approach=(float(np.sin(a)), 0.0, -float(np.cos(a))),
                       reference=(float(np.cos(a)), 0.0, float(np.sin(a))))
 
 
-def analyse(tilt, obs, res):
+# --------------------------------------------------------------------------
+# one candidate
+# --------------------------------------------------------------------------
+
+def analyse(tilt, obs, res, weld_kw=None, with_doors=True):
     base = Config()
     cfg = dataclasses.replace(
-        base, weld=weld_for(tilt),
+        base, weld=weld_for(tilt, **(weld_kw or {})),
         pagemap=PageMapParams(n_y=res, n_theta=res),
-        scene=SceneParams(gap_open=True, obstacles=tuple(obs)))
+        scene=SceneParams(gap_open=True, obstacles=tuple(obs)),
+        sigma_policy=dataclasses.replace(base.sigma_policy,
+                                         enable_fiber_certification=True))
     arm, weld = SrsArm(cfg.arm), WeldLine(cfg.weld)
     scene = Scene(cfg.arm, cfg.scene)
 
     per_y_best = None          # max valid cells in a y column, over pages
     start_goal_same = False    # some page has one region reaching start AND goal
     start_pages = 0
-    pages = {}
+    pages, pms, labels, regions = {}, {}, {}, {}
     for n in PAGES:
-        pm = build_page_map(cfg, arm, weld, scene,
-                            tuple(1 if c == "+" else -1 for c in n),
-                            with_kin=False)
+        pm = build_page_map(cfg, arm, weld, scene, signs_of(n), with_kin=False)
+        pms[n] = pm
         col = pm.valid_mask.sum(axis=1)
         per_y_best = col if per_y_best is None else np.maximum(per_y_best, col)
         lab, regs = label_regions(cfg, pm)
+        labels[n], regions[n] = lab, regs
         if any(r.reaches_start and r.reaches_goal for r in regs):
             start_goal_same = True
         if any(r.reaches_start for r in regs):
@@ -80,14 +118,100 @@ def analyse(tilt, obs, res):
                         spanning=bool(any(r.reaches_start and r.reaches_goal
                                           for r in regs)))
     curtain = int(np.sum(per_y_best == 0))
-    return dict(curtain_cols=curtain,
-                pinch=int(per_y_best.min()),
-                pinch_frac=float(per_y_best.min()) / res,
-                start_goal_same=bool(start_goal_same),
-                start_pages=int(start_pages),
-                mean_valid=float(np.mean([p["valid"] for p in pages.values()])),
-                pages=pages)
+    row = dict(curtain_cols=curtain,
+               pinch=int(per_y_best.min()),
+               pinch_frac=float(per_y_best.min()) / res,
+               start_goal_same=bool(start_goal_same),
+               start_pages=int(start_pages),
+               mean_valid=float(np.mean([p["valid"] for p in pages.values()])),
+               pages=pages)
+    if with_doors:
+        row.update(door_landscape(cfg, arm, weld, scene, pms, labels, regions))
+    return row
 
+
+def door_landscape(cfg, arm, weld, scene, pms, labels, regions):
+    """Conditions (C) and (D): which doors are open, and where they lead.
+
+    A door's usability is a property of its whole self-motion fiber, never of
+    the single IK representative (CLAUDE.md invariant 3), so every door is
+    scored with door_fiber_validity. Cheap: ~60 ms per door against ~5.7 s for
+    the eight page maps, so the full 721-sample fiber is used, not a screen.
+    """
+    sigma = build_sigma(cfg, arm, weld, pms, verbose=False)
+    n_open = n_blocked = 0
+    all_doors = []
+    for n in PAGES:
+        sg = signs_of(n)
+        for d in sigma.get(n, []):
+            if not d.vanishing:
+                continue
+            r = door_fiber_validity(cfg, arm, weld, scene, d, sg)
+            n_open += bool(r["ok"])
+            n_blocked += (not r["ok"])
+            all_doors.append(dict(
+                page=n, y=float(d.anchor[0]), theta=float(d.anchor[1]),
+                vanishing=sorted(int(v) for v in d.vanishing),
+                kind=d.kind, open=bool(r["ok"]),
+                radius=float(d.radius),
+                valid_fraction=float(r["valid_fraction"]),
+                blockers=r.get("blockers") or {}))
+
+    # (C) open doors inside a start-touching region that cannot reach the goal,
+    # and (D) where each one leads. Only the START page can hold the start
+    # posture, so that is the page the proof must leave.
+    pm, lab = pms[START_PAGE], labels[START_PAGE]
+    tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
+                         pm.theta_grid[1] - pm.theta_grid[0]))
+    start_regions = [r for r in regions[START_PAGE]
+                     if r.reaches_start and not r.reaches_goal]
+    usable = []
+    for reg in sorted(start_regions, key=lambda r: -r.n_cells):
+        pts = region_points(pm, lab, reg.index)
+        if pts.size == 0:
+            continue
+        for d in all_doors:
+            if d["page"] != START_PAGE or not d["open"]:
+                continue
+            a = np.array([d["y"], d["theta"]])
+            # same reach test run_three.py uses to find the door it crosses
+            if float(np.min(np.linalg.norm(pts - a, axis=1))) > max(
+                    tol, d["radius"]):
+                continue
+            pname = partner_page(START_PAGE, d["vanishing"])
+            # which partner-page region does the door land in, and can it
+            # reach the goal? (one step; run_proof does the transitive version)
+            pmB, labB = pms[pname], labels[pname]
+            i = int(np.argmin(np.abs(pmB.y_grid - d["y"])))
+            j = int(np.argmin(np.abs(pmB.theta_grid - d["theta"])))
+            sub = labB[max(0, i - 2):i + 3, max(0, j - 2):j + 3]
+            ks = sorted({int(v) for v in np.unique(sub) if v > 0})
+            kB = ks[0] if ks else None
+            regB = next((r for r in regions[pname] if r.index == kB), None)
+            usable.append(dict(
+                region=int(reg.index), y=d["y"], theta=d["theta"],
+                vanishing=d["vanishing"], valid_fraction=d["valid_fraction"],
+                partner=pname, partner_region=kB,
+                partner_valid=bool(kB is not None),
+                partner_reaches_goal=bool(regB.reaches_goal) if regB else False))
+    return dict(doors_open=int(n_open), doors_blocked=int(n_blocked),
+                doors_start_region=len(usable),
+                doors_usable=sum(1 for u in usable
+                                 if u["partner_valid"]
+                                 and not u["partner_reaches_goal"]),
+                start_doors=usable, doors=all_doors)
+
+
+def verdict(r):
+    """(A) and (B) and (C) and (D)."""
+    return (r["curtain_cols"] == 0
+            and not r["start_goal_same"]
+            and r.get("doors_usable", 0) > 0)
+
+
+# --------------------------------------------------------------------------
+# obstacle families
+# --------------------------------------------------------------------------
 
 def one_box():
     """One box: the family the current EXP 2 / EXP 3 obstacles come from."""
@@ -167,73 +291,196 @@ def fine_1box():
                (BoxObstacle(center=(x, 0.0, z), half_extent=h, label="post"),))
 
 
+def asym_zgap():
+    """ZGAP shifted along y, off the door fiber.
+
+    findings 26: ZGAP closes all 16 doors, and the witness is always
+    collision:forearm/high -- the UPPER box sweeps through the forearm as the
+    fiber swings. The doors sit near the seam ENDS (y = 0.09 and 0.91 at tilt
+    30), while ZGAP sits at y = 0, dead centre. Sliding both boxes toward +y
+    leaves the -y end of the seam -- and the door that lives there -- clear,
+    while still blocking the elbow from crossing in the rest of the seam.
+    """
+    xs = (0.14, 0.18, 0.22)
+    yoffs = (0.06, 0.10, 0.14, 0.18)
+    zpairs = ((0.38, 0.66), (0.42, 0.62), (0.44, 0.68))
+    hs = ((0.060, 0.060, 0.060), (0.050, 0.100, 0.050),
+          (0.060, 0.140, 0.060))
+    for x, yo, (z1, z2), h in itertools.product(xs, yoffs, zpairs, hs):
+        yield (f"asym-zgap x{x:.2f} y+{yo:.2f} z{z1:.2f}/{z2:.2f} h{h}",
+               (BoxObstacle(center=(x, yo, z1), half_extent=h, label="low"),
+                BoxObstacle(center=(x, yo, z2), half_extent=h, label="high")))
+
+
+def asym_high():
+    """Keep ZGAP's low box centred; move only the HIGH box off the fiber.
+
+    The low box never appeared as a collision witness at any door, so it is
+    free to stay where it blocks the low elbow arc. Only the high box has to
+    move.
+    """
+    xs = (0.14, 0.18)
+    yoffs = (0.08, 0.12, 0.16, 0.20)
+    z2s = (0.60, 0.66, 0.72)
+    hs = ((0.060, 0.060, 0.060), (0.060, 0.100, 0.060))
+    for x, yo, z2, h in itertools.product(xs, yoffs, z2s, hs):
+        yield (f"asym-high x{x:.2f} y+{yo:.2f} z{z2:.2f} h{h}",
+               (BoxObstacle(center=(x, 0.0, 0.38),
+                            half_extent=(0.06, 0.06, 0.06), label="low"),
+                BoxObstacle(center=(x, yo, z2), half_extent=h, label="high")))
+
+
+def zgap_rel():
+    """ZGAP's two-box idea, swept wide and offset along +y.
+
+    Two boxes stacked in z block the HIGH and LOW elbow arcs while leaving a
+    channel between them, which splits the valid set in theta WITHOUT making
+    any weld point unreachable -- (A) kept, (B) induced (findings 24). The
+    y offset is the new part: findings 26 showed ZGAP closes every door
+    because the upper box sweeps the forearm at the door's fiber, so the pair
+    is pushed toward +y, away from the door and toward the goal end of the
+    seam that actually has to be cut off.
+    """
+    xs = (0.16, 0.20, 0.24, 0.28)
+    yoffs = (0.06, 0.10, 0.14, 0.18)
+    zpairs = ((0.30, 0.58), (0.34, 0.62), (0.38, 0.66), (0.42, 0.70))
+    hs = ((0.060, 0.080, 0.060), (0.060, 0.120, 0.060),
+          (0.070, 0.070, 0.070))
+    for x, yo, (z1, z2), h in itertools.product(xs, yoffs, zpairs, hs):
+        yield (f"zgap-rel x{x:.2f} y+{yo:.2f} z{z1:.2f}/{z2:.2f} h{h}",
+               (BoxObstacle(center=(x, yo, z1), half_extent=h, label="low"),
+                BoxObstacle(center=(x, yo, z2), half_extent=h, label="high")))
+
+
 FAMILIES = {"1box": one_box, "2box-zgap": two_box_zgap,
             "2box-ygap": two_box_ygap, "3box-slot": three_box_slot,
-            "fine": fine_1box}
+            "fine": fine_1box, "asym-zgap": asym_zgap,
+            "asym-high": asym_high,
+            "zgap-rel": zgap_rel}
+
+# Weld placements to scan in --mode welds. Door position is set by
+# |W(y) - E*| = d_ew, so x and z move the doors along the seam and the tilt
+# decides whether the fiber clears the joint limits (findings 12).
+WELD_X = (0.24, 0.28, 0.32, 0.36)
+WELD_Z = (0.40, 0.46, 0.52)
+WELD_TILT = (0.0, 15.0, 30.0, 45.0)
+
+
+# --------------------------------------------------------------------------
+# driver
+# --------------------------------------------------------------------------
+
+def _job(spec):
+    tilt, tag, obs, weld_kw, res = spec
+    try:
+        r = analyse(tilt, obs, res, weld_kw)
+    except Exception as exc:                            # keep the sweep going
+        return dict(tag=tag, tilt=tilt, failed=repr(exc))
+    r.update(tilt=tilt, tag=tag, weld=dict(weld_kw or {}),
+             obstacles=[dict(center=list(b.center),
+                             half_extent=list(b.half_extent),
+                             label=b.label) for b in obs])
+    return r
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--res", type=int, default=31)
+    ap.add_argument("--mode", default="scenes", choices=("scenes", "welds"))
+    ap.add_argument("--res", type=int, default=61)
     ap.add_argument("--out", default="out/search.json")
     ap.add_argument("--tilts", default="0,30")
-    ap.add_argument("--families", default="2box-zgap,2box-ygap,3box-slot",
+    ap.add_argument("--jobs", type=int, default=1)
+    ap.add_argument("--weld-x", type=float, default=0.28)
+    ap.add_argument("--weld-z", type=float, default=0.46)
+    ap.add_argument("--weld-half-y", type=float, default=0.26)
+    ap.add_argument("--families", default="asym-zgap,asym-high,2box-zgap",
                     help="comma-separated: " + ",".join(FAMILIES))
     args = ap.parse_args()
 
-    tilts = tuple(float(t) for t in args.tilts.split(","))
-    combos = []
-    for fam in args.families.split(","):
-        for tilt in tilts:
-            for tag, obs in FAMILIES[fam.strip()]():
-                combos.append((tilt, tag, obs))
+    specs = []
+    if args.mode == "welds":
+        for x, z, tilt in itertools.product(WELD_X, WELD_Z, WELD_TILT):
+            specs.append((tilt, f"weld x{x:.2f} z{z:.2f} tilt{tilt:.0f}", (),
+                          dict(x=x, z=z, half_y=args.weld_half_y), args.res))
+    else:
+        weld_kw = dict(x=args.weld_x, z=args.weld_z, half_y=args.weld_half_y)
+        tilts = tuple(float(t) for t in args.tilts.split(","))
+        for fam in args.families.split(","):
+            for tilt in tilts:
+                for tag, obs in FAMILIES[fam.strip()]():
+                    specs.append((tilt, tag, obs, weld_kw, args.res))
+
+    t0 = time.time()
+    print(f"[{args.mode}] {len(specs)} candidates at res {args.res}, "
+          f"{args.jobs} job(s)", flush=True)
 
     rows = []
-    t0 = time.time()
-    print(f"{len(combos)} candidates at res {args.res} "
-          f"(families: {args.families})", flush=True)
-    for i, (tilt, tag, obs) in enumerate(combos):
-        x = z = 0.0
-        h = []
-        try:
-            r = analyse(tilt, obs, args.res)
-        except Exception as exc:                      # keep the sweep going
-            print(f"   [{i}] FAILED {exc}", flush=True)
-            continue
-        r.update(tilt=tilt, tag=tag,
-                 obstacles=[dict(center=list(b.center),
-                                 half_extent=list(b.half_extent),
-                                 label=b.label) for b in obs])
-        rows.append(r)
-        good = (r["curtain_cols"] == 0 and not r["start_goal_same"])
-        if good:
-            print(f"   *** tilt {tilt:4.0f}  {tag}  "
-                  f"curtain {r['curtain_cols']}  pinch {r['pinch']}/{args.res}  "
-                  f"mean valid {100*r['mean_valid']:.1f}%", flush=True)
-        if i % 40 == 0:
-            print(f"   [{i}/{len(combos)}] {time.time()-t0:.0f}s", flush=True)
+    if args.jobs > 1:
+        import multiprocessing as mp
+        with mp.Pool(args.jobs) as pool:
+            it = pool.imap_unordered(_job, specs)
+            rows = _drain(it, len(specs), t0, args.mode)
+    else:
+        rows = _drain((_job(s) for s in specs), len(specs), t0, args.mode)
 
-    rows.sort(key=lambda r: (r["curtain_cols"] > 0, r["start_goal_same"],
-                             r["pinch"]))
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     json.dump(rows, open(args.out, "w"), indent=1)
 
-    keep = [r for r in rows if r["curtain_cols"] == 0 and not r["start_goal_same"]]
-    print(f"\n{len(keep)} candidate(s) are infeasible by CONNECTIVITY "
-          f"(no curtain, no spanning region) out of {len(rows)}")
-    for r in keep[:20]:
-        print(f"   tilt {r['tilt']:4.0f}  {r['tag']:<46}  "
-              f"pinch {r['pinch']}/{args.res}  "
-              f"start-pages {r['start_pages']}/8  "
-              f"mean valid {100*r['mean_valid']:.1f}%")
-    if not keep:
-        near = [r for r in rows if r["curtain_cols"] <= 2
-                and not r["start_goal_same"]][:10]
-        print("   nearest misses (small curtain, still disconnected):")
-        for r in near:
+    ok = [r for r in rows if not r.get("failed")]
+    if args.mode == "welds":
+        ok.sort(key=lambda r: -r.get("doors_open", 0))
+        print(f"\ndoor landscape, best first ({len(ok)} placements):")
+        for r in ok[:20]:
+            ds = r.get("doors") or []
+            near = sorted((d for d in ds if d["open"]), key=lambda d: d["y"])
+            where = ", ".join(f"y={d['y']:.3f}@{d['page']}({100*d['valid_fraction']:.0f}%)"
+                              for d in near[:3])
+            print(f"   {r['tag']:<34}  doors {r.get('doors_open',0):2d} open / "
+                  f"{r.get('doors_blocked',0):2d} blocked   "
+                  f"mean valid {100*r['mean_valid']:.1f}%   {where}")
+    else:
+        keep = [r for r in ok if verdict(r)]
+        keep.sort(key=lambda r: (-r.get("doors_usable", 0), -r["pinch"]))
+        print(f"\n{len(keep)} candidate(s) satisfy (A) no curtain, (B) no "
+              f"spanning region, (C) open door out of the start region, "
+              f"(D) partner cannot reach the goal -- out of {len(ok)}")
+        for r in keep[:25]:
+            sd = r.get("start_doors") or []
+            d0 = sd[0] if sd else {}
             print(f"   tilt {r['tilt']:4.0f}  {r['tag']:<46}  "
-                  f"curtain {r['curtain_cols']}  pinch {r['pinch']}")
+                  f"usable-doors {r.get('doors_usable',0)}  "
+                  f"door y={d0.get('y',float('nan')):.3f}->{d0.get('partner','?')}  "
+                  f"fiber {100*d0.get('valid_fraction',0):.0f}%  "
+                  f"pinch {r['pinch']}/{args.res}")
+        if not keep:
+            near = [r for r in ok if r["curtain_cols"] == 0
+                    and not r["start_goal_same"]]
+            print(f"   {len(near)} reached (A)+(B) but failed (C)/(D); best by "
+                  f"open doors:")
+            near.sort(key=lambda r: -r.get("doors_open", 0))
+            for r in near[:10]:
+                print(f"   tilt {r['tilt']:4.0f}  {r['tag']:<46}  "
+                      f"doors {r.get('doors_open',0):2d} open, "
+                      f"{r.get('doors_start_region',0)} in start region, "
+                      f"{r.get('doors_usable',0)} usable")
     print(f"\n[json] {args.out}   total {time.time()-t0:.0f}s")
+
+
+def _drain(it, n, t0, mode):
+    rows = []
+    for i, r in enumerate(it):
+        rows.append(r)
+        if r.get("failed"):
+            print(f"   [{i}] FAILED {r['tag']}: {r['failed']}", flush=True)
+        elif mode == "scenes" and verdict(r):
+            sd = (r.get("start_doors") or [{}])[0]
+            print(f"   *** tilt {r['tilt']:4.0f}  {r['tag']}  "
+                  f"usable-doors {r.get('doors_usable')}  "
+                  f"door y={sd.get('y', float('nan')):.3f} -> "
+                  f"{sd.get('partner','?')}  pinch {r['pinch']}", flush=True)
+        if i % 25 == 0:
+            print(f"   [{i}/{n}] {time.time()-t0:.0f}s", flush=True)
+    return rows
 
 
 if __name__ == "__main__":

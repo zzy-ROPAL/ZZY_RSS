@@ -2,18 +2,38 @@
 
     EXP 1  no obstacle                 robot FINISHES the weld
     EXP 2  obstacle, doors CLOSED      infeasible; proof closes in ONE page
-    EXP 3  obstacle, doors OPEN        infeasible; proof crosses the door and
-                                       EXPANDS to a second page
+    EXP 3  obstacle, door OPEN         infeasible; the proof CROSSES the door
+                                       and EXPANDS to a second page
 
-Shared scene: weld x = 0.28, z = 0.46, y in [-0.26, 0.26]; a SINGLE start
-posture on page (++-) at y = 0; goal is y = 1.
+EXP 1 and EXP 2 share a scene: weld x = 0.28, z = 0.46, y in [-0.26, 0.26];
+a SINGLE start posture on page (++-) at y = 0; goal is y = 1.
 
-The torch tilt is the door switch (docs/findings.md 12): a q2 door pins the
-configuration so q5 is determined, and the s6 mirror shifts it by pi. At
-tilt 0 that lands on +/-180 deg, outside the real +/-178.85 deg limit, so
-every door is blocked. Tilting 30 deg moves q5 off zero and opens them.
+EXP 3 needs its own weld placement, and that is not a convenience -- it is
+what makes the experiment possible at all (docs/findings.md 26-27). Two
+things have to hold at once, and they pull against each other: the obstacle
+must disconnect the start from the goal, and some door must stay OPEN.
+A door is open iff some point of its self-motion fiber is collision-free and
+within limits, and that fiber is the forearm sweeping a cone about the
+shoulder-wrist axis -- the same motion an obstacle has to block in order to
+disconnect anything. At the shared placement the doors sit at y = 0.088,
+right against the start, and ZGAP sits on their fiber: all 16 doors close
+(witness collision:forearm/high) and EXP 3 collapses into a second copy of
+EXP 2. Door position is set by |W(y) - E*| = d_ew, so pushing the seam out to
+x = 0.36 moves the door to y = 0.429, mid-seam, with 97.4% of its fiber
+valid. That leaves room for an obstacle to cut off the goal end of the seam
+without touching the door.
 
-Outputs per experiment: an mp4 and an annotated 8-page figure.
+The torch tilt remains the joint-limit half of the switch (findings 12): a q2
+door pins the configuration so q5 is determined, and the s6 mirror shifts it
+by pi. At tilt 0 that lands on +/-180 deg, outside the real +/-178.85 deg
+limit, so the start page's doors are shut no matter where the obstacle is.
+Tilt 30 deg moves q5 off zero and opens them.
+
+Outputs per experiment: an mp4 and an annotated 8-page figure. EXP 3 also
+writes exp3_door_crossing.png (wall #1 -> the fiber -> wall #2) and
+exp3_certificate.json (the verdict from flood.run_proof, which walks every
+page reachable through every open door -- the two walls in the figure are the
+illustration, not the proof).
 """
 
 from __future__ import annotations
@@ -40,7 +60,7 @@ from zzy_rss.arm import SrsArm  # noqa: E402
 from zzy_rss.doors import build_sigma, door_fiber_validity  # noqa: E402
 from zzy_rss.flood import (  # noqa: E402
     find_inf_proof_region, invalid_points, label_regions, live_discs,
-    other_valid_points, region_points, thin,
+    other_valid_points, region_points, run_proof, thin, write_certificate,
 )
 from zzy_rss.pagemap import build_page_map  # noqa: E402
 from zzy_rss.params import (  # noqa: E402
@@ -72,26 +92,77 @@ ZGAP = (BoxObstacle(center=(0.14, 0.0, 0.38),
         BoxObstacle(center=(0.14, 0.0, 0.66),
                     half_extent=(0.06, 0.06, 0.06), label="high"))
 OBS_CLOSED = ZGAP
-OBS_OPEN = ZGAP
+
+# EXP 3: its own weld placement and its own obstacle (findings 26-27).
+# The seam is pushed out to x = 0.36, which moves the start page's doors from
+# y = 0.088 (hard against the start, fiber 88% valid) to y = 0.429 -- mid-seam,
+# fiber 97.4% valid. The obstacle is ZGAP's two-box idea slid to +y: the pair
+# still blocks the high and low elbow arcs, so the elbow cannot cross from one
+# side of the gap to the other, but it now sits over the GOAL half of the seam
+# and clears the door's fiber cone entirely. ZGAP centred at y = 0 was the only
+# reason every door shut.
+EXP3_TILT = 30.0
+EXP3_WELD = dict(x=0.36, z=0.46)
+OBS_OPEN = (BoxObstacle(center=(0.16, 0.06, 0.42),
+                        half_extent=(0.06, 0.12, 0.06), label="low"),
+            BoxObstacle(center=(0.16, 0.06, 0.70),
+                        half_extent=(0.06, 0.12, 0.06), label="high"))
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
 
 
-def weld_for(tilt_deg):
+def weld_for(tilt_deg, x=0.28, z=0.46, half_y=0.26):
+    """The weld seam. x/z place it in the workspace; the tilt rolls the torch.
+
+    The placement is not cosmetic: door position is set by |W(y) - E*| = d_ew,
+    so x and z decide WHERE along the seam the pages touch, and the tilt
+    decides whether the door's fiber clears the joint limits (findings 12).
+    EXP 1 and EXP 2 keep the original placement; EXP 3 needs its own, and
+    says so (findings 26).
+    """
     a = np.radians(tilt_deg)
-    return WeldParams(p0=(0.28, -0.26, 0.46), p1=(0.28, 0.26, 0.46),
+    return WeldParams(p0=(x, -half_y, z), p1=(x, half_y, z),
                       approach=(float(np.sin(a)), 0.0, -float(np.cos(a))),
                       reference=(float(np.cos(a)), 0.0, float(np.sin(a))))
 
 
-def make(tilt, obstacles, res):
+def make(tilt, obstacles, res, weld_kw=None):
     base = Config()
     cfg = dataclasses.replace(
-        base, weld=weld_for(tilt), pagemap=PageMapParams(n_y=res, n_theta=res),
+        base, weld=weld_for(tilt, **(weld_kw or {})),
+        pagemap=PageMapParams(n_y=res, n_theta=res),
         scene=SceneParams(gap_open=True, obstacles=tuple(obstacles or ())),
         sigma_policy=dataclasses.replace(base.sigma_policy,
                                          enable_fiber_certification=True),
         wall=dataclasses.replace(base.wall, pd_mode="lipschitz"))
     return cfg, SrsArm(cfg.arm), WeldLine(cfg.weld), Scene(cfg.arm, cfg.scene)
+
+
+def theta_seam_check(pms, label=""):
+    """CLAUDE.md invariant 5: the page is a CYLINDER in theta.
+
+    Treating it as a flat rectangle is EXACT, not approximate, only while no
+    valid cell touches theta = +/-pi -- the joint limits must cut the theta
+    circle before the seam. That is a measured property of a placement, not a
+    theorem, so every new scene has to be re-measured. If a valid cell does
+    touch the seam, a wall that looks closed on the rectangle is actually
+    open around the back of the cylinder and the proof is void (findings 23).
+    """
+    touching = []
+    for n, pm in pms.items():
+        lo = int(pm.valid_mask[:, 0].sum())
+        hi = int(pm.valid_mask[:, -1].sum())
+        if lo or hi:
+            touching.append((n, lo, hi))
+    if touching:
+        print(f"[seam]{label} WARNING: valid cells touch theta=+/-pi on "
+              f"{len(touching)} page(s): "
+              + ", ".join(f"{n}({lo}+{hi})" for n, lo, hi in touching)
+              + " -- the flat-rectangle page is NOT equivalent to the "
+                "cylinder here; theta_periodic must be True.")
+    else:
+        print(f"[seam]{label} no valid cell touches theta=+/-pi on any of the "
+              f"{len(pms)} pages: flat rectangle == cylinder, exactly.")
+    return touching
 
 
 def bfs_path(pm, lab=None, region=None, to_goal=True):
@@ -269,6 +340,106 @@ def fig8(pms, sigma, walls, title, note, out_path, path=None):
     print(f"[fig] {out_path}")
 
 
+def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, wallB, discsA, discsB,
+                      door, fiber, pathA, pathB, out_path, drift_mm=None,
+                      pageA=START_PAGE, pageB=PARTNER_PAGE):
+    """How the infeasibility proof gets from one page to the next.
+
+    Left:   the start page. Wall #1 seals the start region everywhere EXCEPT
+            at the door -- a wall may not cross a door (invariant 7), because
+            a door is a real way out.
+    Middle: the way out, in the robot's own joint space. q1 and q3
+            counter-rotate; the tool never leaves the weld point. At the end
+            of the swing the s2 sign has flipped, so the SAME posture is now
+            read on the partner page.
+    Right:  the partner page, where the proof builds wall #2. Both walls
+            together are the certificate.
+    """
+    from matplotlib.patches import ConnectionPatch
+
+    fig = plt.figure(figsize=(21, 7.4))
+    gs = fig.add_gridspec(1, 3, width_ratios=(1.0, 1.12, 1.0), wspace=0.26)
+    axA = fig.add_subplot(gs[0, 0])
+    ax3 = fig.add_subplot(gs[0, 1], projection="3d")
+    axB = fig.add_subplot(gs[0, 2])
+    ay, at = door.anchor
+
+    # ---- 1. start page, wall #1 -----------------------------------------
+    draw_page(axA, pmA, path=pathA, wall=wallA, discs=discsA,
+              title=f"1.  page ({pageA}):  wall #1 seals the start region")
+    axA.scatter([0.0], [0.0], marker="*", s=260, color="#ffffff",
+                edgecolor="#111", zorder=9)
+    axA.text(0.03, 0.22, "start", fontsize=9, fontweight="bold")
+    axA.annotate("OPEN DOOR\nthe wall is forbidden\nto cross it",
+                 xy=(ay, at), xytext=(min(ay + 0.20, 0.52), at + 1.45),
+                 fontsize=9, fontweight="bold", color="#1d3557",
+                 ha="left", arrowprops=dict(arrowstyle="-|>", lw=2.0,
+                                            color="#1d3557"))
+
+    # ---- 2. the self-motion fiber ---------------------------------------
+    p0, p1 = weld.p0, weld.p1
+    ax3.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
+             color="#e9c46a", lw=9, solid_capstyle="round", zorder=0)
+    ax3.plot([0, 0], [0, 0], [0, 0.240], color="#888888", lw=10,
+             solid_capstyle="round", zorder=0)
+    for c, h, _l in scene.boxes:
+        draw_box(ax3, c, h)
+    n = len(fiber)
+    step = max(1, n // 8)
+    for idx in list(range(0, n, step)) + [n - 1]:
+        q = fiber[idx]
+        f = arm.frames(q)
+        pts = [f["shoulder"], f["elbow"], f["wrist"], f["tool"]]
+        a = 0.22 + 0.78 * (idx / max(1, n - 1))
+        for i, col in enumerate(("#1d3557", "#4895ef", "#e76f51")):
+            u, v = pts[i], pts[i + 1]
+            ax3.plot([u[0], v[0]], [u[1], v[1]], [u[2], v[2]], color=col,
+                     lw=5.5, alpha=a, solid_capstyle="round")
+        ax3.scatter(*pts[1], color="#222", s=18, alpha=a, depthshade=False)
+    tip = arm.fk(fiber[0])[0]
+    ax3.scatter(*tip, color="#e63946", s=190, depthshade=False,
+                edgecolor="#111", zorder=10)
+    ax3.set_xlim(-0.25, 0.60); ax3.set_ylim(-0.42, 0.42); ax3.set_zlim(0, 0.80)
+    ax3.set_box_aspect((0.85, 0.84, 0.80))
+    ax3.set_xlabel("x [m]"); ax3.set_ylabel("y [m]"); ax3.set_zlabel("z [m]")
+    ax3.view_init(elev=20, azim=-72)
+    drift = ("" if drift_mm is None
+             else f"\ntool drift over the whole swing: {drift_mm:.1e} mm")
+    ax3.set_title(f"2.  crossing it: a SELF-MOTION at y={ay:.3f}\n"
+                  r"$q_1$ and $q_3$ counter-rotate, tool pinned to the weld"
+                  f"{drift}", fontsize=11)
+
+    # ---- 3. partner page, wall #2 ---------------------------------------
+    if pmB is not None:
+        draw_page(axB, pmB, path=pathB, wall=wallB, discs=discsB,
+                  title=f"3.  page ({pageB}):  wall #2 seals it there too")
+        axB.annotate("arrive here\n(same posture,\nflipped $s_2$)",
+                     xy=(ay, at), xytext=(min(ay + 0.20, 0.52), at - 2.0),
+                     fontsize=9, fontweight="bold", color="#1d3557",
+                     ha="left", arrowprops=dict(arrowstyle="-|>", lw=2.0,
+                                                color="#1d3557"))
+    for (src, dst) in ((axA, ax3), (ax3, axB)):
+        try:
+            con = ConnectionPatch(
+                xyA=(1.02, 0.5), coordsA=src.transAxes,
+                xyB=(-0.04, 0.5), coordsB=dst.transAxes,
+                arrowstyle="-|>", mutation_scale=26, lw=2.6, color="#1d3557")
+            fig.add_artist(con)
+        except Exception:                 # 3-D axes transforms can refuse
+            pass
+
+    fig.suptitle(
+        "HOW THE PROOF PASSES THROUGH THE DOOR\n"
+        "A door is a posture where a sign vanishes, so one robot "
+        "configuration is read by two pages at once. The wall may not cross "
+        "it, so the PROOF crosses it instead: it follows the robot's "
+        "self-motion onto the partner page and closes a second wall there. "
+        "Certificate = wall #1 + the door + wall #2.", fontsize=12)
+    fig.savefig(out_path, dpi=100, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[fig] {out_path}")
+
+
 # -------------------------------------------------------------- video ----
 
 def render(segments, out_path, fps=18):
@@ -313,9 +484,14 @@ def main():
     ap.add_argument("--res", type=int, default=61)
     ap.add_argument("--out", default="out/three")
     ap.add_argument("--iters", type=int, default=14)
+    ap.add_argument("--only", default="123",
+                    help="which experiments to run, e.g. 3 or 23 (default all)")
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
-    report = {}
+    want = args.only
+    # keep the other experiments' entries when only some are re-run
+    rpath = out / "three_report.json"
+    report = json.loads(rpath.read_text()) if rpath.exists() else {}
 
     def pages_and_sigma(cfg, arm, weld, scene):
         pms = {n: build_page_map(cfg, arm, weld, scene,
@@ -332,165 +508,211 @@ def main():
                     n_open += ok; n_blk += (not ok)
         return pms, sig, n_open, n_blk
 
-    # ------------------------------- EXP 1 -------------------------------
-    print("\n=== EXP 1 : no obstacle -> the robot FINISHES the weld ===")
-    cfg, arm, weld, scene = make(0.0, None, args.res)
-    pms, sig, no_, nb = pages_and_sigma(cfg, arm, weld, scene)
-    pm = pms[START_PAGE]
-    path = bfs_path(pm)
-    qlist, keep = qs_from_path(arm, weld, path, START_SIGNS)
-    print(f"[1] page ({START_PAGE}) valid {pm.stats['frac_valid']*100:.1f}%; "
-          f"path {len(path)} waypoints reaching y={path[-1,0]:.2f}; "
-          f"doors {no_} open / {nb} blocked")
-    fig8(pms, sig, {}, "EXPERIMENT 1 — no obstacle: the robot FINISHES the weld",
-         PAGE_NOTE, out / "exp1_pages.png", path=path)
-    render([dict(cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pm, q_list=qlist,
-                 path=path, upto_list=keep, discs=sig[START_PAGE],
-                 page=START_PAGE,
-                 caption=lambda i, p=path, k=keep: (
-                     f"EXP 1  no obstacle   weld "
-                     f"{100*p[k[i],0]:.0f}% complete"))],
-           out / "exp1_feasible.mp4")
-    report["exp1"] = {"verdict": "feasible", "waypoints": len(path),
-                      "doors_open": no_, "doors_blocked": nb}
+    if "1" in want:
+        # ------------------------------- EXP 1 -------------------------------
+        print("\n=== EXP 1 : no obstacle -> the robot FINISHES the weld ===")
+        cfg, arm, weld, scene = make(0.0, None, args.res)
+        pms, sig, no_, nb = pages_and_sigma(cfg, arm, weld, scene)
+        pm = pms[START_PAGE]
+        path = bfs_path(pm)
+        qlist, keep = qs_from_path(arm, weld, path, START_SIGNS)
+        print(f"[1] page ({START_PAGE}) valid {pm.stats['frac_valid']*100:.1f}%; "
+              f"path {len(path)} waypoints reaching y={path[-1,0]:.2f}; "
+              f"doors {no_} open / {nb} blocked")
+        fig8(pms, sig, {}, "EXPERIMENT 1 — no obstacle: the robot FINISHES the weld",
+             PAGE_NOTE, out / "exp1_pages.png", path=path)
+        render([dict(cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pm, q_list=qlist,
+                     path=path, upto_list=keep, discs=sig[START_PAGE],
+                     page=START_PAGE,
+                     caption=lambda i, p=path, k=keep: (
+                         f"EXP 1  no obstacle   weld "
+                         f"{100*p[k[i],0]:.0f}% complete"))],
+               out / "exp1_feasible.mp4")
+        report["exp1"] = {"verdict": "feasible", "waypoints": len(path),
+                          "doors_open": no_, "doors_blocked": nb}
 
-    # ------------------------------- EXP 2 -------------------------------
-    print("\n=== EXP 2 : obstacle, doors CLOSED -> proof in ONE page ===")
-    cfg2, arm2, weld2, scene2 = make(0.0, OBS_CLOSED, args.res)
-    pms2, sig2, no2, nb2 = pages_and_sigma(cfg2, arm2, weld2, scene2)
-    pm2 = pms2[START_PAGE]
-    lab2, regs2 = label_regions(cfg2, pm2)
-    k2 = sorted([r for r in regs2 if r.reaches_start and not r.reaches_goal],
-                key=lambda r: -r.n_cells)[0].index
-    path2 = bfs_path(pm2, lab2, k2, to_goal=False)
-    q2l, keep2 = qs_from_path(arm2, weld2, path2, START_SIGNS)
-    poly2, rep2, live2, disch2 = prove(cfg2, arm2, weld2, scene2, pm2, lab2, k2,
-                                       sig2[START_PAGE], iters=args.iters)
-    ok2 = rep2.ok and poly2.closed
-    print(f"[2] doors {no2} open / {nb2} blocked; robot stalls at y={path2[-1,0]:.2f}")
-    print(f"[2] wall: {rep2.n_passed}/{rep2.n_facets} facets, closed={poly2.closed}, "
-          f"{len(disch2)} disc(s) discharged -> "
-          f"{'PROOF COMPLETE' if ok2 else 'not yet a proof'}")
-    fig8(pms2, sig2, {START_PAGE: poly2.loops},
-         "EXPERIMENT 2 — obstacle, doors CLOSED: the proof closes INSIDE ONE PAGE",
-         PAGE_NOTE, out / "exp2_pages.png")
-    render([dict(cfg=cfg2, arm=arm2, weld=weld2, scene=scene2, pm=pm2,
-                 q_list=q2l, path=path2, upto_list=keep2, wall=poly2.loops,
-                 discs=sig2[START_PAGE], page=START_PAGE,
-                 caption=lambda i, p=path2, k=keep2: (
-                     f"EXP 2  obstacle, doors CLOSED   "
-                     f"blocked at y={p[k[i],0]:.2f}"))],
-           out / "exp2_infeasible_onepage.mp4")
-    report["exp2"] = {"verdict": "proven_one_page" if ok2 else "incomplete",
-                      "facets": [rep2.n_passed, rep2.n_facets],
-                      "closed": bool(poly2.closed),
-                      "doors_open": no2, "doors_blocked": nb2,
-                      "discs_discharged": len(disch2)}
+    if "2" in want:
+        # ------------------------------- EXP 2 -------------------------------
+        print("\n=== EXP 2 : obstacle, doors CLOSED -> proof in ONE page ===")
+        cfg2, arm2, weld2, scene2 = make(0.0, OBS_CLOSED, args.res)
+        pms2, sig2, no2, nb2 = pages_and_sigma(cfg2, arm2, weld2, scene2)
+        pm2 = pms2[START_PAGE]
+        lab2, regs2 = label_regions(cfg2, pm2)
+        k2 = sorted([r for r in regs2 if r.reaches_start and not r.reaches_goal],
+                    key=lambda r: -r.n_cells)[0].index
+        path2 = bfs_path(pm2, lab2, k2, to_goal=False)
+        q2l, keep2 = qs_from_path(arm2, weld2, path2, START_SIGNS)
+        poly2, rep2, live2, disch2 = prove(cfg2, arm2, weld2, scene2, pm2, lab2, k2,
+                                           sig2[START_PAGE], iters=args.iters)
+        ok2 = rep2.ok and poly2.closed
+        print(f"[2] doors {no2} open / {nb2} blocked; robot stalls at y={path2[-1,0]:.2f}")
+        print(f"[2] wall: {rep2.n_passed}/{rep2.n_facets} facets, closed={poly2.closed}, "
+              f"{len(disch2)} disc(s) discharged -> "
+              f"{'PROOF COMPLETE' if ok2 else 'not yet a proof'}")
+        fig8(pms2, sig2, {START_PAGE: poly2.loops},
+             "EXPERIMENT 2 — obstacle, doors CLOSED: the proof closes INSIDE ONE PAGE",
+             PAGE_NOTE, out / "exp2_pages.png")
+        render([dict(cfg=cfg2, arm=arm2, weld=weld2, scene=scene2, pm=pm2,
+                     q_list=q2l, path=path2, upto_list=keep2, wall=poly2.loops,
+                     discs=sig2[START_PAGE], page=START_PAGE,
+                     caption=lambda i, p=path2, k=keep2: (
+                         f"EXP 2  obstacle, doors CLOSED   "
+                         f"blocked at y={p[k[i],0]:.2f}"))],
+               out / "exp2_infeasible_onepage.mp4")
+        report["exp2"] = {"verdict": "proven_one_page" if ok2 else "incomplete",
+                          "facets": [rep2.n_passed, rep2.n_facets],
+                          "closed": bool(poly2.closed),
+                          "doors_open": no2, "doors_blocked": nb2,
+                          "discs_discharged": len(disch2)}
 
+    if "3" in want:
+        # ------------------------------- EXP 3 -------------------------------
+        print("\n=== EXP 3 : obstacle, door OPEN -> the proof CROSSES to a 2nd page ===")
+        cfg3, arm3, weld3, scene3 = make(EXP3_TILT, OBS_OPEN, args.res, EXP3_WELD)
+        pms3, sig3, no3, nb3 = pages_and_sigma(cfg3, arm3, weld3, scene3)
+        seam3 = theta_seam_check(pms3, " exp3")
+        pmA, pmB = pms3[START_PAGE], pms3[PARTNER_PAGE]
+        labA, regsA = label_regions(cfg3, pmA)
+        labB, regsB = label_regions(cfg3, pmB)
+        kA = sorted([r for r in regsA if r.reaches_start and not r.reaches_goal],
+                    key=lambda r: -r.n_cells)[0].index
+        pathA = bfs_path(pmA, labA, kA, to_goal=False)
+        qA, keepA = qs_from_path(arm3, weld3, pathA, START_SIGNS)
 
-    # ------------------------------- EXP 3 -------------------------------
-    print("\n=== EXP 3 : obstacle, doors OPEN -> proof EXPANDS through the door ===")
-    cfg3, arm3, weld3, scene3 = make(30.0, OBS_OPEN, args.res)
-    pms3, sig3, no3, nb3 = pages_and_sigma(cfg3, arm3, weld3, scene3)
-    pmA, pmB = pms3[START_PAGE], pms3[PARTNER_PAGE]
-    labA, regsA = label_regions(cfg3, pmA)
-    labB, regsB = label_regions(cfg3, pmB)
-    kA = sorted([r for r in regsA if r.reaches_start and not r.reaches_goal],
-                key=lambda r: -r.n_cells)[0].index
-    pathA = bfs_path(pmA, labA, kA, to_goal=False)
-    qA, keepA = qs_from_path(arm3, weld3, pathA, START_SIGNS)
+        # the open door out of the start region
+        door = None
+        ptsA = region_points(pmA, labA, kA)
+        tolA = float(np.hypot(pmA.y_grid[1] - pmA.y_grid[0],
+                              pmA.theta_grid[1] - pmA.theta_grid[0]))
+        for d in sig3.get(START_PAGE, []):
+            if not d.vanishing or d.__dict__.get("_state") != "open":
+                continue
+            ay, at = d.anchor
+            if float(np.min(np.linalg.norm(ptsA - np.array([ay, at]), axis=1))) <= \
+                    max(tolA, d.radius):
+                door = d
+                break
+        print(f"[3] doors {no3} open / {nb3} blocked; "
+              f"door out of the start region: "
+              f"{'y=%.4f' % door.anchor[0] if door is not None else 'NONE'}")
 
-    # the open door out of the start region
-    door = None
-    ptsA = region_points(pmA, labA, kA)
-    tolA = float(np.hypot(pmA.y_grid[1] - pmA.y_grid[0],
-                          pmA.theta_grid[1] - pmA.theta_grid[0]))
-    for d in sig3.get(START_PAGE, []):
-        if not d.vanishing or d.__dict__.get("_state") != "open":
-            continue
-        ay, at = d.anchor
-        if float(np.min(np.linalg.norm(ptsA - np.array([ay, at]), axis=1))) <= \
-                max(tolA, d.radius):
-            door = d
-            break
-    print(f"[3] doors {no3} open / {nb3} blocked; "
-          f"door out of the start region: "
-          f"{'y=%.4f' % door.anchor[0] if door is not None else 'NONE'}")
+        segs = [dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3, pm=pmA,
+                     q_list=qA, path=pathA, upto_list=keepA,
+                     discs=sig3[START_PAGE], page=START_PAGE,
+                     caption=lambda i, p=pathA, k=keepA: (
+                         f"EXP 3  obstacle, door OPEN   "
+                         f"page ({START_PAGE}) blocked at y={p[k[i],0]:.2f}"))]
 
-    segs = [dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3, pm=pmA,
-                 q_list=qA, path=pathA, upto_list=keepA,
-                 discs=sig3[START_PAGE], page=START_PAGE,
-                 caption=lambda i, p=pathA, k=keepA: (
-                     f"EXP 3  obstacle, doors OPEN   "
-                     f"page ({START_PAGE}) blocked at y={p[k[i],0]:.2f}"))]
+        # the door crossing itself: a SELF-MOTION. q1 and q3 counter-rotate while
+        # the tool stands still on the weld; at delta = pi we are on the s2 mirror,
+        # i.e. the partner page. This segment exists only in Q -- in Y+ it is ONE
+        # point, which is exactly where the [IROS] bijection fails.
+        kB, fiber, drift = None, None, None
+        if door is not None:
+            ay, at = door.anchor
+            r0 = arm3.ik_branch(*weld3.pose(ay), at, START_SIGNS)
+            if r0.ok:
+                fiber = []
+                for dlt in np.linspace(0.0, np.pi, 26):
+                    q = r0.q.copy(); q[0] += dlt; q[2] -= dlt
+                    fiber.append(q)
+                tip0 = arm3.fk(r0.q)[0]
+                drift = max(float(np.linalg.norm(arm3.fk(q)[0] - tip0)) for q in fiber)
+                print(f"[3] door crossing: {len(fiber)}-step self-motion, "
+                      f"tool drift {drift*1e3:.2e} mm (it never leaves the weld)")
+                segs.append(dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3,
+                                 pm=pmA, q_list=fiber, path=pathA,
+                                 upto_list=[len(keepA) - 1] * len(fiber),
+                                 discs=sig3[START_PAGE], page=START_PAGE,
+                                 caption=lambda i, n=len(fiber): (
+                                     "EXP 3  CROSSING THE DOOR: self-motion, "
+                                     f"tool fixed  ({100*i/(n-1):.0f}%)")))
+            i = int(np.argmin(np.abs(pmB.y_grid - ay)))
+            j = int(np.argmin(np.abs(pmB.theta_grid - at)))
+            sub = labB[max(0, i-2):i+3, max(0, j-2):j+3]
+            ks = sorted({int(v) for v in np.unique(sub) if v > 0})
+            kB = ks[0] if ks else None
 
-    # the door crossing itself: a SELF-MOTION. q1 and q3 counter-rotate while
-    # the tool stands still on the weld; at delta = pi we are on the s2 mirror,
-    # i.e. the partner page. This segment exists only in Q -- in Y+ it is ONE
-    # point, which is exactly where the [IROS] bijection fails.
-    kB = None
-    if door is not None:
-        ay, at = door.anchor
-        r0 = arm3.ik_branch(*weld3.pose(ay), at, START_SIGNS)
-        if r0.ok:
-            fiber = []
-            for dlt in np.linspace(0.0, np.pi, 26):
-                q = r0.q.copy(); q[0] += dlt; q[2] -= dlt
-                fiber.append(q)
-            tip0 = arm3.fk(r0.q)[0]
-            drift = max(float(np.linalg.norm(arm3.fk(q)[0] - tip0)) for q in fiber)
-            print(f"[3] door crossing: {len(fiber)}-step self-motion, "
-                  f"tool drift {drift*1e3:.2e} mm (it never leaves the weld)")
-            segs.append(dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3,
-                             pm=pmA, q_list=fiber, path=pathA,
-                             upto_list=[len(keepA) - 1] * len(fiber),
-                             discs=sig3[START_PAGE], page=START_PAGE,
-                             caption=lambda i, n=len(fiber): (
-                                 "EXP 3  CROSSING THE DOOR: self-motion, "
-                                 f"tool fixed  ({100*i/(n-1):.0f}%)")))
-        i = int(np.argmin(np.abs(pmB.y_grid - ay)))
-        j = int(np.argmin(np.abs(pmB.theta_grid - at)))
-        sub = labB[max(0, i-2):i+3, max(0, j-2):j+3]
-        ks = sorted({int(v) for v in np.unique(sub) if v > 0})
-        kB = ks[0] if ks else None
+        pathB, polyB, repB = None, None, None
+        if kB is not None:
+            pathB = bfs_path(pmB, labB, kB, to_goal=False)
+            qB, keepB = qs_from_path(arm3, weld3, pathB,
+                                     tuple(1 if c == "+" else -1 for c in PARTNER_PAGE))
+            segs.append(dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3, pm=pmB,
+                             q_list=qB, path=pathB, upto_list=keepB,
+                             discs=sig3[PARTNER_PAGE], page=PARTNER_PAGE,
+                             caption=lambda i, p=pathB, k=keepB: (
+                                 f"EXP 3  now on page ({PARTNER_PAGE})   "
+                                 f"still blocked, at y={p[k[i],0]:.2f}")))
 
-    pathB, polyB, repB = None, None, None
-    if kB is not None:
-        pathB = bfs_path(pmB, labB, kB, to_goal=False)
-        qB, keepB = qs_from_path(arm3, weld3, pathB,
-                                 tuple(1 if c == "+" else -1 for c in PARTNER_PAGE))
-        segs.append(dict(cfg=cfg3, arm=arm3, weld=weld3, scene=scene3, pm=pmB,
-                         q_list=qB, path=pathB, upto_list=keepB,
-                         discs=sig3[PARTNER_PAGE], page=PARTNER_PAGE,
-                         caption=lambda i, p=pathB, k=keepB: (
-                             f"EXP 3  now on page ({PARTNER_PAGE})   "
-                             f"still blocked, at y={p[k[i],0]:.2f}")))
+        polyA, repA, liveA, dischA = prove(cfg3, arm3, weld3, scene3, pmA, labA, kA,
+                                           sig3[START_PAGE], iters=args.iters)
+        print(f"[3] wall on ({START_PAGE}) region {kA}: {repA.n_passed}/{repA.n_facets} "
+              f"facets, closed={polyA.closed}")
+        walls3 = {START_PAGE: polyA.loops}
+        if kB is not None:
+            polyB, repB, liveB, dischB = prove(cfg3, arm3, weld3, scene3, pmB, labB,
+                                               kB, sig3[PARTNER_PAGE], iters=args.iters)
+            walls3[PARTNER_PAGE] = polyB.loops
+            print(f"[3] wall on ({PARTNER_PAGE}) region {kB}: "
+                  f"{repB.n_passed}/{repB.n_facets} facets, closed={polyB.closed}")
 
-    polyA, repA, liveA, dischA = prove(cfg3, arm3, weld3, scene3, pmA, labA, kA,
-                                       sig3[START_PAGE], iters=args.iters)
-    print(f"[3] wall on ({START_PAGE}) region {kA}: {repA.n_passed}/{repA.n_facets} "
-          f"facets, closed={polyA.closed}")
-    walls3 = {START_PAGE: polyA.loops}
-    if kB is not None:
-        polyB, repB, liveB, dischB = prove(cfg3, arm3, weld3, scene3, pmB, labB,
-                                           kB, sig3[PARTNER_PAGE], iters=args.iters)
-        walls3[PARTNER_PAGE] = polyB.loops
-        print(f"[3] wall on ({PARTNER_PAGE}) region {kB}: "
-              f"{repB.n_passed}/{repB.n_facets} facets, closed={polyB.closed}")
-    fig8(pms3, sig3, walls3,
-         "EXPERIMENT 3 — obstacle, doors OPEN: the proof CROSSES a door and "
-         "EXPANDS to a second page", PAGE_NOTE, out / "exp3_pages.png")
-    render(segs, out / "exp3_infeasible_twopage.mp4")
-    report["exp3"] = {
-        "doors_open": no3, "doors_blocked": nb3,
-        "door_y": float(door.anchor[0]) if door is not None else None,
-        "pages_walled": list(walls3),
-        "facetsA": [repA.n_passed, repA.n_facets], "closedA": bool(polyA.closed),
-        "facetsB": ([repB.n_passed, repB.n_facets] if repB else None),
-        "closedB": (bool(polyB.closed) if polyB else None)}
+        # ---- the VERDICT, from the transitive page/door flood ------------------
+        # The two walls above are what the figure and the video show. They are NOT
+        # the proof: with more than one open door the certificate has to cover
+        # every region reachable through every chain of doors, and only
+        # flood.run_proof walks that graph. Printing closed=True off two walls
+        # while a third region sits unvisited would be the same class of error as
+        # calling this experiment "doors OPEN" while all 16 were shut.
+        print("\n[3] --- verdict from flood.run_proof (all pages, all doors) ---")
+        res3 = run_proof(cfg3, arm3, weld3, scene3, pms3, sig3, verbose=True)
+        print(f"[3] run_proof: proven={res3.proven} -- {res3.reason}")
+        print(f"[3] regions visited {len(res3.regions_visited)}, "
+              f"walls in certificate {len(res3.certificate)}, "
+              f"doors followed {len(res3.doors_followed)}")
+        for c in res3.certificate:
+            print(f"[3]   wall on {c['page']}/{c['region']}: "
+                  f"{c['n_passed']}/{c['n_facets']} facets, closed={c['closed']}, "
+                  f"gamma={c['gamma']:.1f}, ok={c['ok']}"
+                  + (f"  ({c['note']})" if c['note'] else ""))
+        for d in res3.doors_followed:
+            print(f"[3]   door followed: {d['from']} -> {d['to']} "
+                  f"at y={d['y']:.4f}, th={d['theta']:+.4f}")
+        write_certificate(res3, sig3, out / "exp3_certificate.json")
 
-    (out / "three_report.json").write_text(json.dumps(report, indent=2, default=str))
-    print(f"\n[out] {out / 'three_report.json'}")
+        # the video panel draws seg["wall"], so hand each segment the wall of
+        # the page it plays on: the viewer sees the robot stall against wall #1,
+        # cross the door, and stall again against wall #2.
+        for seg in segs:
+            seg["wall"] = walls3.get(seg["page"])
+
+        fig8(pms3, sig3, walls3,
+             "EXPERIMENT 3 — obstacle, door OPEN: the proof CROSSES a door and "
+             "EXPANDS to a second page", PAGE_NOTE, out / "exp3_pages.png")
+        if door is not None and fiber is not None:
+            fig_door_crossing(arm3, weld3, scene3, pmA, pmB if kB is not None else None,
+                              polyA.loops, polyB.loops if polyB else None,
+                              sig3[START_PAGE], sig3[PARTNER_PAGE], door, fiber,
+                              pathA, pathB, out / "exp3_door_crossing.png",
+                              drift_mm=drift * 1e3 if drift is not None else None)
+        render(segs, out / "exp3_infeasible_twopage.mp4")
+        report["exp3"] = {
+            "weld": dict(EXP3_WELD, tilt=EXP3_TILT),
+            "doors_open": no3, "doors_blocked": nb3,
+            "door_y": float(door.anchor[0]) if door is not None else None,
+            "door_fiber_drift_mm": (drift * 1e3) if drift is not None else None,
+            "pages_walled": list(walls3),
+            "facetsA": [repA.n_passed, repA.n_facets], "closedA": bool(polyA.closed),
+            "facetsB": ([repB.n_passed, repB.n_facets] if repB else None),
+            "closedB": (bool(polyB.closed) if polyB else None),
+            "theta_seam_touching_pages": [n for n, _, _ in seam3],
+            "verdict": {"proven": bool(res3.proven), "reason": res3.reason,
+                        "regions_visited": len(res3.regions_visited),
+                        "certificate": res3.certificate,
+                        "doors_followed": res3.doors_followed}}
+
+    rpath.write_text(json.dumps(report, indent=2, default=str))
+    print(f"\n[out] {rpath}")
 
 
 if __name__ == "__main__":
