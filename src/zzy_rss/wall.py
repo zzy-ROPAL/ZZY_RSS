@@ -128,25 +128,34 @@ def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
 def virtual_boundary_samples(cfg: Config, n_per_edge: int = 120) -> np.ndarray:
     """Virtual-VALID ring outside the page, sampled as training data.
 
-    IJRR regards configuration-space boundaries as a virtual obstacle region of
+    IJRR treats configuration-space boundaries as a virtual obstacle region of
     positive thickness with a virtual free region enclosing it, and samples
-    both. The outer ring is labelled into the class NOT holding the seed, which
-    forces the wall to close through the virtual invalid band rather than run
-    off the edge of the page. Without this, Definition 1 (I) is unobtainable.
+    both. The outer ring goes into the class NOT holding the seed, which forces
+    the wall to close through the virtual invalid band instead of running off
+    the page.
+
+    ONLY IN y. theta is an arm angle, so the page is a cylinder and has no
+    theta boundary to close against; putting a ring there asks the wall to
+    close across a seam that is not an edge. The y ends are real -- the weld
+    genuinely starts and stops.
     """
     pm = cfg.pagemap
     eps = cfg.wall.virtual_band
     y0, y1 = pm.y_min - 2.0 * eps, pm.y_max + 2.0 * eps
-    t0, t1 = pm.theta_min - 2.0 * eps, pm.theta_max + 2.0 * eps
-    ys = np.linspace(y0, y1, n_per_edge)
-    ts = np.linspace(t0, t1, n_per_edge)
-    ring = np.vstack([
-        np.column_stack([ys, np.full_like(ys, t0)]),
-        np.column_stack([ys, np.full_like(ys, t1)]),
+    ts = np.linspace(pm.theta_min, pm.theta_max, n_per_edge)
+    if not getattr(pm, "theta_periodic", True):
+        t0, t1 = pm.theta_min - 2.0 * eps, pm.theta_max + 2.0 * eps
+        ys = np.linspace(y0, y1, n_per_edge)
+        return np.vstack([
+            np.column_stack([ys, np.full_like(ys, t0)]),
+            np.column_stack([ys, np.full_like(ys, t1)]),
+            np.column_stack([np.full_like(ts, y0), ts]),
+            np.column_stack([np.full_like(ts, y1), ts]),
+        ])
+    return np.vstack([
         np.column_stack([np.full_like(ts, y0), ts]),
         np.column_stack([np.full_like(ts, y1), ts]),
     ])
-    return ring
 
 
 def in_virtual_invalid(cfg: Config, pts: np.ndarray) -> np.ndarray:
@@ -154,6 +163,10 @@ def in_virtual_invalid(cfg: Config, pts: np.ndarray) -> np.ndarray:
     pm = cfg.pagemap
     eps = cfg.wall.virtual_band
     y, t = pts[:, 0], pts[:, 1]
+    if getattr(pm, "theta_periodic", True):
+        outside = (y < pm.y_min) | (y > pm.y_max)
+        far = (y < pm.y_min - eps) | (y > pm.y_max + eps)
+        return outside & ~far
     outside = (y < pm.y_min) | (y > pm.y_max) | (t < pm.theta_min) | (t > pm.theta_max)
     far = ((y < pm.y_min - eps) | (y > pm.y_max + eps)
            | (t < pm.theta_min - eps) | (t > pm.theta_max + eps))
@@ -280,7 +293,15 @@ def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polyt
     # the closure test failed and Definition 1 (I) was never established.
     m = cfg.wall.recon_margin * eps
     ys = np.linspace(pm.y_min - m, pm.y_max + m, grid_res)
-    ts = np.linspace(pm.theta_min - m, pm.theta_max + m, grid_res)
+    if getattr(pm, "theta_periodic", True):
+        # Tile theta by one period either side. A wall that wraps the cylinder
+        # is not a closed curve on the [-pi, pi] rectangle, so tracing it flat
+        # returns an open arc ending on the theta edge; on the tiled grid it
+        # traces as one continuous curve.
+        span = pm.theta_max - pm.theta_min
+        ts = np.linspace(pm.theta_min - span, pm.theta_max + span, 3 * grid_res // 2)
+    else:
+        ts = np.linspace(pm.theta_min - m, pm.theta_max + m, grid_res)
     yy, tt = np.meshgrid(ys, ts, indexing="ij")
     pts = np.column_stack([yy.ravel(), tt.ravel()])
     vals = wall.decision(pts).reshape(yy.shape)
