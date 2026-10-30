@@ -310,6 +310,13 @@ class WallParams:
     # Penetration-depth mode. "ijrr_local_opt" is the paper's own method lifted
     # to Y+; "lipschitz" is the hardened variant (exact workspace PD plus a
     # Lipschitz transfer). Output is labelled either way.
+    # Level-set projection for IJRR Eq. 2. "newton" uses the analytic
+    # gradient directly; "slsqp" is the general solve, same answer but ~8 ms
+    # of scipy overhead per call, and Algorithm 2 makes ~900 calls per pass.
+    projection: str = "newton"
+    newton_iters: int = 30
+    newton_tol: float = 1.0e-10
+
     pd_mode: str = "ijrr_local_opt"
     pd_seed_attempts: int = 3
     lipschitz_fd_step: float = 1.0e-5

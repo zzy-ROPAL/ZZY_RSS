@@ -57,10 +57,40 @@ class WallModel:
     n_seed: int
     n_rest: int
     accuracy: float
+    projection: str = "newton"
+    newton_iters: int = 30
+    newton_tol: float = 1.0e-10
+
+    def __post_init__(self):
+        # Cache the RBF expansion. sklearn's decision_function carries heavy
+        # per-call validation, and SLSQP calls it ~180 times per projection;
+        # with 900 projections per Algorithm 2 pass that was 57 s of the 58 s
+        # an Algorithm 4 iteration took, for 9 support vectors' worth of
+        # arithmetic. Evaluating the sum directly in numpy removes it.
+        object.__setattr__(self, "_sv", np.asarray(self.svm.support_vectors_,
+                                                   dtype=float))
+        object.__setattr__(self, "_dual", np.asarray(self.svm.dual_coef_[0],
+                                                     dtype=float))
+        object.__setattr__(self, "_b", float(self.svm.intercept_[0]))
+        object.__setattr__(self, "_gamma", float(self.svm._gamma))
 
     def decision(self, pts: np.ndarray) -> np.ndarray:
-        pts = np.atleast_2d(np.asarray(pts, dtype=float))
-        return self.svm.decision_function(pts * self.scale)
+        """Same value as svm.decision_function, computed directly."""
+        x = np.atleast_2d(np.asarray(pts, dtype=float)) * self.scale
+        d2 = np.sum((x[:, None, :] - self._sv[None, :, :]) ** 2, axis=2)
+        return np.exp(-self._gamma * d2) @ self._dual + self._b
+
+    def decision_grad(self, pt: np.ndarray) -> np.ndarray:
+        """Gradient of `decision` at one point, in UNSCALED coordinates.
+
+        Giving SLSQP the analytic constraint gradient removes its numerical
+        differentiation, which was two extra evaluations per iteration.
+        """
+        x = np.asarray(pt, dtype=float) * self.scale
+        diff = x[None, :] - self._sv
+        w = np.exp(-self._gamma * np.sum(diff ** 2, axis=1)) * self._dual
+        g = (-2.0 * self._gamma) * (w[:, None] * diff).sum(axis=0)
+        return g * self.scale
 
 
 def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallModel:
@@ -87,7 +117,9 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
             break
         gamma += wp.gamma_step
     return WallModel(svm=svm, gamma=gamma, scale=scale,
-                     n_seed=len(seed_pts), n_rest=len(rest_pts), accuracy=acc)
+                     n_seed=len(seed_pts), n_rest=len(rest_pts), accuracy=acc,
+                     projection=wp.projection, newton_iters=wp.newton_iters,
+                     newton_tol=wp.newton_tol)
 
 
 # --------------------------------------------------------------------------
@@ -179,7 +211,42 @@ def in_virtual_invalid(cfg: Config, pts: np.ndarray) -> np.ndarray:
 
 
 def project_to_wall(wall: WallModel, start: np.ndarray) -> np.ndarray | None:
-    """IJRR Eq. 2: nearest point on the wall, by constrained local optimisation."""
+    """IJRR Eq. 2: nearest point on the wall.
+
+    Two modes, switchable by WallParams.projection.
+
+      [proj:newton]  (default) Newton on the constraint using the analytic
+                     gradient: z <- z - f(z) * grad / |grad|^2, started at the
+                     seed. Because each step moves along the steepest
+                     direction, the fixed point is the nearest wall point to
+                     the seed, which is what Eq. 2 asks for.
+      [proj:slsqp]   the general constrained solve. Same answer, but scipy's
+                     per-call overhead is ~8 ms, and Algorithm 2 does ~900
+                     projections per pass, so it dominated the whole pipeline.
+    """
+    if wall.scale is None:
+        return None
+    if getattr(wall, "projection", "newton") == "slsqp":
+        return _project_slsqp(wall, start)
+
+    z = np.asarray(start, dtype=float).copy()
+    for _ in range(wall.newton_iters):
+        f = float(wall.decision(z)[0])
+        if abs(f) < wall.newton_tol:
+            break
+        g = wall.decision_grad(z)
+        gg = float(np.dot(g, g))
+        if not np.isfinite(gg) or gg < 1e-18:
+            return None
+        z = z - (f / gg) * g
+        if not np.all(np.isfinite(z)):
+            return None
+    if abs(float(wall.decision(z)[0])) > 1e-5:
+        return None
+    return z
+
+
+def _project_slsqp(wall: WallModel, start: np.ndarray) -> np.ndarray | None:
     def obj(z):
         return float(np.sum((z - start) ** 2))
 
@@ -187,20 +254,21 @@ def project_to_wall(wall: WallModel, start: np.ndarray) -> np.ndarray | None:
         return 2.0 * (z - start)
 
     def con(z):
-        # SLSQP can step to a non-finite iterate; sklearn then raises on NaN.
-        # Returning a large residual pushes the line search back instead.
         if not np.all(np.isfinite(z)):
             return 1.0e3
         return float(wall.decision(np.asarray(z, dtype=float))[0])
 
-    res = minimize(obj, start.copy(), jac=grad, constraints=[{"type": "eq",
-                   "fun": con}], method="SLSQP",
-                   options={"maxiter": 60, "ftol": 1e-10})
+    def con_jac(z):
+        if not np.all(np.isfinite(z)):
+            return np.zeros_like(z)
+        return wall.decision_grad(z)
+
+    res = minimize(obj, start.copy(), jac=grad,
+                   constraints=[{"type": "eq", "fun": con, "jac": con_jac}],
+                   method="SLSQP", options={"maxiter": 60, "ftol": 1e-10})
     if not np.all(np.isfinite(res.x)):
         return None
-    if not res.success:
-        return None
-    if abs(float(wall.decision(res.x)[0])) > 1e-5:
+    if not res.success or abs(float(wall.decision(res.x)[0])) > 1e-5:
         return None
     return np.asarray(res.x, dtype=float)
 
