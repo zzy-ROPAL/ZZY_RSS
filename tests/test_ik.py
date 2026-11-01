@@ -248,6 +248,251 @@ def test_fasteval_matches_page_build() -> int:
     return worst
 
 
+# --------------------------------------------------------------------------
+# EXP 5: the arc seam, the interior fold door, and the cylinder page
+# --------------------------------------------------------------------------
+
+
+def _arc_cfg(res: int = 41):
+    """The EXP 5 placement, rebuilt here so the test does not import a script.
+
+    The fixture's x is SOLVED so that max_y |W(y) - S| == reach_max exactly;
+    that double root is what puts a q4 fold door in the task's INTERIOR, which
+    invariant 22 says a straight seam can never have.
+    """
+    import dataclasses
+    from scipy.optimize import brentq
+    from zzy_rss.params import Config, PageMapParams, SceneParams, WeldParams
+
+    arm_p = Config().arm
+    shoulder = np.array([0.0, 0.0, arm_p.d_bs])
+    cz, radius, tilt, phi0, phi1 = 0.30, 0.20, 30.0, -0.80, 1.00
+
+    def wp(cx, a, b):
+        t = np.radians(tilt)
+        return WeldParams(
+            p0=(cx + radius, 0.0, cz), p1=(cx + radius, 0.0, cz),
+            approach=(float(np.sin(t)), 0.0, -float(np.cos(t))),
+            reference=(float(np.cos(t)), 0.0, float(np.sin(t))),
+            curve="arc", arc_center=(cx, 0.0, cz), arc_radius=radius,
+            arc_normal=(0.0, 0.0, 1.0), arc_ref=(1.0, 0.0, 0.0),
+            arc_phi0=a, arc_phi1=b)
+
+    def residual(cx):
+        w = WeldLine(wp(cx, 0.0, 1.0))
+        g = shoulder + arm_p.d_wt * (w.rot @ np.array([0.0, 0.0, 1.0]))
+        rho = float(np.linalg.norm((g - np.array([cx, 0.0, cz]))[:2]))
+        return float(np.hypot(g[2] - cz, rho + radius)) - arm_p.reach_max
+
+    cx = brentq(residual, 0.05, 1.2, xtol=1e-15, rtol=8.9e-16)
+    base = Config()
+    cfg = dataclasses.replace(
+        base, weld=wp(cx, phi0, phi1),
+        pagemap=PageMapParams(n_y=res, n_theta=res, theta_periodic=True),
+        scene=SceneParams(gap_open=True, obstacles=()))
+    y_star = (0.0 - phi0) / (phi1 - phi0)
+    return cfg, y_star, float(residual(cx))
+
+
+def test_arc_weld_round_trip() -> float:
+    """FK(IK(.)) on the ARC seam, and the arc's own pose/tangent consistency."""
+    from zzy_rss.params import DEFAULT
+    cfg, _y_star, _res = _arc_cfg()
+    arm = SrsArm(cfg.arm)
+    weld = WeldLine(cfg.weld)
+    rng = np.random.default_rng(3)
+    worst = 0.0
+    for _ in range(200):
+        y = float(rng.uniform(0.0, 1.0))
+        psi = float(rng.uniform(-np.pi, np.pi))
+        pos, rot = weld.pose(y)
+        # the seam point really is on the arc
+        d = float(np.linalg.norm(pos - weld.center))
+        assert abs(d - weld.radius) < 1e-12, f"off the arc by {d - weld.radius:.3e}"
+        # the tangent really is the derivative of the position
+        h = 1e-6
+        fd = (weld.position(y + h) - weld.position(y - h)) / (2 * h)
+        assert np.max(np.abs(fd - weld.tangent(y))) < 1e-6
+        for signs in SIGN_BRANCHES:
+            res = arm.ik_branch(pos, rot, psi, signs)
+            if not res.ok:
+                continue
+            p_fk, r_fk = arm.fk(res.q)
+            err = max(float(np.linalg.norm(p_fk - pos)),
+                      float(np.linalg.norm(r_fk - rot)))
+            worst = max(worst, err)
+            assert err < 1e-8, f"arc round-trip failed: {err:.3e}"
+    # a straight seam must be untouched by the generalisation
+    wl = WeldLine(DEFAULT.weld)
+    assert np.max(np.abs(wl.position(0.37)
+                         - (wl.p0 + 0.37 * (wl.p1 - wl.p0)))) < 1e-15
+    return worst
+
+
+def test_door_rootfinder_matches_quadratic() -> float:
+    """The numeric door finder must reproduce the closed form on a straight seam.
+
+    The q2 and q6 conditions used to be solved as quadratics in y, which was
+    only legitimate because a straight seam with a constant tool pose makes
+    W(y) affine. doors.py now solves them numerically so that an ARC seam
+    works; on a straight seam the two must agree to the last bit, or EXP 1-4
+    have silently moved.
+    """
+    import dataclasses
+    from zzy_rss.doors import _quadratic_roots_on_unit, _roots_on_unit
+    from zzy_rss.params import Config, WeldParams
+
+    worst = 0.0
+    e_z = np.array([0.0, 0.0, 1.0])
+    for tilt, x, z in ((0.0, 0.28, 0.46), (15.0, 0.32, 0.40),
+                       (30.0, 0.34, 0.48), (45.0, 0.40, 0.22)):
+        a = np.radians(tilt)
+        wparams = WeldParams(
+            p0=(x, -0.26, z), p1=(x, 0.26, z),
+            approach=(float(np.sin(a)), 0.0, -float(np.cos(a))),
+            reference=(float(np.cos(a)), 0.0, float(np.sin(a))))
+        cfg = dataclasses.replace(Config(), weld=wparams)
+        arm = SrsArm(cfg.arm)
+        weld = WeldLine(wparams)
+        p = arm.p
+        taxis = weld.rot @ e_z
+        w0 = np.asarray(wparams.p0) - p.d_wt * taxis
+        wd = np.asarray(wparams.p1) - np.asarray(wparams.p0)
+        for target, base, req, cond in (
+            (arm.shoulder + p.d_se * e_z, w0, p.d_ew,
+             lambda y, t=arm.shoulder + p.d_se * e_z: float(np.linalg.norm(
+                 weld.wrist_center(y, p.d_wt) - t)) - p.d_ew),
+            (arm.shoulder, w0 - p.d_ew * taxis, p.d_se,
+             lambda y: float(np.linalg.norm(
+                 weld.wrist_center(y, p.d_wt)
+                 - p.d_ew * (weld.pose(y)[1] @ e_z) - arm.shoulder)) - p.d_se),
+        ):
+            delta = base - target
+            quad = sorted(min(max(v, 0.0), 1.0) for v in _quadratic_roots_on_unit(
+                float(np.dot(wd, wd)), 2.0 * float(np.dot(delta, wd)),
+                float(np.dot(delta, delta)) - req ** 2))
+            num = _roots_on_unit(cond)
+            assert len(quad) == len(num), (
+                f"tilt {tilt}: closed form found {len(quad)} roots, numeric "
+                f"found {len(num)}")
+            for u, v in zip(quad, num):
+                worst = max(worst, abs(u - v))
+    assert worst < 1e-12, f"door root finders disagree by {worst:.3e}"
+    return worst
+
+
+def test_fold_door_is_one_posture() -> tuple:
+    """The whole theta line at a fold is ONE posture, and so is the q3/q5 fiber.
+
+    This is what makes a line door's certificate exact rather than sampled
+    (todo 5): collision is one query for the entire line, and joint limits are
+    a line meeting a box. If this assertion ever fails, certify_fold_door is no
+    longer entitled to call itself exact.
+    """
+    from zzy_rss.doors import certify_fold_door, find_fold_doors
+    from zzy_rss.pagemap import build_all_pages_shared
+    from zzy_rss.scene import Scene
+
+    cfg, y_star, residual = _arc_cfg(res=31)
+    assert abs(residual) <= cfg.sigma.fold_tangency_tol, (
+        f"the placement is not tangential: residual {residual:.3e}")
+    arm = SrsArm(cfg.arm)
+    weld = WeldLine(cfg.weld)
+    scene = Scene(cfg.arm, cfg.scene)
+    pages = build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
+                                   verbose=False)
+    pm = pages["++-"]
+    discs = find_fold_doors(cfg, pm, arm, weld)
+    assert discs, "no fold door found on the arc placement"
+    ys = sorted({round(d.y, 6) for d in discs})
+    assert len(ys) == 1 and abs(ys[0] - y_star) < 2e-3, (
+        f"fold doors at {ys}, expected one at {y_star:.6f}")
+    assert all(d.fold for d in discs), "fold discs lost their `fold` flag"
+
+    # q4 really is 0 there
+    r = arm.ik_branch(*weld.pose(y_star), 0.0, (1, 1, -1))
+    assert r.ok and abs(r.q[3]) < 1e-5, f"q4 at the fold is {r.q[3]:.3e}"
+
+    d0 = discs[0]
+    d0 = type(d0)(**{**d0.__dict__, "pages": ("++-", "+--")})
+    cert = certify_fold_door(cfg, arm, weld, scene, d0, pages=("++-", "+--"))
+    assert cert.exact, "certificate not exact with symmetric capsules"
+    assert cert.posture_drift_m < 1e-12, (
+        f"the theta line is NOT one posture: drift {cert.posture_drift_m:.3e} m")
+    assert cert.open, "the fold door should be open on this placement"
+    for name in ("++-", "+--"):
+        assert cert.pages[name]["within_limits"], f"page {name} out of limits"
+    # and the IK representative alone would have said NO -- invariant 3
+    assert arm.limit_margin(r.q) < 0.0, (
+        "the IK representative at the fold is inside the limits here, so this "
+        "placement no longer demonstrates invariant 3")
+
+    # a STRAIGHT seam must have no interior fold at all (invariant 22)
+    from zzy_rss.params import DEFAULT
+    arm2 = SrsArm(DEFAULT.arm)
+    weld2 = WeldLine(DEFAULT.weld)
+    pages2 = build_all_pages_shared(DEFAULT, arm2, weld2,
+                                    Scene(DEFAULT.arm, DEFAULT.scene),
+                                    with_kin=False, verbose=False)
+    straight = find_fold_doors(DEFAULT, pages2["++-"], arm2, weld2)
+    assert not straight, (
+        f"{len(straight)} fold discs on a STRAIGHT seam, which invariant 22 "
+        f"says is impossible")
+    return cert.posture_drift_m, float(np.degrees(
+        cert.pages["++-"]["best_margin_rad"]))
+
+
+def test_cylinder_wall_closes() -> tuple:
+    """On a cylinder page the learned manifold is 2 pi periodic and WRAPS.
+
+    Three things are asserted, each of which was a real failure before:
+      * the decision function is exactly periodic in theta, so it is a
+        function on the cylinder and the certificate's "every path crosses
+        f = 0" argument applies at all;
+      * its analytic gradient matches finite differences through the
+        (cos, sin) embedding;
+      * a wall that wraps the cylinder is recognised as CLOSED. Reading
+        matplotlib's compound contour path straight off `.vertices` spliced
+        the two wrapping loops into one arc with a 0.876 gap in y and the
+        wall was reported open.
+    """
+    import dataclasses
+    from zzy_rss.params import Config, PageMapParams
+    from zzy_rss.wall import reconstruct_wall, train_wall
+
+    rng = np.random.default_rng(5)
+    seed = np.column_stack([rng.uniform(0.0, 0.45, 300),
+                            rng.uniform(-np.pi, np.pi, 300)])
+    rest = np.vstack([
+        np.column_stack([rng.uniform(0.75, 1.0, 300),
+                         rng.uniform(-np.pi, np.pi, 300)]),
+        np.column_stack([np.full(60, -0.075), np.linspace(-np.pi, np.pi, 60)]),
+        np.column_stack([np.full(60, 1.075), np.linspace(-np.pi, np.pi, 60)]),
+    ])
+    cfg = dataclasses.replace(
+        Config(), pagemap=PageMapParams(n_y=41, n_theta=41, theta_periodic=True))
+    w = train_wall(cfg, seed, rest)
+    assert w.periodic and w.accuracy >= 1.0
+    probe = np.array([[0.6, 0.3], [0.2, -1.1], [0.9, 2.0]])
+    a = w.decision(probe)
+    b = w.decision(probe + np.array([0.0, 2.0 * np.pi]))
+    assert np.max(np.abs(a - b)) < 1e-12, (
+        f"the wall is not periodic in theta: {np.max(np.abs(a - b)):.3e}")
+    h = 1e-6
+    for pt in probe:
+        g = w.decision_grad(pt)
+        fd = np.array([
+            (w.decision(pt + [h, 0])[0] - w.decision(pt - [h, 0])[0]) / (2 * h),
+            (w.decision(pt + [0, h])[0] - w.decision(pt - [0, h])[0]) / (2 * h)])
+        assert np.max(np.abs(g - fd)) < 1e-5, (
+            f"gradient through the embedding is wrong: {np.max(np.abs(g - fd)):.3e}")
+    poly = reconstruct_wall(cfg, w)
+    assert poly.closed, f"cylinder wall not closed: {poly.note!r}"
+    assert len(poly.loops) == 2 and all(k == "wrapping" for k in poly.loop_kinds), (
+        f"expected two wrapping loops, got {poly.loop_kinds}")
+    return len(poly.loops), float(np.max(np.abs(a - b)))
+
+
 if __name__ == "__main__":
     n_ok, n_tried, worst_rt = test_round_trip()
     print(f"[ik] round-trip        : {n_ok}/{n_tried} branches solvable, "
@@ -267,4 +512,17 @@ if __name__ == "__main__":
     worst_fast = test_fasteval_matches_page_build()
     print(f"[ik] fasteval           : identical to the page build "
           f"(worst {worst_fast} differing cells over 8 pages x 2 scenes)")
+    worst_arc = test_arc_weld_round_trip()
+    print(f"[ik] arc seam           : FK(IK) round-trip max error "
+          f"{worst_arc:.3e}; straight seam unchanged")
+    worst_root = test_door_rootfinder_matches_quadratic()
+    print(f"[ik] door root finder   : numeric == closed form on straight seams "
+          f"(worst {worst_root:.3e})")
+    drift, margin = test_fold_door_is_one_posture()
+    print(f"[ik] fold (line) door   : whole theta line + q3/q5 fiber is ONE "
+          f"posture (drift {drift:.2e} m), open with {margin:.2f} deg margin; "
+          f"straight seam has none")
+    nloops, per = test_cylinder_wall_closes()
+    print(f"[ik] cylinder wall      : decision exactly periodic ({per:.1e}), "
+          f"{nloops} WRAPPING loops, closed")
     print("[ik] ALL TESTS PASSED")

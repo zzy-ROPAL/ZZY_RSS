@@ -12,7 +12,12 @@
 
 Stage 0–5 已实现并可运行,墙严格按 [IJRR] RBF-SVM 方法构造(Algorithm 1–4 逐条对应)。
 三个演示案例已在**真实 LWA 4D** 参数上跑通,见 `docs/demo_summary.md`。
-实现过程中发现的 **25 个**问题见 `docs/findings.md`(每条都有数值证据)。
+实现过程中发现的问题见 `docs/findings.md`(**37 节**,每条都有数值证据)。
+
+**EXP 5(`q4` 折叠线门)已完成**(§37,待办 10):5a 与 5b 都跑通,
+`scripts/run_exp5.py`,res 61 合计 **50 s**,出 GIF + 八页图 + 证书。
+焊缝因此从直线推广到**圆弧**(不变量 22 使直缝上内部折叠门不可能),
+页因此必须当**圆柱**(新不变量 24),**待办 5 对线门结清**(认证精确、无采样)。
 
 墙的构造已提速 41×(§17):`WallModel.decision()` 不再走 sklearn,直接用 numpy 算
 RBF 判别式(与 sklearn 差 1.5e-11,13 µs vs 176 µs);投影用闭式梯度的 Newton 法
@@ -41,6 +46,13 @@ d_wt=0.0824`,最大臂展 0.651 m。限位:q1/q3/q5 ±178.85°,q2/q4/q6
 | EXP 1 | x.28 z.46 | 无 | 0° | 8 开 / 8 关 | **可行**,61 路点到 y=1.00 | — |
 | EXP 2 | x.28 z.46 | ZGAP | 0° | 0 开 / 16 关 | **不可行**,单页 | **145/145,closed,证明完成** |
 | EXP 3 | **x.32 z.40** | **ZGAP+y** | **15°** | **8 开 / 8 关**,起始区域内 **1 道** | **不可行,跨两页** | **两面墙:162/162 与 163/163,都 closed** |
+
+**EXP 5(`scripts/run_exp5.py`,圆弧缝 + `q4` 折叠线门,§37)**
+
+| 案例 | 场景 | 门 | 判定 | 墙 |
+|---|---|---|---|---|
+| EXP 5a | 圆弧缝,缝两侧各一立柱 | 1 道**线门**开(精确认证,余量 43.11°) | **可行**(`proven=False`),但必须翻肘 | — |
+| EXP 5b | 同缝,一个 14 cm 立方体 | 同上 | **不可行,跨两页**(`proven=True`) | **142/142 与 142/142,都 closed,γ=1.0** |
 
 **面覆盖 100% 已达成**(旧的 89–93% 是在 §22 的平凡场景上硬撑出来的)。
 
@@ -131,6 +143,8 @@ python3 scripts/run_stage12.py --res 121 --off-axis --fiber   # 页图 + Σ
 python3 scripts/run_experiment.py --res 81 --fiber         # 完整泛洪证明流程
 python3 scripts/run_e4.py --res 41                         # E4 强制变号搜索(未成功)
 
+python3 scripts/run_exp5.py --res 61 --iters 6 --out out/exp5       # EXP 5a + 5b(50 s)
+python3 scripts/run_exp5.py --only b --no-gif --out out/exp5        # 只跑 5b,不出 GIF
 python3 scripts/run_three.py --res 61 --iters 14 --out out/three    # 网格流水线 EXP1/2/3
 python3 scripts/run_three.py --only 3 --out out/three               # 只跑 EXP 3(77 s)
 python3 scripts/search_scene.py --mode welds --res 61 --jobs 4      # 焊缝摆放的"门景观"
@@ -160,7 +174,12 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 |---|---|---|
 | 全部可调参数 | dataclass,实现文件内不硬编码常数 | `src/zzy_rss/params.py` |
 | 3R-1R-3R 正/逆运动学 | 解析 IK,臂角 + `(s₂,s₄,s₆)` 八分支 | `src/zzy_rss/arm.py` |
-| 焊缝任务 | 直线 + 固定姿态 + 焊枪倾角 | `src/zzy_rss/weld.py` |
+| 焊缝任务 | **参数曲线**(直线 / 圆弧)+ 姿态 + 焊枪倾角 | `src/zzy_rss/weld.py` |
+| **线门(`q4` 折叠)** | 切点由**数值求根 + 极值**定位;整条 θ 线是一个姿态 | `find_fold_doors()` in `doors.py` |
+| **线门的精确认证** | **一次**碰撞 + 关节限位的**区间求交**(无采样,结清待办 5) | `certify_fold_door()` in `doors.py` |
+| **圆柱页的学习器** | θ 嵌成 `(cos θ, sin θ)`,判别函数**精确** 2π 周期 | `WallModel.features()` in `wall.py` |
+| **绕环墙** | 圆柱上分开两端的闭曲线是**绕环**,不是围环 | `reconstruct_wall()` in `wall.py` |
+| **图复用证书的墙** | `run_proof(collect=...)` 交出每面墙(待办 9b) | `src/zzy_rss/flood.py` |
 | 碰撞 / 工作空间穿透深度 | 胶囊 vs AABB,全向量化(113 µs/次) | `src/zzy_rss/scene.py` |
 | Stage 1 页图 | 每符号分支一页,`(y,θ)` 网格 + 无效原因标签 | `src/zzy_rss/pagemap.py` |
 | **八页共享构建** | 一次 IK + 一次碰撞 + 镜像恒等式 ⇒ 八页(4.5×,逐格精确) | `build_all_pages_shared()` in `pagemap.py` |
@@ -283,9 +302,30 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     筛选必须在**两个以上分辨率**上一致才算(§34b 的 429 个在 41/61/101 都成立),
     或者直接改用 PRM(`run_sampled.py` 已有这套机制)。
 
+24. **折叠线一旦存在且开着,页就必须当圆柱,平面矩形不合法。**(§37e)
+    每页的禁止 θ 窗口很窄,而 `s₄` 镜像把 q3、q5 各平移 π,
+    **一页的窗口与它 `s₄` 伙伴页的窗口相距 π** —— 一条 θ 割口不可能同时落进两者,
+    而折叠门偏偏逼着证明同时访问这两页。实测八页触到 θ=±π 的有效格
+    res 41/61/81/101 → **116/168/218/278,从不为 0**。
+    所以 `theta_periodic=True`,**而且 SVM 必须把 θ 嵌成 `(cos θ, sin θ)`**:
+    平面 RBF 在 θ 上不是周期的,判别函数就不是圆柱上的函数,
+    而证书的论证("两类异号、零集全在 `C_obs` 内 ⇒ 任何路径都穿 `C_obs`")需要它是。
+    墙的形状随之从"围住区域的一个环"变成"**两个绕圆柱一圈的环**"。
+    对照实验(只改这一项):圆柱 142/142 面、γ=1.0、7.7 s;
+    平面 237/251 面、γ=94.8、78.5 s,失败的 14 个里 8 个是 `crosses Sigma disc (fold)`。
+
+25. **折叠线的圆盘要按"一条线"处理,不能逐个处理。**(§37j)
+    面守卫需要全部 ~189 个圆盘(面可能从任何地方穿过),但**定类**必须整条线一起定:
+    整条线是**一个姿态**,不可能一半属种子类一半属其余类;逐个定类会把线劈开,
+    SVM 于是试图**沿着折叠线**穿一面墙,每个面都被 Σ 守卫拒。
+    **过门与报告**同样每条线只算一道门,否则 8 道门会报成 1512 道。
+
 22. **直焊缝 + 固定姿态下 q4 折叠门不可能落在任务内部。**(§33f)
     `W(y)` 仿射 ⇒ `|W(y)−S|` 凸 ⇒ 可达 y 集是一个区间 ⇒ 折叠只在端点。
     2280 个摆放实测:非凸 0 个。要内部线门必须改**弯焊缝**或**沿缝变倾角**。
+    **已照办**(§37a):`WeldParams.curve="arc"`,并把夹具沿 x 移到
+    "圆弧缝最远点恰好等于 reach_max"(一个方程一个未知数,`brentq` 解到残差 **0.0**),
+    于是 `|W(y)−S| − reach_max` 有**二重根**,折叠门落在任务内部 y*=4/9。
 
 ## 待办
 
@@ -310,9 +350,10 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
    §34a / §35 的"结构性不可能"**已撤回**:测量成立,结论不成立。
    遗留:`run_proof` 在这个场景上很慢(EXP 3 是 1.5 s,这里 13 分钟未出),
    先把 `alg4_iters` 降到 4、`n_train_max` 降到 450 试。
-3. 证书独立校验器(`write_certificate` 已输出 JSON,校验器待写)
-10. **EXP 5(`q4` 折叠线门)—— 规格已定,见 `docs/exp5_spec.md`
-    与交接说明 `docs/exp5_brief.md`(场景未搜)。**
+3. 证书独立校验器(`write_certificate` 已输出 JSON,校验器待写)。
+   **注意**:校验器现在必须懂圆柱页(绕环的闭合是"端点相差整一个周期")
+   与线门(一次碰撞 + 区间求交),见不变量 24/25。
+10. ~~**EXP 5(`q4` 折叠线门)**~~ **已完成**(§37)。
     门在页上是一条**线**、在 `Q` 里是一个**点**,和点门恰好对偶。
     **5b(两页不可行)是目前最有把握的下一个实验**:它**不需要连通性不对称**
     (EXP 4 卡住的正是那个),只要一个障碍挡住两页(碰撞与页无关,自动成立),
@@ -324,9 +365,10 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     + `doors.py` 两处换数值求根。5a(换页后可行)继承 §35 的阻碍,更难。
 4. 取得真实 STL 碰撞网格,替换胶囊近似;`lwa4d.robray` 还给出末端
    FT 传感器圆柱(h=0.1, r=0.05)+ Robotiq-85,我们的胶囊链到工具点就断了
-5. 门认证的严格化:纤维是 `Q` 中零测集,采样只是证据,需区间算术。
-   **注意:q4 折叠门自动没有这个问题**(§33f)——整条 θ 线是一个物理构型,
-   认证只需查一个构型;但折叠门在直焊缝上落不到任务内部(不变量 22)
+5. 门认证的严格化:**点门**(q2/q6)仍是零测集采样,需区间算术。
+   **线门(q4 折叠)已结清**(§37b):`certify_fold_door` 做
+   **一次**碰撞查询 + 关节限位的**区间求交**,整条 θ 线与整条 q3/q5 零运动上
+   连杆漂移实测 **2.02e-17 m**。剩下的只有点门。
 6. `Σ_coord` / `Σ_kin` 仍读网格(`pm.near_axis`、`pm.kin_measure`),
    要完全无网格需改成在样本点上求值(§25)
 7. ~~E4 强制变号场景~~ 并入待办 2:§34 把"两者所在区域重合"量化了,
@@ -335,6 +377,7 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
    **这才是上 C++ / Gudhi / FCL 的触发条件**,不是现在这个 2-D 演示
    (`docs/seven_questions.md` Q1/Q2:证明本身已经 0.64 s)
 9. 性能:按 `docs/seven_questions.md` Q1 的顺序做——
-   (a) `--no-video`(EXP 3 −61%),(b) 图复用 `run_proof` 的墙(省 5.6 s),
+   (a) `--no-video`(EXP 3 −61%),(b) ~~图复用 `run_proof` 的墙~~ **已做**
+   (`run_proof(collect=...)`,§37j;在 EXP 5 里用上了,`run_three.py` 还没改),
    (c) `reconstruct_wall` 换曲线追踪(`prove()` −44%),
    (d) 解析雅可比(−24%),(e) Alg 2/Alg 3 多进程。**都在 Python 里就能做。**

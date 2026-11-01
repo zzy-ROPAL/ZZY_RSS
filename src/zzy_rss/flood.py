@@ -27,7 +27,7 @@ from .pagemap import PageMap, page_name
 from .scene import Scene
 from .doors import door_fiber_validity
 from .wall import (
-    LABEL_TOPOLOGICAL, PageLabeller, assign_label,
+    LABEL_TOPOLOGICAL, PageLabeller, assign_label, is_periodic, page_dist,
     sigma_disc_samples,
     CheckReport, Polytope, check_polytope, reconstruct_wall, sample_wall,
     train_wall, virtual_boundary_samples,
@@ -185,17 +185,38 @@ def thin(pts: np.ndarray, n_max: int, rng: np.random.Generator) -> np.ndarray:
     return pts[sel]
 
 
-def discs_in_region(discs: list, pts: np.ndarray, tol: float) -> list:
+def discs_in_region(discs: list, pts: np.ndarray, tol: float,
+                    periodic: bool = False) -> list:
     """Sigma discs lying inside a region (centre close to one of its cells)."""
     out = []
     if len(pts) == 0:
         return out
+    unit = np.array([1.0, 1.0])
     for d in discs:
         c = np.array([d.y, d.theta])
-        if np.min(np.linalg.norm(pts - c, axis=1)) <= max(tol, d.radius):
+        if float(np.min(page_dist(pts, c, unit, periodic))) <= max(tol, d.radius):
             out.append(d)
     return out
 
+
+
+def fold_line_representatives(discs: list) -> list:
+    """One representative per fold LINE, plus every non-fold disc unchanged.
+
+    The facet guard needs all ~190 discs of a fold line, because a facet can
+    cross the line anywhere. Door FOLLOWING and the certificate need exactly
+    one entry per line: the line is one posture, so it is one door, and
+    enqueueing it 190 times would put 190 identical rows in doors_followed.
+    """
+    out, seen = [], set()
+    for d in discs:
+        if getattr(d, "fold", False) and d.exact_y is not None:
+            key = round(float(d.exact_y), 12)
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(d)
+    return out
 
 
 def live_discs(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
@@ -297,7 +318,8 @@ def find_inf_proof_region(
             margin = float(cfg.wall.feedback_margin)
             n_fed = n_skipped = 0
             for m in add:
-                lab_m = assign_label(m, seed_pts, rest_pts, wall.scale, lb)
+                lab_m = assign_label(m, seed_pts, rest_pts, wall.scale, lb,
+                                     wall.periodic)
                 # Refuse a centre that contradicts the class it is NOT given:
                 # adding it would make the training data inseparable below the
                 # fragmentation limit, and Algorithm 1 would then either cap
@@ -307,8 +329,8 @@ def find_inf_proof_region(
                 # fixed by retraining -- shrink the facets -- so use it.
                 other = rest_pts if lab_m > 0 else seed_pts
                 if len(other):
-                    d_other = float(np.min(np.linalg.norm(
-                        (other - m) * wall.scale, axis=1)))
+                    d_other = float(np.min(page_dist(other, m, wall.scale,
+                                                     wall.periodic)))
                     if d_other < margin:
                         n_skipped += 1
                         continue
@@ -349,6 +371,7 @@ def run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
     verbose: bool = True, alg4_iters: int = 4, seeds: list | None = None,
+    collect: dict | None = None,
 ) -> ProofResult:
     """IJRR Algorithm 4 wrapped in the page/door flood fill.
 
@@ -360,6 +383,15 @@ def run_proof(
     is enough for the easy regions and not enough for the ones that graze a
     valid band, so callers that want a verdict rather than a picture should
     raise it.
+
+    `collect`, if given, receives {(page, region): (Polytope, CheckReport,
+    WallModel)} for every region walled. Hand it in rather than retraining the
+    same regions in order to draw them: a wall retrained from a different
+    thinning of the same region is a DIFFERENT wall, so the picture would
+    illustrate something the certificate does not contain. Measured on EXP 5b's
+    partner page: gamma 1.0 inside run_proof against gamma 57-240 from an
+    independently seeded repeat of the same call, same budget. Invariant 16,
+    and todo 9(b) -- it also saves the second training pass outright.
     """
     rng = np.random.default_rng(cfg.planner.rng_seed)
     labels, regions_by_page = {}, {}
@@ -444,7 +476,8 @@ def run_proof(
         # Teach the wall where the doors are, so it cannot route through one.
         tol_d = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                                pm.theta_grid[1] - pm.theta_grid[0]))
-        s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d)
+        s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d,
+                                              periodic=is_periodic(cfg))
         if len(s_extra):
             seed_pts = np.vstack([seed_pts, s_extra])
         if len(r_extra):
@@ -463,6 +496,8 @@ def run_proof(
             print(f"[stage3] region ({name}, {k}): alg4 done in {iters} iter(s); "
                   f"closed={poly.closed}, facets {rep.n_passed}/{rep.n_facets}")
 
+        if collect is not None:
+            collect[(name, k)] = (poly, rep, wmodel)
         certificate.append(asdict(CertificateEntry(
             page=name, region=k, n_facets=rep.n_facets, n_passed=rep.n_passed,
             closed=poly.closed, gamma=wmodel.gamma, alg2_rounds=rounds,
@@ -473,7 +508,8 @@ def run_proof(
         # --- follow every door inside this region ---------------------------
         tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                              pm.theta_grid[1] - pm.theta_grid[0]))
-        for d in discs_in_region(discs, pts, tol):
+        in_region = discs_in_region(discs, pts, tol, is_periodic(cfg))
+        for d in fold_line_representatives(in_region):
             # Door reachability is a FIBER property. The IK representative can
             # be invalid while other fiber points are valid, so never decide a
             # door from the representative alone. With fiber certification off

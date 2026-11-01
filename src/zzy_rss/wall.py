@@ -46,6 +46,70 @@ LABEL_METRIC = "metric"             # the nearest-class heuristic it replaces
 
 
 # --------------------------------------------------------------------------
+# The page as a CYLINDER (invariant 5, and why it stopped being optional)
+# --------------------------------------------------------------------------
+#
+# theta is an arm angle, so a page is a cylinder; the flat rectangle is exact
+# only while no valid cell touches theta = +/-pi, i.e. while the joint limits
+# cut the theta circle before the seam. EXP 1-4 measured that and it held, so
+# PageMapParams.theta_periodic stayed False and every distance in this file
+# could be a plain Euclidean one.
+#
+# It does NOT hold for EXP 5, and it cannot be made to hold. On the arc
+# placement each page's forbidden theta window is a thin band, and the s4
+# mirror shifts q3 and q5 by pi, so the band of a page and the band of its s4
+# PARTNER sit pi apart. A single cut in theta cannot land inside both. Since
+# the fold door makes the proof visit both pages, one of them always has valid
+# cells at the cut, and a wall "closed" across the cut there is open around the
+# back of the cylinder -- invariant 5's void proof, exactly.
+#
+# So the cylinder is now carried properly, in three places:
+#
+#   1. DISTANCE. Every scaled difference in theta goes through
+#      page_delta/page_dist below, which takes the short way round.
+#
+#   2. THE LEARNER. An RBF-SVM on (y, theta) is not a function on the
+#      cylinder: it does not know that theta and theta + 2 pi are the same
+#      state. WallModel therefore embeds theta as (cos theta, sin theta) when
+#      the page is periodic, which makes the decision function EXACTLY
+#      periodic by construction rather than approximately so by tiling the
+#      training data. That matters because the certificate's argument is
+#      "f > 0 on the seed class, f < 0 on the rest class, f = 0 only inside
+#      C_obs, therefore every path between them crosses C_obs" -- and that
+#      argument needs f to BE a function on the space the path lives in.
+#      The embedding radius is scale_theta = 1/pi, which makes the embedding
+#      locally isometric to the old flat scaling (chord ~ d_theta / pi), so
+#      gamma keeps its meaning and nothing has to be retuned.
+#
+#   3. RECONSTRUCTION. On a cylinder a separating closed curve may WRAP
+#      instead of enclosing, and a wrapping curve traced on a rectangle comes
+#      back as an open arc. reconstruct_wall now accepts a loop whose
+#      endpoints agree modulo 2 pi and closes it through the seam.
+
+
+def page_delta(a: np.ndarray, b: np.ndarray, periodic: bool) -> np.ndarray:
+    """b - a in page coordinates, taking the short way round in theta."""
+    d = np.asarray(b, dtype=float) - np.asarray(a, dtype=float)
+    if not periodic:
+        return d
+    d = d.copy()
+    d[..., 1] = (d[..., 1] + np.pi) % (2.0 * np.pi) - np.pi
+    return d
+
+
+def page_dist(a: np.ndarray, b: np.ndarray, scale: np.ndarray,
+              periodic: bool) -> np.ndarray:
+    """Scaled page distance(s) between a and b, cylinder-aware."""
+    d = page_delta(a, b, periodic)
+    d = np.atleast_2d(d) * np.asarray(scale, dtype=float)
+    return np.linalg.norm(d, axis=1)
+
+
+def is_periodic(cfg: Config) -> bool:
+    return bool(getattr(cfg.pagemap, "theta_periodic", True))
+
+
+# --------------------------------------------------------------------------
 # IJRR 4.1 -- Algorithm 1, Train-Manifold
 # --------------------------------------------------------------------------
 
@@ -64,6 +128,9 @@ class WallModel:
     projection: str = "newton"
     newton_iters: int = 30
     newton_tol: float = 1.0e-10
+    # True -> theta is embedded as (cos theta, sin theta), so `decision` is
+    # EXACTLY 2 pi periodic and is therefore a function on the cylinder page.
+    periodic: bool = False
 
     def __post_init__(self):
         # Cache the RBF expansion. sklearn's decision_function carries heavy
@@ -78,23 +145,51 @@ class WallModel:
         object.__setattr__(self, "_b", float(self.svm.intercept_[0]))
         object.__setattr__(self, "_gamma", float(self.svm._gamma))
 
+    def features(self, pts: np.ndarray) -> np.ndarray:
+        """Page coordinates -> the space the SVM actually lives in.
+
+        Flat page: (scale_y * y, scale_theta * theta), as before.
+
+        Cylinder page: (scale_y * y, scale_theta * cos theta,
+        scale_theta * sin theta). With scale_theta = 1/pi the embedded circle
+        has circumference 2, the same length the flat theta axis had, so a
+        small dtheta maps to a chord of scale_theta * dtheta -- identical to
+        the flat scaling to first order. gamma therefore means what it meant
+        before and nothing needs retuning; what changes is that theta and
+        theta + 2 pi are now literally the same input.
+        """
+        x = np.atleast_2d(np.asarray(pts, dtype=float))
+        if not self.periodic:
+            return x * self.scale
+        sy, st = float(self.scale[0]), float(self.scale[1])
+        return np.column_stack([x[:, 0] * sy,
+                                st * np.cos(x[:, 1]),
+                                st * np.sin(x[:, 1])])
+
     def decision(self, pts: np.ndarray) -> np.ndarray:
         """Same value as svm.decision_function, computed directly."""
-        x = np.atleast_2d(np.asarray(pts, dtype=float)) * self.scale
+        x = self.features(pts)
         d2 = np.sum((x[:, None, :] - self._sv[None, :, :]) ** 2, axis=2)
         return np.exp(-self._gamma * d2) @ self._dual + self._b
 
     def decision_grad(self, pt: np.ndarray) -> np.ndarray:
-        """Gradient of `decision` at one point, in UNSCALED coordinates.
+        """Gradient of `decision` at one point, in PAGE coordinates (y, theta).
 
-        Giving SLSQP the analytic constraint gradient removes its numerical
-        differentiation, which was two extra evaluations per iteration.
+        Giving SLSQP (and Newton) the analytic constraint gradient removes
+        numerical differentiation, which was two extra evaluations per
+        iteration. On the cylinder the chain rule through the embedding is one
+        2x3 Jacobian: dy -> scale_y, dtheta -> scale_theta * (-sin, cos).
         """
-        x = np.asarray(pt, dtype=float) * self.scale
+        x = self.features(pt)[0]
         diff = x[None, :] - self._sv
         w = np.exp(-self._gamma * np.sum(diff ** 2, axis=1)) * self._dual
         g = (-2.0 * self._gamma) * (w[:, None] * diff).sum(axis=0)
-        return g * self.scale
+        if not self.periodic:
+            return g * self.scale
+        sy, st = float(self.scale[0]), float(self.scale[1])
+        th = float(np.asarray(pt, dtype=float).reshape(-1)[1])
+        return np.array([g[0] * sy,
+                         st * (-np.sin(th) * g[1] + np.cos(th) * g[2])])
 
 
 def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallModel:
@@ -107,7 +202,14 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
     """
     wp = cfg.wall
     scale = np.array([wp.scale_y, wp.scale_theta])
-    x = np.vstack([seed_pts, rest_pts]) * scale
+    periodic = is_periodic(cfg)
+    pts = np.vstack([seed_pts, rest_pts])
+    if periodic:
+        sy, st = float(scale[0]), float(scale[1])
+        x = np.column_stack([pts[:, 0] * sy, st * np.cos(pts[:, 1]),
+                             st * np.sin(pts[:, 1])])
+    else:
+        x = pts * scale
     y = np.concatenate([np.ones(len(seed_pts)), -np.ones(len(rest_pts))])
 
     gamma = wp.gamma_init
@@ -142,7 +244,7 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
     return WallModel(svm=svm, gamma=gamma, scale=scale, gamma_capped=capped,
                      n_seed=len(seed_pts), n_rest=len(rest_pts), accuracy=acc,
                      projection=wp.projection, newton_iters=wp.newton_iters,
-                     newton_tol=wp.newton_tol)
+                     newton_tol=wp.newton_tol, periodic=periodic)
 
 
 # --------------------------------------------------------------------------
@@ -151,7 +253,8 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
 
 
 def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
-                       n_ring: int = 12) -> tuple:
+                       n_ring: int = 12, periodic: bool = False,
+                       n_ring_fold: int = 2, ) -> tuple:
     """Training points that stop the wall routing THROUGH a door.
 
     The SVM separates two classes of valid points and knows nothing about
@@ -167,15 +270,51 @@ def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
     the REST class. Returns (seed_extra, rest_extra).
     """
     seed_extra, rest_extra = [], []
+    unit = np.array([1.0, 1.0])
+
+    # A FOLD is a LINE door, and the whole line is ONE posture of the robot:
+    # at full extension the elbow circle has radius 0, so every theta at that
+    # y is the same arm in space. So the line cannot be partly the seed class
+    # and partly the rest class -- if the robot can be anywhere on it, it can
+    # be everywhere on it. Classing the discs one by one would split the line
+    # wherever the page happens to be invalid, and the SVM would then try to
+    # thread a wall ALONG the fold, every facet of which Algorithm 3 rejects
+    # for crossing a disc. Grouping by the line's y and deciding once is both
+    # the cheap fix and the correct statement.
+    groups: dict = {}
+    singles = []
     for d in discs:
+        if getattr(d, "fold", False) and d.exact_y is not None:
+            groups.setdefault(round(float(d.exact_y), 12), []).append(d)
+        else:
+            singles.append(d)
+
+    def _near(c: np.ndarray, rad: float) -> bool:
+        return (len(region_pts) > 0
+                and float(np.min(page_dist(region_pts, c, unit, periodic)))
+                <= max(tol, rad))
+
+    for d in singles:
         c = np.array([d.y, d.theta])
         pts = [c]
-        for a in np.linspace(0.0, 2.0 * np.pi, n_ring, endpoint=False):
+        for a in np.linspace(0.0, 2.0 * np.pi, max(1, n_ring), endpoint=False):
             pts.append(c + d.radius * np.array([np.cos(a), np.sin(a)]))
-        near = (len(region_pts) > 0
-                and float(np.min(np.linalg.norm(region_pts - c, axis=1)))
-                <= max(tol, d.radius))
-        (seed_extra if near else rest_extra).extend(pts)
+        (seed_extra if _near(c, d.radius) else rest_extra).extend(pts)
+
+    for _y, grp in groups.items():
+        near = any(_near(np.array([d.y, d.theta]), d.radius) for d in grp)
+        bucket = seed_extra if near else rest_extra
+        for d in grp:
+            c = np.array([d.y, d.theta])
+            bucket.append(c)
+            # A thin ring: ~190 discs sit shoulder to shoulder along one y, so
+            # a 12-point ring each would add ~2500 near-duplicate points and no
+            # information. Rings exist to stop a wall squeezing between a POINT
+            # door and its surroundings; a line has no such gap.
+            for a in np.linspace(0.0, 2.0 * np.pi, max(1, n_ring_fold),
+                                 endpoint=False):
+                bucket.append(c + d.radius * np.array([np.cos(a), np.sin(a)]))
+
     return (np.asarray(seed_extra, dtype=float).reshape(-1, 2),
             np.asarray(rest_extra, dtype=float).reshape(-1, 2))
 
@@ -468,15 +607,15 @@ class PageLabeller:
 
 
 def assign_label(m: np.ndarray, seed_pts: np.ndarray, rest_pts: np.ndarray,
-                 scale: np.ndarray, labeller=None) -> int:
+                 scale: np.ndarray, labeller=None, periodic: bool = False) -> int:
     """+1 seed / -1 rest: connectivity when available, nearest class otherwise."""
     if labeller is not None:
         lbl = labeller.label(m)
         if lbl != 0:
             return lbl
-    d_seed = (float(np.min(np.linalg.norm((seed_pts - m) * scale, axis=1)))
+    d_seed = (float(np.min(page_dist(seed_pts, m, scale, periodic)))
               if len(seed_pts) else np.inf)
-    d_rest = (float(np.min(np.linalg.norm((rest_pts - m) * scale, axis=1)))
+    d_rest = (float(np.min(page_dist(rest_pts, m, scale, periodic)))
               if len(rest_pts) else np.inf)
     return 1 if d_seed <= d_rest else -1
 
@@ -531,11 +670,12 @@ def sample_wall(
         margin = float(cfg.wall.feedback_margin)
         n_added = n_skipped = 0
         for m in free_hits:
-            lab_m = assign_label(m, seed_pts, rest_pts, wall.scale, lb)
+            lab_m = assign_label(m, seed_pts, rest_pts, wall.scale, lb,
+                                 wall.periodic)
             other = rest_pts if lab_m > 0 else seed_pts
             if len(other):
-                d_other = float(np.min(np.linalg.norm(
-                    (other - m) * wall.scale, axis=1)))
+                d_other = float(np.min(page_dist(other, m, wall.scale,
+                                                 wall.periodic)))
                 if d_other < margin:
                     n_skipped += 1
                     continue
@@ -575,6 +715,83 @@ class Polytope:
     closed: bool = False
     n_segments: int = 0
     note: str = ""
+    # Per loop: "contractible" (bounds a disc on the page) or "wrapping"
+    # (goes round the theta circle and closes through the seam). Only a
+    # cylinder page can have the second kind, and on a cylinder a SEPARATING
+    # closed curve may well be of that kind, so the distinction is recorded
+    # rather than normalised away.
+    loop_kinds: list = field(default_factory=list)
+
+
+def _fold_theta(verts: np.ndarray, t_min: float, t_max: float) -> np.ndarray:
+    """Shift a loop by a whole number of periods so its centroid sits in range."""
+    span = t_max - t_min
+    c = float(np.mean(verts[:, 1]))
+    k = np.floor((c - t_min) / span)
+    if k == 0:
+        return verts
+    out = verts.copy()
+    out[:, 1] -= k * span
+    return out
+
+
+def _contour_subpaths(cs) -> list:
+    """Every separate curve of a contour level, as its own vertex array.
+
+    Matplotlib stores ONE compound Path per contour level, with the separate
+    curves joined inside it and marked by MOVETO codes. Reading `.vertices`
+    straight off it therefore concatenates unrelated curves, and the first and
+    last vertex then belong to DIFFERENT curves -- which makes the closure test
+    compare two unrelated points. It only ever worked because the flat-page
+    walls of EXP 1-4 happen to be a single loop; the moment a wall is two
+    wrapping loops (which is the natural shape on a cylinder) the test read one
+    open arc with a 0.876 gap in y and reported the wall not closed.
+    """
+    out = []
+    for path in cs.get_paths():
+        v = np.asarray(path.vertices, dtype=float)
+        codes = path.codes
+        if codes is None:
+            out.append(v)
+            continue
+        starts = list(np.flatnonzero(codes == 1)) or [0]
+        starts.append(len(v))
+        for a, b in zip(starts[:-1], starts[1:]):
+            if b - a >= 2:
+                out.append(v[a:b])
+    return out
+
+
+def _one_period(verts: np.ndarray, span: float) -> np.ndarray | None:
+    """Cut one full period out of a curve that wraps the cylinder.
+
+    A wrapping wall traced on a grid tiled over three periods comes back as a
+    single arc running across the whole tiled range in theta. One period of it
+    IS the closed curve on the cylinder: by exact periodicity of the decision
+    function its two ends sit at the same y, so they are the same point of the
+    page and no closing facet is needed.
+    """
+    t = verts[:, 1]
+    if t[-1] < t[0]:
+        verts = verts[::-1]
+        t = verts[:, 1]
+    target = float(t[0]) + span
+    # Walk the curve rather than binary-searching it: theta along a traced
+    # contour is only approximately monotone, and searchsorted on a sequence
+    # that dips by a vertex returns nonsense.
+    j = None
+    for i in range(1, len(verts)):
+        if t[i] >= target:
+            j = i
+            break
+    if j is None or j < 2:
+        return None
+    t0, t1 = float(t[j - 1]), float(t[j])
+    if abs(t1 - t0) < 1e-15:
+        return None
+    w = (target - t0) / (t1 - t0)
+    end = verts[j - 1] + w * (verts[j] - verts[j - 1])
+    return np.vstack([verts[:j], end[None, :]])
 
 
 def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polytope:
@@ -585,12 +802,28 @@ def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polyt
     polyline directly. The closedness test is retained: a loop whose endpoints
     do not meet fails Definition 1 (I) and triggers a retrain, exactly as a
     failed triangulation does in IJRR.
+
+    On a CYLINDER page "endpoints meet" has two cases, and both are genuine
+    closed curves:
+
+      contractible  the endpoints coincide outright, as on a flat page.
+      wrapping      the curve goes once round the theta circle and its
+                    endpoints differ by exactly one period. On a cylinder this
+                    is the natural shape for a curve that separates the start
+                    end of the weld from the goal end, so refusing it would
+                    reject the very wall the geometry calls for.
+
+    Both are detected on a grid tiled over three periods in theta, which is
+    exact because WallModel.decision is exactly periodic there; tiling also
+    means a contractible loop STRADDLING the seam is traced whole instead of
+    arriving as two arcs, one at each edge.
     """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     pm = cfg.pagemap
+    periodic = is_periodic(cfg)
     eps = cfg.wall.virtual_band
     # The traced domain must be STRICTLY WIDER than the virtual-valid ring at
     # 2*eps. With both at 2*eps the zero set ran along the domain edge and the
@@ -598,13 +831,10 @@ def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polyt
     # the closure test failed and Definition 1 (I) was never established.
     m = cfg.wall.recon_margin * eps
     ys = np.linspace(pm.y_min - m, pm.y_max + m, grid_res)
-    if getattr(pm, "theta_periodic", True):
-        # Tile theta by one period either side. A wall that wraps the cylinder
-        # is not a closed curve on the [-pi, pi] rectangle, so tracing it flat
-        # returns an open arc ending on the theta edge; on the tiled grid it
-        # traces as one continuous curve.
-        span = pm.theta_max - pm.theta_min
-        ts = np.linspace(pm.theta_min - span, pm.theta_max + span, 3 * grid_res // 2)
+    span = pm.theta_max - pm.theta_min
+    if periodic:
+        ts = np.linspace(pm.theta_min - span, pm.theta_max + span,
+                         3 * grid_res // 2)
     else:
         ts = np.linspace(pm.theta_min - m, pm.theta_max + m, grid_res)
     yy, tt = np.meshgrid(ys, ts, indexing="ij")
@@ -613,33 +843,63 @@ def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polyt
 
     fig = plt.figure()
     cs = plt.contour(yy, tt, vals, levels=[cfg.wall.contour_level])
-    loops, closed_all = [], True
-    for path in cs.get_paths():
-        v = path.vertices
+    loops, kinds, closed_all = [], [], True
+    seen_centroids: list = []
+    for v in _contour_subpaths(cs):
         if len(v) < 4:
             continue
-        gap = float(np.linalg.norm((v[0] - v[-1]) * wall.scale))
-        if gap > cfg.wall.closure_tol:
-            closed_all = False
-        else:
+        plain = float(np.linalg.norm((v[0] - v[-1]) * wall.scale))
+        if plain <= cfg.wall.closure_tol:
+            kind = "contractible"
+            if periodic:
+                v = _fold_theta(v, pm.theta_min, pm.theta_max)
+                c = (float(np.mean(v[:, 0])), float(np.mean(v[:, 1])))
+                if any(abs(c[0] - q[0]) < 1e-9 and abs(c[1] - q[1]) < 1e-9
+                       for q in seen_centroids):
+                    continue        # a translate of a loop already taken
+                seen_centroids.append(c)
             v = np.vstack([v, v[0]])
+        elif periodic and abs(abs(v[-1, 1] - v[0, 1])) >= span - 1e-9:
+            cut = _one_period(v, span)
+            if cut is None:
+                closed_all = False
+                loops.append(v)
+                kinds.append("open")
+                continue
+            # By exact periodicity the two ends are the SAME page point, so the
+            # curve is already closed; verify that rather than assume it.
+            gap = float(np.linalg.norm(
+                page_delta(cut[0], cut[-1], True) * wall.scale))
+            if gap > max(cfg.wall.closure_tol, 1e-6):
+                closed_all = False
+                kind = "open"
+            else:
+                kind = "wrapping"
+                cut = cut[:-1]       # drop the duplicate of the first vertex
+            v = _fold_theta(cut, pm.theta_min, pm.theta_max)
+        else:
+            closed_all = False
+            kind = "open"
         loops.append(v)
+        kinds.append(kind)
     plt.close(fig)
 
-    loops = [subsample_net(cfg, v, wall.scale) for v in loops]
-    n_seg = sum(max(0, len(v) - 1) for v in loops)
+    loops = [subsample_net(cfg, v, wall.scale, periodic) for v in loops]
+    n_seg = sum(max(0, len(v) - 1) + (1 if k == "wrapping" else 0)
+                for v, k in zip(loops, kinds))
     return Polytope(
         loops=loops, closed=closed_all and bool(loops), n_segments=n_seg,
-        note="" if loops else "no contour found",
+        note="" if loops else "no contour found", loop_kinds=kinds,
     )
 
 
-def subsample_net(cfg: Config, verts: np.ndarray, scale: np.ndarray) -> np.ndarray:
+def subsample_net(cfg: Config, verts: np.ndarray, scale: np.ndarray,
+                  periodic: bool = False) -> np.ndarray:
     """IJRR Definition 2: enforce an (epsilon, eta)-net via minimum spacing d_min."""
     d_min = cfg.wall.net_d_min
     keep = [0]
     for i in range(1, len(verts)):
-        if np.linalg.norm((verts[i] - verts[keep[-1]]) * scale) >= d_min:
+        if float(page_dist(verts[keep[-1]], verts[i], scale, periodic)[0]) >= d_min:
             keep.append(i)
     if keep[-1] != len(verts) - 1:
         keep.append(len(verts) - 1)
@@ -660,15 +920,22 @@ class FacetResult:
     recursions: int = 0
 
 
-def segment_hits_disc(a: np.ndarray, b: np.ndarray, disc) -> bool:
-    """Does segment [a, b] enter the disc? Elliptical: y and theta differ in units."""
+def segment_hits_disc(a: np.ndarray, b: np.ndarray, disc,
+                      periodic: bool = False) -> bool:
+    """Does segment [a, b] enter the disc? Elliptical: y and theta differ in units.
+
+    On a cylinder page the segment and the disc centre are compared through
+    the short way round in theta, so a facet at theta = 3.0 is tested against
+    a disc at theta = -3.0 as the 0.28 rad apart that they really are.
+    """
     sc = np.array([1.0 / max(disc.radius, 1e-12), 1.0 / max(disc.r_theta, 1e-12)])
-    c = np.array([disc.y, disc.theta]) * sc
-    aa, bb = a * sc, b * sc
+    centre = np.array([disc.y, disc.theta])
+    aa = page_delta(centre, a, periodic) * sc
+    bb = page_delta(centre, b, periodic) * sc
     d = bb - aa
     denom = float(np.dot(d, d))
-    t = 0.0 if denom < 1e-18 else float(np.clip(np.dot(c - aa, d) / denom, 0.0, 1.0))
-    return bool(np.linalg.norm(aa + t * d - c) <= 1.0)
+    t = 0.0 if denom < 1e-18 else float(np.clip(np.dot(-aa, d) / denom, 0.0, 1.0))
+    return bool(np.linalg.norm(aa + t * d) <= 1.0)
 
 
 def y_plus_penetration(
@@ -729,14 +996,15 @@ def _pd_ijrr(
     if len(valid_seeds) == 0:
         return 0.0, "no valid seed available"
     scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
-    d = np.linalg.norm((valid_seeds - point) * scale, axis=1)
+    periodic = is_periodic(cfg)
+    d = page_dist(valid_seeds, point, scale, periodic)
     order = np.argsort(d)
 
     for k in order[: cfg.wall.pd_seed_attempts]:
         seed = valid_seeds[k]
 
         def obj(z):
-            return float(np.sum(((z - point) * scale) ** 2))
+            return float(np.sum((page_delta(point, z, periodic) * scale) ** 2))
 
         def con(z):
             ok, _ = classify(cfg, arm, weld, scene, float(z[0]), float(z[1]), signs)
@@ -750,7 +1018,8 @@ def _pd_ijrr(
             cand = np.asarray(res.x)
             ok, _ = classify(cfg, arm, weld, scene, float(cand[0]), float(cand[1]), signs)
             if ok:
-                return float(np.linalg.norm((cand - point) * scale)), "IJRR local opt"
+                return (float(page_dist(point, cand, scale, periodic)[0]),
+                        "IJRR local opt")
     return float(d[order[0]]), "IJRR local opt (fallback: nearest sample)"
 
 
@@ -825,13 +1094,18 @@ def check_facet(
     bypasses the wall entirely.
     """
     scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+    periodic = is_periodic(cfg)
 
     for d in discs:
-        if segment_hits_disc(a, b, d):
+        if segment_hits_disc(a, b, d, periodic):
             return FacetResult(False, f"crosses Sigma disc ({d.kind})", recursions=depth)
 
-    centre = 0.5 * (a + b)
-    radius = 0.5 * float(np.linalg.norm((b - a) * scale))
+    # The midpoint and the half-length take the short way round in theta, so a
+    # facet that crosses the seam is measured as the short segment it is and
+    # not as a sweep of the whole theta range.
+    delta = page_delta(a, b, periodic)
+    centre = a + 0.5 * delta
+    radius = 0.5 * float(np.linalg.norm(delta * scale))
 
     # Virtual invalid band counts as invalid with positive thickness.
     if in_virtual_invalid(cfg, centre[None, :])[0]:
@@ -877,17 +1151,30 @@ def check_polytope(
     failures = []
     failure_points = []
     max_rec = 0
-    for loop in poly.loops:
-        for i in range(len(loop) - 1):
+    periodic = is_periodic(cfg)
+    for li, loop in enumerate(poly.loops):
+        kind = (poly.loop_kinds[li] if li < len(poly.loop_kinds)
+                else "contractible")
+        # A contractible loop already repeats its first vertex at the end. A
+        # WRAPPING loop does not: its last vertex and its first are the same
+        # page point only after going through the theta seam, so that closing
+        # facet has to be checked explicitly or one segment of the wall goes
+        # unverified -- and it is precisely the segment at the seam, which is
+        # the one invariant 5 warns about.
+        pairs = [(loop[i], loop[i + 1]) for i in range(len(loop) - 1)]
+        if kind == "wrapping" and len(loop) > 1:
+            pairs.append((loop[-1], loop[0] + np.array([0.0, 2.0 * np.pi])))
+        for aa, bb in pairs:
             n_facets += 1
-            r = check_facet(cfg, arm, weld, scene, signs, loop[i], loop[i + 1],
+            r = check_facet(cfg, arm, weld, scene, signs, aa, bb,
                             discs, valid_seeds)
             max_rec = max(max_rec, r.recursions)
             if r.ok:
                 n_passed += 1
             else:
-                failures.append((i, r.reason))
-                failure_points.append((0.5 * (loop[i] + loop[i + 1]), r.reason))
+                failures.append((n_facets - 1, r.reason))
+                failure_points.append(
+                    (aa + 0.5 * page_delta(aa, bb, periodic), r.reason))
     ok = n_facets > 0 and n_passed == n_facets
     if verbose:
         print(f"[stage3] alg3 facets {n_passed}/{n_facets} passed, "

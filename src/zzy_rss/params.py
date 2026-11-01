@@ -125,6 +125,40 @@ class WeldParams:
     approach: tuple = (0.500000, 0.0, -0.866025)
     reference: tuple = (0.866025, 0.0, 0.500000)
 
+    # ---- seam shape -----------------------------------------------------
+    #
+    # "line" is the straight seam of EXP 1-4 and uses p0/p1 only.
+    #
+    # "arc" is what EXP 5 needs, and it is a necessity rather than a variant.
+    # Invariant 22: a straight seam with a constant tool pose makes the wrist
+    # centre W(y) AFFINE in y, hence |W(y) - S| CONVEX, hence the reachable y
+    # set a single interval, hence the q4 fold |W - S| = reach_max reachable
+    # only at an endpoint -- where the task leaves the workspace. 2280
+    # straight placements measured: 0 non-convex. So no straight-seam task has
+    # an interior fold door, and EXP 5 cannot be built on one.
+    #
+    # On an arc, |W(phi) - S|^2 = A - B cos(phi - phi_near) with B = 2 R rho,
+    # so |W - S| has an interior MAXIMUM at the arc's far point. A placement
+    # whose far point sits exactly at reach_max therefore has a fold door in
+    # the middle of the task with both halves reachable. Circumferential
+    # seams (pipe-to-plate, flange rings) are the commonest curved weld there
+    # is, and "the arm just reaches the farthest point of the seam" is the
+    # limiting workcell layout, not a contrivance.
+    curve: str = "line"                  # "line" | "arc"
+    arc_center: tuple = (0.0, 0.0, 0.0)
+    arc_radius: float = 0.0
+    arc_normal: tuple = (0.0, 0.0, 1.0)  # normal of the arc's plane
+    arc_ref: tuple = (1.0, 0.0, 0.0)     # in-plane direction of phi = 0
+    arc_phi0: float = 0.0                # y = 0 maps here
+    arc_phi1: float = 0.0                # y = 1 maps here
+
+    # How the torch is held along the seam. "constant" keeps it fixed in the
+    # world, which is what EXP 1-5 use: it leaves the seam shape as the ONLY
+    # source of non-affinity, so the fold door's cause is unambiguous.
+    # "radial" swings the torch azimuth with the arc, as a real ring weld
+    # does, and adds a second source (A2 in docs/exp5_spec.md).
+    pose_mode: str = "constant"          # "constant" | "radial"
+
 
 @dataclass(frozen=True)
 class BoxObstacle:
@@ -259,6 +293,24 @@ class SigmaParams:
     # Fold doors (q4 -> 0) are found where the IK discriminant vanishes, not by
     # a sign crossing; this is the margin on |cos q4| used to bracket them.
     fold_cos_margin: float = 1e-3
+    # How close |W(y) - S| must come to reach_max for a TANGENTIAL fold -- the
+    # interior line door of EXP 5 -- to be accepted. A tangency is a DOUBLE
+    # root, so it is a codimension-1 condition on the placement and has to be
+    # SOLVED FOR, not searched: scripts/run_exp5.py moves the seam's centre
+    # until the residual is at machine precision (measured 0.0 to 1.1e-16).
+    #
+    # In robot terms a residual delta leaves the arm
+    #     |q4| ~ sqrt(2 reach_max delta / (d_se d_ew))
+    # short of straight, so delta = 1e-9 m is |q4| <= 3.5e-5 rad = 0.002 deg
+    # and an elbow circle of radius <= 18 um. Below that the circle has
+    # collapsed as far as double precision can express, and the theta line is
+    # one posture to within the collision model's own resolution.
+    #
+    # Raising this does NOT buy robustness: it accepts placements where the
+    # elbow circle is small but real, and then the theta line is not one
+    # posture, the door is not exactly certifiable, and the proof would be
+    # claiming a connection the robot does not have.
+    fold_tangency_tol: float = 1.0e-9
     # Within a page the sign is fixed by construction, so a door is where
     # |q_j| TOUCHES zero. This is the tolerance of the numerical cross-check
     # that confirms the analytic door finder.
