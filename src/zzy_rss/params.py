@@ -353,9 +353,30 @@ class WallParams:
     # Virtual-boundary band thickness (IJRR Fig. 5). Lets a wall close against
     # the page edge instead of running off it.
     virtual_band: float = 0.03
-    # Reconstruction window, in multiples of virtual_band. Must exceed 2 (the
-    # ring's own offset) or the wall closes on the domain edge instead of
-    # around the ring, and the traced contour is an open arc.
+    # Where the virtual obstacle band ENDS and where the virtual free ring
+    # SITS, both in multiples of virtual_band. IJRR Fig. 5 puts the free
+    # region immediately outside the obstacle band; these two numbers must
+    # therefore be adjacent, with no gap between them.
+    #
+    # They used to be 1.0 and 2.0, which left the strip
+    # (y_min - 2 eps, y_min - eps) as neither: not the invalid band, and not
+    # the ring. The wall is free to close in that strip, and off the weld's
+    # own y range the extrapolated pose is often still VALID, so the facets
+    # there fail with "facet centre is VALID". Measured on the sampled
+    # pipeline once the y = 0 anchors had pushed the wall out of the page:
+    # every remaining failure sat at y in [-0.058, -0.054], i.e. inside that
+    # strip (findings 32).
+    #
+    # Declaring the whole strip invalid is not a licence taken: y < y_min is
+    # off the weld, where the task is not defined at all, so no path may go
+    # there. The band's thickness is a modelling choice and only has to be
+    # positive and to exclude the ring, which virtual_ring > virtual_band_outer
+    # guarantees.
+    virtual_band_outer: float = 2.0
+    virtual_ring: float = 2.5
+    # Reconstruction window, in multiples of virtual_band. Must exceed
+    # virtual_ring or the wall closes on the domain edge instead of around the
+    # ring, and the traced contour is an open arc.
     recon_margin: float = 3.0
     # A traced loop whose endpoints are further apart than this is NOT closed,
     # which fails Definition 1 (I) exactly as a failed triangulation does.

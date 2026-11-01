@@ -60,7 +60,8 @@ from zzy_rss.flood import find_inf_proof_region, live_discs  # noqa: E402
 from zzy_rss.pagemap import build_page_map  # noqa: E402
 from zzy_rss.prm import classify  # noqa: E402
 from zzy_rss.wall import (  # noqa: E402
-    LABEL_TOPOLOGICAL, in_virtual_invalid, check_polytope, reconstruct_wall, sample_wall, sigma_disc_samples,
+    LABEL_TOPOLOGICAL, edge_anchor_samples, in_virtual_invalid, check_polytope,
+    reconstruct_wall, sample_wall, sigma_disc_samples,
     train_wall, virtual_boundary_samples,
 )
 
@@ -440,6 +441,31 @@ def run_case(tag, tilt, obstacles, args, out):
         other = np.vstack([goal_cls, virtual_boundary_samples(cfg, 80)])
         if len(re_):
             other = np.vstack([other, re_])
+
+        # ---- page-edge anchors (findings 32) ----------------------------
+        # The Fig. 5 ring says "beyond the page is the other class"; it does
+        # not say where the seed region STOPS. A random roadmap never samples
+        # y = 0, so the wall had no left edge to close against and cut into
+        # the valid start region -- every failed facet of this wall sat at
+        # y ~ 0. The exact valid configurations on the y edges supply the
+        # missing fact. Each one joins the class it is CONNECTED to, which is
+        # the same addToTraining rule Algorithms 2 and 4 use, so the anchors
+        # cannot contradict the roadmap's own components.
+        if args.edge_anchors:
+            anchors = edge_anchor_samples(cfg, arm, weld, scene, sg)
+            lab_pre = RoadmapLabeller(cfg, arm, weld, scene, sg, v, ing)
+            n_s = n_o = n_drop = 0
+            for m in anchors:
+                c = lab_pre.label(m)
+                if c > 0:
+                    seed = np.vstack([seed, m[None, :]]); n_s += 1
+                elif c < 0:
+                    other = np.vstack([other, m[None, :]]); n_o += 1
+                else:
+                    n_drop += 1
+            print(f"  edge anchors: {len(anchors)} valid on the y edges -> "
+                  f"{n_s} start-side / {n_o} goal-side / {n_drop} unconnected "
+                  f"(dropped)", flush=True)
         inv = sp["obs"]
         if len(inv) > 200:
             inv = inv[rng.choice(len(inv), 200, replace=False)]
@@ -450,6 +476,7 @@ def run_case(tag, tilt, obstacles, args, out):
         # and say so than to return a shattered wall.
         cfg = dataclasses.replace(cfg, wall=dataclasses.replace(
             cfg.wall, gamma_max=args.gamma_max,
+            feedback_margin=args.feedback_margin,
             label_mode=LABEL_TOPOLOGICAL))
         labeller = RoadmapLabeller(cfg, arm, weld, scene, sg, v, ing)
         w0 = train_wall(cfg, seed, other)
@@ -525,7 +552,24 @@ def main():
     ap.add_argument("--fig-res", dest="fig_res", type=int, default=121,
                     help="grid resolution used ONLY to shade the figure")
     ap.add_argument("--iters", type=int, default=14)
-    ap.add_argument("--gamma-max", dest="gamma_max", type=float, default=30.0)
+    # findings 29 / invariant 14: 30 is IJRR's number in IJRR's units. On this
+    # page (y in [0,1], theta/pi in [-1,1]) the two classes stand ~0.06 apart,
+    # so an RBF needs gamma ~ 1/d^2 ~ 280 to resolve them and 30 is a very WIDE
+    # kernel. The grid pipeline was raised to 400 in findings 29; the sampled
+    # one was left at 30 and never retested, which is the second half of why
+    # its wall stalled at 111/122 with accuracy 0.95 < 1.
+    ap.add_argument("--gamma-max", dest="gamma_max", type=float, default=400.0)
+    ap.add_argument("--no-edge-anchors", dest="edge_anchors",
+                    action="store_false", default=True,
+                    help="drop the exact y-edge training anchors (findings 32)")
+    # findings 32: with the anchors in, Algorithm 4's feed-back is what breaks
+    # the fit on a SAMPLED training set -- measured acc 0.9766 and a wall that
+    # never closed at all. The guard routes such a centre to Algorithm 4's
+    # other branch (shrink the facets) instead. Half a cell diagonal on a
+    # 61-cell page is 0.019 scaled units. The GRID pipeline does not need this
+    # and keeps the default of 0 (IJRR as written).
+    ap.add_argument("--feedback-margin", dest="feedback_margin", type=float,
+                    default=0.019)
     ap.add_argument("--only", choices=("all", "exp1", "exp2"), default="all")
     ap.add_argument("--out", default="out/sampled")
     args = ap.parse_args()

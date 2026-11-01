@@ -196,10 +196,11 @@ def virtual_boundary_samples(cfg: Config, n_per_edge: int = 120) -> np.ndarray:
     """
     pm = cfg.pagemap
     eps = cfg.wall.virtual_band
-    y0, y1 = pm.y_min - 2.0 * eps, pm.y_max + 2.0 * eps
+    ring = getattr(cfg.wall, "virtual_ring", 2.0) * eps
+    y0, y1 = pm.y_min - ring, pm.y_max + ring
     ts = np.linspace(pm.theta_min, pm.theta_max, n_per_edge)
     if not getattr(pm, "theta_periodic", True):
-        t0, t1 = pm.theta_min - 2.0 * eps, pm.theta_max + 2.0 * eps
+        t0, t1 = pm.theta_min - ring, pm.theta_max + ring
         ys = np.linspace(y0, y1, n_per_edge)
         return np.vstack([
             np.column_stack([ys, np.full_like(ys, t0)]),
@@ -213,10 +214,56 @@ def virtual_boundary_samples(cfg: Config, n_per_edge: int = 120) -> np.ndarray:
     ])
 
 
-def in_virtual_invalid(cfg: Config, pts: np.ndarray) -> np.ndarray:
-    """The positive-thickness invalid band just outside the page boundary."""
+def edge_anchor_samples(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
+    n_scan: int = 181, edges: tuple | None = None,
+) -> np.ndarray:
+    """Exact VALID configurations ON the page's y edges, for the TRAINING set.
+
+    The Fig. 5 ring above tells the wall that everything beyond the page is
+    the OTHER class. It does not tell the wall where the seed region STOPS.
+    Those are different facts, and only the first one is supplied by the ring:
+    if no training point of the seed class sits at y = y_min, nothing stops the
+    SVM from closing the wall INSIDE the page and slicing the valid start
+    region off at its own edge.
+
+    The grid pipeline never notices, because the y = 0 row of the grid is in
+    the training data for free. A random roadmap practically never samples
+    y = 0, which is exactly why every failed facet of the sampled pipeline's
+    EXP 2 wall sat at y ~ 0 (findings 25): the wall had no idea where the left
+    edge of the start region was, and cut into it.
+
+    This returns the missing anchors: every arm angle at y = y_min and
+    y = y_max whose configuration is VALID. They are scanned exactly rather
+    than sampled, since the edge is a 1-D line and 181 samples cover it.
+
+    These belong in the TRAINING data ONLY. Putting them in the ROADMAP is a
+    different change and measured worse -- it moves graph vertices onto the
+    boundary band itself, and the wall can then no longer close against the
+    band (111/122 closed became 132/152 open; see invariant 18).
+    """
     pm = cfg.pagemap
-    eps = cfg.wall.virtual_band
+    if edges is None:
+        edges = (pm.y_min, pm.y_max)
+    out = []
+    thetas = np.linspace(pm.theta_min, pm.theta_max, n_scan)
+    for yv in edges:
+        for t in thetas:
+            ok, _tag = classify(cfg, arm, weld, scene, float(yv), float(t), signs)
+            if ok:
+                out.append((float(yv), float(t)))
+    return np.asarray(out, dtype=float).reshape(-1, 2)
+
+
+def in_virtual_invalid(cfg: Config, pts: np.ndarray) -> np.ndarray:
+    """The positive-thickness invalid band just outside the page boundary.
+
+    It reaches out to virtual_band_outer * virtual_band, which is where the
+    virtual free ring begins -- see WallParams.virtual_band_outer for why the
+    two must be adjacent.
+    """
+    pm = cfg.pagemap
+    eps = cfg.wall.virtual_band * getattr(cfg.wall, "virtual_band_outer", 1.0)
     y, t = pts[:, 0], pts[:, 1]
     if getattr(pm, "theta_periodic", True):
         outside = (y < pm.y_min) | (y > pm.y_max)

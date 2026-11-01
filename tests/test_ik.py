@@ -161,6 +161,56 @@ def test_mirror_identities() -> None:
             )
 
 
+def test_shared_page_build_matches() -> int:
+    """build_all_pages_shared must be EXACT, not an approximation.
+
+    It replaces 8 x (IK + FK + collision) per cell with 1 x (IK + FK +
+    collision) plus 8 joint-limit comparisons, on the strength of findings 31:
+    IK existence and collision are page-independent, and the mirror identities
+    give the other seven joint vectors in closed form. If that is right the two
+    builders agree in every cell of every page; if it is wrong this test says
+    where.
+    """
+    import dataclasses
+
+    from zzy_rss.pagemap import build_all_pages, build_all_pages_shared
+    from zzy_rss.params import BoxObstacle, PageMapParams, SceneParams
+    from zzy_rss.scene import Scene
+
+    worst = 0
+    for obstacles in (
+        (),
+        (BoxObstacle(center=(0.14, 0.0, 0.38), half_extent=(0.06, 0.06, 0.06)),
+         BoxObstacle(center=(0.14, 0.0, 0.66), half_extent=(0.06, 0.06, 0.06))),
+    ):
+        cfg = dataclasses.replace(
+            DEFAULT,
+            pagemap=PageMapParams(n_y=31, n_theta=31),
+            scene=SceneParams(gap_open=True, obstacles=obstacles),
+        )
+        arm = SrsArm(cfg.arm)
+        weld = WeldLine(cfg.weld)
+        scene = Scene(cfg.arm, cfg.scene)
+        a = build_all_pages(cfg, arm, weld, scene, with_kin=False,
+                            verbose=False, shared=False)
+        b = build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
+                                   verbose=False)
+        assert set(a) == set(b), "page sets differ"
+        for name in a:
+            diff = int(np.sum(a[name].tag != b[name].tag))
+            worst = max(worst, diff)
+            assert diff == 0, (
+                f"page {name}: shared build differs in {diff} cells"
+            )
+            for field in ("q2", "q4", "q6", "limit_margin"):
+                x = np.nan_to_num(getattr(a[name], field))
+                y = np.nan_to_num(getattr(b[name], field))
+                assert np.max(np.abs(x - y)) < 1e-9, (
+                    f"page {name}: {field} differs"
+                )
+    return worst
+
+
 if __name__ == "__main__":
     n_ok, n_tried, worst_rt = test_round_trip()
     print(f"[ik] round-trip        : {n_ok}/{n_tried} branches solvable, "
@@ -174,4 +224,7 @@ if __name__ == "__main__":
           "gimbal arcs fix the tool")
     test_mirror_identities()
     print("[ik] mirror identities : s2/s4/s6 confirmed as representational mirrors")
+    worst_cells = test_shared_page_build_matches()
+    print(f"[ik] shared page build : identical to the per-page build "
+          f"(worst {worst_cells} differing cells over 8 pages x 2 scenes)")
     print("[ik] ALL TESTS PASSED")

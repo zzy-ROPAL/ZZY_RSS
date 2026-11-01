@@ -163,8 +163,18 @@ def build_all_pages(
     scene: Scene,
     with_kin: bool = True,
     verbose: bool = True,
+    shared: bool = True,
 ) -> dict:
-    """Stage 1 for every sign branch. Returns {page_name: PageMap}."""
+    """Stage 1 for every sign branch. Returns {page_name: PageMap}.
+
+    shared=True routes to build_all_pages_shared, which is EXACT (asserted
+    cell by cell by tests/test_ik.py::test_shared_page_build_matches) and
+    about 4.5x faster. shared=False is the original one-page-at-a-time build,
+    kept as the reference the test compares against.
+    """
+    if shared:
+        return build_all_pages_shared(cfg, arm, weld, scene,
+                                      with_kin=with_kin, verbose=verbose)
     pages = {}
     for signs in SIGN_BRANCHES:
         pmap = build_page_map(cfg, arm, weld, scene, signs, with_kin=with_kin)
@@ -190,3 +200,156 @@ def page_census(pages: dict) -> dict:
         "non_empty": non_empty,
         "empty": [name for name, pm in pages.items() if pm.is_empty],
     }
+
+
+# --------------------------------------------------------------------------
+# Stage 1, eight pages for the price of one (findings 31 / 33)
+# --------------------------------------------------------------------------
+
+# s2, s4 and s6 each act on the joint vector as the same representational
+# mirror, asserted exactly (1e-9) by tests/test_ik.py::test_mirror_identities:
+# the MIDDLE joint negates and the two OUTER joints shift by pi.
+#
+#   s2 : q1 -> q1 +- pi,  q2 -> -q2,  q3 -> q3 +- pi
+#   s4 : q3 -> q3 +- pi,  q4 -> -q4,  q5 -> q5 +- pi
+#   s6 : q5 -> q5 +- pi,  q6 -> -q6,  q7 -> q7 +- pi
+#
+# (0-based joint indices below.)
+MIRROR_JOINTS = {0: (0, 1, 2), 1: (2, 3, 4), 2: (4, 5, 6)}
+
+
+def _wrap(a: np.ndarray) -> np.ndarray:
+    """Wrap to (-pi, pi]. q +- pi is one angle once wrapped, so the sign of
+    the shift in the mirror identity is not a choice."""
+    return -((-np.asarray(a, dtype=float) + np.pi) % (2.0 * np.pi) - np.pi)
+
+
+def mirror_q(q: np.ndarray, sign_index: int) -> np.ndarray:
+    """Apply the s2/s4/s6 mirror to one joint vector. Exact, no IK."""
+    i, j, k = MIRROR_JOINTS[sign_index]
+    out = np.array(q, dtype=float, copy=True)
+    out[j] = -out[j]
+    out[i] = _wrap(out[i] + np.pi)
+    out[k] = _wrap(out[k] + np.pi)
+    return out
+
+
+def q_for_branch(q_ref: np.ndarray, signs_ref: tuple, signs: tuple) -> np.ndarray:
+    """The joint vector of the SAME arm placement written in another branch.
+
+    All eight branches place shoulder, elbow, wrist and tool identically
+    (findings 31, asserted to 3e-16 by test_branch_geometry_identical); they
+    are eight coordinate spellings of one posture. So one IK call plus the
+    mirror identities gives all eight, and collision -- which depends on the
+    posture, not the spelling -- need only be evaluated once.
+    """
+    q = np.array(q_ref, dtype=float, copy=True)
+    for idx in range(3):
+        if signs[idx] != signs_ref[idx]:
+            q = mirror_q(q, idx)
+    return q
+
+
+def build_all_pages_shared(
+    cfg: Config,
+    arm: SrsArm,
+    weld: WeldLine,
+    scene: Scene,
+    with_kin: bool = False,
+    verbose: bool = True,
+) -> dict:
+    """All eight pages from ONE IK and ONE collision check per grid cell.
+
+    build_all_pages does 8 x n_cells of (IK + FK + collision). This does
+    1 x n_cells of (IK + FK + collision) plus 8 x n_cells of a joint-limit
+    comparison, because:
+
+      * IK EXISTENCE depends only on |W(y) - S| lying inside the annulus,
+        which is a property of y alone -- no sign appears in it;
+      * COLLISION is bit-for-bit page-independent (findings 31: all eight
+        pages differ in 0 of 3721 cells when limits are ignored);
+      * only the JOINT-LIMIT test can tell the pages apart, and the mirror
+        identities give the eight joint vectors in closed form.
+
+    The result is asserted equal to build_all_pages cell by cell -- see
+    tests/test_ik.py::test_shared_page_build_matches.
+
+    with_kin still costs one finite-difference Jacobian per cell per page, so
+    it is OFF by default here; the callers that need Sigma_kin ask for it.
+    """
+    pm_p = cfg.pagemap
+    ys = np.linspace(pm_p.y_min, pm_p.y_max, pm_p.n_y)
+    thetas = np.linspace(pm_p.theta_min, pm_p.theta_max, pm_p.n_theta)
+    shape = (pm_p.n_y, pm_p.n_theta)
+
+    ref = SIGN_BRANCHES[0]
+    fields = {}
+    for signs in SIGN_BRANCHES:
+        fields[signs] = dict(
+            tag=np.full(shape, INVALID_NO_IK, dtype=np.int8),
+            q2=np.full(shape, np.nan), q4=np.full(shape, np.nan),
+            q6=np.full(shape, np.nan),
+            clearance=np.full(shape, np.nan),
+            limit_margin=np.full(shape, np.nan),
+            kin_measure=np.full(shape, np.nan),
+            near_full=np.zeros(shape, dtype=bool),
+            near_axis=np.zeros(shape, dtype=bool),
+        )
+
+    poses = [weld.pose(float(y)) for y in ys]
+    for i, _y in enumerate(ys):
+        pos, rot = poses[i]
+        for j, theta in enumerate(thetas):
+            res = arm.ik_branch(pos, rot, float(theta), ref,
+                                coord_axis_tol=pm_p.coord_axis_tol,
+                                coord_radius_tol=pm_p.coord_radius_tol)
+            if not res.ok:
+                continue    # no-IK is page-independent; tags already say so
+
+            # One posture -> one collision report, shared by all eight pages.
+            report = scene.check(arm.frames(res.q))
+
+            for signs in SIGN_BRANCHES:
+                q = res.q if signs == ref else q_for_branch(res.q, ref, signs)
+                f = fields[signs]
+                f["q2"][i, j], f["q4"][i, j], f["q6"][i, j] = q[1], q[3], q[5]
+                f["near_full"][i, j] = res.near_full_extension
+                f["near_axis"][i, j] = res.near_axis_align
+                margin = arm.limit_margin(q)
+                f["limit_margin"][i, j] = margin
+                if margin < 0.0:
+                    f["tag"][i, j] = INVALID_JOINT_LIMIT
+                    continue
+                f["clearance"][i, j] = report.clearance
+                if report.in_collision:
+                    f["tag"][i, j] = INVALID_COLLISION
+                    continue
+                f["tag"][i, j] = VALID
+                if with_kin:
+                    f["kin_measure"][i, j] = arm.kin_singularity_measure(q)
+
+    pages = {}
+    for signs in SIGN_BRANCHES:
+        f = fields[signs]
+        tag = f["tag"]
+        total = tag.size
+        stats = {
+            "page": page_name(signs),
+            "n_cells": int(total),
+            "n_valid": int(np.sum(tag == VALID)),
+            "n_no_ik": int(np.sum(tag == INVALID_NO_IK)),
+            "n_joint_limit": int(np.sum(tag == INVALID_JOINT_LIMIT)),
+            "n_collision": int(np.sum(tag == INVALID_COLLISION)),
+        }
+        stats["frac_valid"] = stats["n_valid"] / total
+        pmap = PageMap(signs=signs, y_grid=ys, theta_grid=thetas, stats=stats,
+                       **f)
+        pages[pmap.name] = pmap
+        if verbose:
+            s = pmap.stats
+            print(f"[stage1] page {s['page']}  valid {s['frac_valid']*100:6.2f}%  "
+                  f"no-IK {s['n_no_ik']/s['n_cells']*100:6.2f}%  "
+                  f"limit {s['n_joint_limit']/s['n_cells']*100:6.2f}%  "
+                  f"coll {s['n_collision']/s['n_cells']*100:6.2f}%"
+                  f"{'   [EMPTY]' if pmap.is_empty else ''}")
+    return pages

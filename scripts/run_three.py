@@ -63,7 +63,7 @@ from zzy_rss.flood import (  # noqa: E402
     find_inf_proof_region, invalid_points, label_regions, live_discs,
     other_valid_points, region_points, run_proof, thin, write_certificate,
 )
-from zzy_rss.pagemap import build_page_map  # noqa: E402
+from zzy_rss.pagemap import build_all_pages_shared, build_page_map  # noqa: E402
 from zzy_rss.params import (  # noqa: E402
     BoxObstacle, Config, PageMapParams, SceneParams, WeldParams,
 )
@@ -678,9 +678,11 @@ def main():
         return time.perf_counter()
 
     def pages_and_sigma(cfg, arm, weld, scene):
-        pms = {n: build_page_map(cfg, arm, weld, scene,
-                                 tuple(1 if c == "+" else -1 for c in n),
-                                 with_kin=False) for n in PAGES}
+        # One IK and one collision check per cell for all eight pages
+        # (findings 31/33): 3.6 s -> 0.8 s at res 61, bit-identical tags.
+        built = build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
+                                       verbose=False)
+        pms = {n: built[n] for n in PAGES}
         sig = build_sigma(cfg, arm, weld, pms, verbose=False)
         n_open = n_blk = 0
         for n in PAGES:
