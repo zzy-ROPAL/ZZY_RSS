@@ -97,6 +97,12 @@ class WallModel:
         return g * self.scale
 
 
+def _gamma_grid_size(wp) -> int:
+    """Number of steps on IJRR's gamma ladder, gamma_init + k * gamma_step."""
+    return max(0, int(np.floor((wp.gamma_max - wp.gamma_init) / wp.gamma_step
+                               + 1e-9)))
+
+
 def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallModel:
     """IJRR Algorithm 1: escalate gamma until the training data is fully separated.
 
@@ -104,26 +110,99 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
     not a pathology. It stops at the LARGEST effecting range (smallest gamma)
     that still separates, which is what keeps the zero set connected instead of
     fragmenting into Gaussian islands (IJRR Fig. 7).
+
+    HOW the ladder is walked is a cost question, not a modelling one, and
+    `gamma_search` picks the method. Both walk the SAME ladder
+    gamma_init + k * gamma_step and both return a gamma that separates whose
+    predecessor on the ladder does not.
+
+      "linear"  IJRR as written: try every rung from the bottom. The rung
+                count is (gamma_max - gamma_init) / gamma_step, which is 3990
+                at the defaults, and a hard region really does climb most of
+                it -- measured on the EXP 4 start region, one call reached
+                gamma 227.3 after ~2270 SVM fits and took 70.6 s, with
+                Algorithm 2 and Algorithm 4 each triggering more retrains.
+                That is the whole reason run_proof appeared to hang there
+                (findings 36 left it open).
+      "bisect"  Probe rungs 1, 2, 4, 8, ... until one separates, then bisect
+                the bracket. ~25 fits instead of ~2270 for the same answer.
+
+    Bisection assumes separability is monotone in gamma, which is why the
+    result is CHECKED rather than trusted: the rung below the one returned is
+    refit and must fail. If it does not, the search falls back to a linear
+    scan of the remaining bracket, so a non-monotone ladder costs time and
+    never correctness.
     """
     wp = cfg.wall
     scale = np.array([wp.scale_y, wp.scale_theta])
     x = np.vstack([seed_pts, rest_pts]) * scale
     y = np.concatenate([np.ones(len(seed_pts)), -np.ones(len(rest_pts))])
 
-    gamma = wp.gamma_init
-    svm = None
-    acc = 0.0
-    capped = False
-    while True:
-        svm = SVC(kernel="rbf", gamma=gamma, C=wp.svm_C)
-        svm.fit(x, y)
-        acc = float(svm.score(x, y))
-        if acc >= 1.0:
-            break
-        if gamma + wp.gamma_step > wp.gamma_max:
-            capped = True
-            break
-        gamma += wp.gamma_step
+    cache: dict = {}
+
+    def rung(k: int):
+        """Fit at ladder rung k; returns (svm, accuracy). Memoised."""
+        if k not in cache:
+            g = wp.gamma_init + k * wp.gamma_step
+            svm = SVC(kernel="rbf", gamma=g, C=wp.svm_C)
+            svm.fit(x, y)
+            cache[k] = (svm, float(svm.score(x, y)))
+        return cache[k]
+
+    K = _gamma_grid_size(wp)
+    mode = getattr(wp, "gamma_search", "bisect")
+    k_sep = None
+
+    if mode == "linear":
+        for k in range(K + 1):
+            _, acc = rung(k)
+            if acc >= 1.0:
+                k_sep = k
+                break
+        k_last = K if k_sep is None else k_sep
+    else:
+        _, acc0 = rung(0)
+        if acc0 >= 1.0:
+            k_sep = 0
+        else:
+            k_fail, k_ok, k = 0, None, 1
+            while k <= K:
+                _, acc = rung(k)
+                if acc >= 1.0:
+                    k_ok = k
+                    break
+                k_fail, k = k, k * 2
+            if k_ok is None and k_fail != K:
+                _, acc = rung(K)
+                if acc >= 1.0:
+                    k_ok = K
+            if k_ok is not None:
+                lo, hi = k_fail, k_ok          # lo fails, hi separates
+                while hi - lo > 1:
+                    mid = (lo + hi) // 2
+                    _, acc = rung(mid)
+                    if acc >= 1.0:
+                        hi = mid
+                    else:
+                        lo = mid
+                k_sep = hi
+                # The guarantee, verified rather than assumed.
+                if k_sep > 0:
+                    _, acc_below = rung(k_sep - 1)
+                    if acc_below >= 1.0:
+                        # Not monotone: fall back to a linear scan of the
+                        # bracket below, which is what IJRR would have done.
+                        for k in range(0, k_sep):
+                            _, acc = rung(k)
+                            if acc >= 1.0:
+                                k_sep = k
+                                break
+        k_last = K if k_sep is None else k_sep
+
+    svm, acc = rung(k_last)
+    gamma = wp.gamma_init + k_last * wp.gamma_step
+    capped = k_sep is None
+
     if capped:
         # Accuracy < 1 means the wall does not separate its own training data,
         # so it is not a separator at all. Say so loudly; Algorithm 3 will
@@ -138,7 +217,7 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
         # refusal.
         print(f"[stage1] note gamma={gamma:.1f} exceeds gamma_warn="
               f"{wp.gamma_warn:g} (accuracy {acc:.4f}); relying on closedness "
-              f"and facet checks")
+              f"and facet checks [{len(cache)} SVM fits, {mode}]")
     return WallModel(svm=svm, gamma=gamma, scale=scale, gamma_capped=capped,
                      n_seed=len(seed_pts), n_rest=len(rest_pts), accuracy=acc,
                      projection=wp.projection, newton_iters=wp.newton_iters,

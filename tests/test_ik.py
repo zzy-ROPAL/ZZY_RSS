@@ -248,6 +248,82 @@ def test_fasteval_matches_page_build() -> int:
     return worst
 
 
+def test_gamma_search_modes_agree() -> tuple[int, int, float]:
+    """`gamma_search` must be a COST choice, never a modelling one.
+
+    "bisect" probes rungs 1, 2, 4, ... of IJRR's gamma ladder and then
+    bisects, which is ~90x fewer SVM fits than walking all 3990 rungs. That
+    is only legitimate if it lands on the same rung as "linear". Check it on
+    REAL page data -- the start region of a page versus the rest of it --
+    rather than on synthetic clouds, because what makes this hard is the
+    geometry of the valid set.
+
+    gamma_max is lowered here so the linear scan is affordable in a test; the
+    search logic does not depend on it.
+    """
+    import dataclasses
+    from zzy_rss.flood import (invalid_points, label_regions,
+                               other_valid_points, region_points, thin)
+    from zzy_rss.pagemap import build_all_pages_shared
+    from zzy_rss.params import (BoxObstacle, PageMapParams, SceneParams,
+                                WeldParams)
+    from zzy_rss.scene import Scene
+    from zzy_rss.wall import train_wall, virtual_boundary_samples
+
+    a = np.radians(45.0)
+    weld_p = WeldParams(p0=(0.44, -0.34, 0.22), p1=(0.44, 0.34, 0.22),
+                        approach=(float(np.sin(a)), 0.0, float(-np.cos(a))),
+                        reference=(float(np.cos(a)), 0.0, float(np.sin(a))))
+    obstacles = (BoxObstacle(center=(0.18, 0.30, 0.34),
+                             half_extent=(0.07, 0.07, 0.07), label="cut"),
+                 BoxObstacle(center=(0.18, -0.06, 0.42),
+                             half_extent=(0.05, 0.05, 0.05), label="split"))
+    n_cases = 0
+    worst = 0.0
+    for obs, pages in (((), ("+-+",)), (obstacles, ("+-+", "+--"))):
+        cfg = dataclasses.replace(
+            DEFAULT, weld=weld_p, pagemap=PageMapParams(n_y=41, n_theta=41),
+            scene=SceneParams(gap_open=True, obstacles=obs))
+        arm = SrsArm(cfg.arm)
+        wl = WeldLine(cfg.weld)
+        scene = Scene(cfg.arm, cfg.scene)
+        built = build_all_pages_shared(cfg, arm, wl, scene, with_kin=False,
+                                       verbose=False)
+        for name in pages:
+            pm = built[name]
+            lab, regs = label_regions(cfg, pm)
+            if not regs:
+                continue
+            k = max(regs, key=lambda r: r.n_cells).index
+            rng = np.random.default_rng(0)
+            seed = thin(region_points(pm, lab, k), 300, rng)
+            rest = np.vstack([
+                thin(other_valid_points(pm, lab, k, regs, "goal_only"),
+                     300, rng),
+                virtual_boundary_samples(cfg, 60)])
+            if not len(seed) or not len(rest):
+                continue
+            got = {}
+            for mode in ("linear", "bisect"):
+                c = dataclasses.replace(cfg, wall=dataclasses.replace(
+                    cfg.wall, gamma_search=mode, gamma_max=80.0,
+                    gamma_warn=1e9))
+                w = train_wall(c, seed, rest)
+                got[mode] = (w.gamma, w.gamma_capped, w.accuracy)
+            gl, cl, al = got["linear"]
+            gb, cb, ab = got["bisect"]
+            assert cl == cb, (f"page {name}: capped differs "
+                              f"(linear {cl}, bisect {cb})")
+            assert abs(gl - gb) < 1e-9, (
+                f"page {name}: gamma differs (linear {gl}, bisect {gb}) -- "
+                f"bisect is only valid if it lands on the same rung")
+            assert abs(al - ab) < 1e-12
+            n_cases += 1
+            worst = max(worst, abs(gl - gb))
+    assert n_cases >= 3, f"only {n_cases} cases exercised"
+    return n_cases, 2, worst
+
+
 if __name__ == "__main__":
     n_ok, n_tried, worst_rt = test_round_trip()
     print(f"[ik] round-trip        : {n_ok}/{n_tried} branches solvable, "
@@ -267,4 +343,7 @@ if __name__ == "__main__":
     worst_fast = test_fasteval_matches_page_build()
     print(f"[ik] fasteval           : identical to the page build "
           f"(worst {worst_fast} differing cells over 8 pages x 2 scenes)")
+    n_g, n_sc, worst_g = test_gamma_search_modes_agree()
+    print(f"[ik] gamma search       : bisect == linear on {n_g} real page "
+          f"regions over {n_sc} scenes (max gamma diff {worst_g:.1e})")
     print("[ik] ALL TESTS PASSED")

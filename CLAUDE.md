@@ -12,7 +12,15 @@
 
 Stage 0–5 已实现并可运行,墙严格按 [IJRR] RBF-SVM 方法构造(Algorithm 1–4 逐条对应)。
 三个演示案例已在**真实 LWA 4D** 参数上跑通,见 `docs/demo_summary.md`。
-实现过程中发现的 **25 个**问题见 `docs/findings.md`(每条都有数值证据)。
+实现过程中发现的 **27 个**问题见 `docs/findings.md`(每条都有数值证据)。
+
+**EXP 4 已实现**(`scripts/run_exp4.py`,规格与实测见 `docs/exp4_spec.md`):
+第四个案例,也是第一个**判定不是"不可行"**的案例——起始页被一道
+**169/169、闭合、γ=2.7** 的墙证明到不了终点,机器人随后经一个 **q6 门**换页,
+在伙伴页把焊缝走完。`run_proof` 给出 `proven=False, goal_reached_via="+--/1"`,
+**1.0 s**(交接说明记录的是"13 分钟未出结果",两个原因都已修掉,见下)。
+**这是本项目第一道机器真能执行的换页**:过门 181/181 步都在限位内且无碰撞,
+终点关节余量 **+19.62°**(EXP 3 的 q2 门是 −1.15°)。
 
 墙的构造已提速 41×(§17):`WallModel.decision()` 不再走 sklearn,直接用 numpy 算
 RBF 判别式(与 sklearn 差 1.5e-11,13 µs vs 176 µs);投影用闭式梯度的 Newton 法
@@ -41,6 +49,10 @@ d_wt=0.0824`,最大臂展 0.651 m。限位:q1/q3/q5 ±178.85°,q2/q4/q6
 | EXP 1 | x.28 z.46 | 无 | 0° | 8 开 / 8 关 | **可行**,61 路点到 y=1.00 | — |
 | EXP 2 | x.28 z.46 | ZGAP | 0° | 0 开 / 16 关 | **不可行**,单页 | **145/145,closed,证明完成** |
 | EXP 3 | **x.32 z.40** | **ZGAP+y** | **15°** | **8 开 / 8 关**,起始区域内 **1 道** | **不可行,跨两页** | **两面墙:162/162 与 163/163,都 closed** |
+| **EXP 4** | **x.44 z.22 h.34** | **cut + split** | **45°** | **8 开 / 8 关**,起始区域内 **1 道 q6 门** | **起始页不可行;换页后可行** | **一面墙:169/169,closed,γ=2.7** |
+
+EXP 4 单独一个脚本(`scripts/run_exp4.py`),因为它的焊缝、障碍和判定方向
+都和 1/2/3 不同;详见 `docs/exp4_spec.md`。
 
 **面覆盖 100% 已达成**(旧的 89–93% 是在 §22 的平凡场景上硬撑出来的)。
 
@@ -132,6 +144,9 @@ python3 scripts/run_experiment.py --res 81 --fiber         # 完整泛洪证明�
 python3 scripts/run_e4.py --res 41                         # E4 强制变号搜索(未成功)
 
 python3 scripts/run_three.py --res 61 --iters 14 --out out/three    # 网格流水线 EXP1/2/3
+python3 scripts/run_exp4.py  --res 61 --out out/exp4                # EXP 4(55 s,其中 GIF 49 s)
+python3 scripts/run_exp4.py  --res 61 --no-gif --out out/exp4       # 只判定 + 出图(6 s)
+python3 scripts/search_exp4_scene.py --mode doors|scenes|split|walls  # EXP 4 的四级场景搜索
 python3 scripts/run_three.py --only 3 --out out/three               # 只跑 EXP 3(77 s)
 python3 scripts/search_scene.py --mode welds --res 61 --jobs 4      # 焊缝摆放的"门景观"
 python3 scripts/run_sampled.py --samples 1500 --only exp2           # 采样流水线(150/150)
@@ -146,7 +161,9 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 `run_sampled.py --feedback-margin`(默认 0.019)是采样流水线的回灌守卫,
 **不可关掉**:关掉墙就不闭合(§32)。网格流水线保持 IJRR 原文的 0。
 
-**实验交接说明**(给新会话用,自包含):**`docs/exp4_brief.md`**(场景已找到)、
+**实验交接说明**(给新会话用,自包含):
+**`docs/exp4_brief.md`**(**已过时**:其场景的门不可穿越,见 §37 / 不变量 21;
+现行规格是 **`docs/exp4_spec.md`**)、
 **`docs/exp5_brief.md`** + **`docs/exp5_spec.md`**(规格,场景未搜)。
 
 七个汇报问题的完整回答(含全部实测数字)见 **`docs/seven_questions.md`**。
@@ -169,6 +186,7 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 | Stage 5 纤维认证(可选) | 纤维全无效 ⇒ 门认证关闭 | `src/zzy_rss/doors.py` |
 | 采样来源(PRM in `Y⁺`) | 保留无效样本(IJRR Alg 2 所需) | `src/zzy_rss/prm.py` |
 | IJRR Alg 1 学墙 | RBF-SVM,γ 递增至训练精度 1(`C=1.0`) | `src/zzy_rss/wall.py` |
+| **γ 梯子走法** | 指数括号 + 二分,同一把梯子、下一档重拟合并要求失败(~25 次拟合,原 ~2270) | `train_wall()`,开关 `wall.gamma_search` |
 | IJRR Alg 2 采墙 | 无效点投影到墙;落在有效区则喂回重训 | `src/zzy_rss/wall.py` |
 | Σ 感知训练 | 把门圆盘喂进训练集,阻止墙穿门而过 | `src/zzy_rss/wall.py` |
 | **页边锚点** | y=0/y=1 边线上的精确有效构型喂进训练集(**不是路图**) | `edge_anchor_samples()` in `wall.py` |
@@ -181,6 +199,12 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 | 证书输出 | JSON,供独立校验器复查(校验器待写) | `src/zzy_rss/flood.py` |
 | 3D 可视化 | 场景 / 符号分支对比 / 门纤维 | `scripts/visualize.py` |
 | 演示三案例 + 视频 | 网格流水线,EXP 1/2/3 | `scripts/run_three.py` |
+| **EXP 4 + GIF** | 起始页证不可行 → 过 q6 门 → 伙伴页走完 | `scripts/run_exp4.py` |
+| **学到的流形出图** | SVM 判别场 + 零集 + 训练两类 + 逐面判定 | `fig_manifold()` in `run_exp4.py` |
+| **墙的包含性检验** | 逐格奇偶环绕:起点全在内、终点全在外(不变量 27) | `containment_check()` in `run_exp4.py` |
+| **EXP 4 场景搜索** | 四级:可穿越的门 → 结构 → 给墙腾地方 → 真建墙 | `scripts/search_exp4_scene.py` |
+| **墙有没有地方待** | minimax 路径瓶颈,缩放页单位(不变量 24) | `bottleneck()` in `search_exp4_scene.py` |
+| **门是否真能穿越** | 沿万向节纤维从 δ=0 走到 ±π,逐步查限位与碰撞(不变量 21) | `crossing_direction()` in `search_exp4_scene.py` |
 | **采样流水线** | PRM 驱动证明,网格只画图(§25) | `scripts/run_sampled.py` |
 | 路图标号 | `RoadmapLabeller`:回灌点按**连通到哪一分量**定类 | `scripts/run_sampled.py` |
 | 场景搜索 | 找"连通性不可行"的障碍(§24),**并算门与伙伴页可达性**(§28) | `scripts/search_scene.py` |
@@ -272,10 +296,65 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     于是报 `facet centre is VALID`。现在 `virtual_band_outer=2.0`、
     `virtual_ring=2.5`、`recon_margin=3.0`,三者必须严格递增。
 
-21. **q2 门永远不可物理穿越,q6 门可以。**(§33e)q2 门结构性地落在 θ=0
-    ⇒ q1=0 ⇒ s2 镜像 |q1|=180° 超限 1.15°(§30)。q6 门落在 θ≈±0.354,
-    镜像动的 q5≈35°、q7≈121°,离 ±180° 都很远 ⇒ 伙伴页代表元在限位内。
-    **EXP 4 要用 q6 门**(待办 2)。
+21. **门能不能过,要看整条纤维,不是看终点。**(§37 更正 §33e)
+    旧表述"q2 门永远不可穿越,q6 门可以"**说得太满**。
+    q6 门是腕部万向节:`q6=0` 让 q5/q7 共线,伙伴页代表元在 **δ=±π**,
+    所以过门 = **从 δ=0 连续走到 δ=±π**,中间每一步都要在限位内:
+
+    ```
+    δ: 0 → +π   需要   q5_0 ≤ L5 − 180°   且   q7_0 ≥ −L7 + 180°
+    δ: 0 → −π   需要   q5_0 ≥ −L5 + 180°  且   q7_0 ≤  L7 − 180°
+    ```
+
+    L5=178.85°、L7=168.45° ⇒ 窗口只有 **1.15°** 和 **11.55°** 宽。
+    **只查终点会得出相反结论**:`mirror_q` 会把超限值**回绕**
+    (q7 −316.62° → +43.38°),回绕后在限位内,**但关节转不过去**。
+    `docs/exp4_brief.md` 的"余量 +14.46°"就是这么错的,
+    那道门的真实有效区间是 δ∈[−119.0°, +31.7°],**两端都不含**(§37)。
+    q2 门仍然结构性地过不去(§30)。可穿越的 q6 门**很多**
+    (5544 摆放 / 1660 道门里 2233 个页/门对),但**必须逐例查**。
+    判据实现在 `crossing_direction()` in `scripts/search_exp4_scene.py`。
+
+24. **筛场景时必须把"墙有没有地方待"当成第一等判据。**(§37)
+    起始区域与终点分量之间的分隔**要么是碰撞(厚),要么是关节限位带(发丝)**。
+    θ≈0 那条 q3 超限 1.15° 的带,**连续宽度只有 1.2–1.7°**——
+    不到 res 61 一格的三分之一,缩放单位 0.0065–0.0094,
+    **不到回灌守卫 0.019 的一半**。SVM 零集放不进去,面永远判不过,
+    Alg 4 回灌只会越走越偏(186/192 → 175/193 → 155/202,γ 顶到 400)。
+    **加大训练集没用**(450→3000 反而更差),**换障碍也没用**
+    (同一摆放扫 16128 个单盒,瓶颈 > 1 格的 0 个)。
+    量化判据(`search_exp4_scene.py` 的 `bottleneck()`):
+
+    ```
+    瓶颈 = min over 起始区域→终点分量 的路径 ( max 路径上的 C_obs 深度 )
+    ```
+
+    用**缩放页坐标**度量(与分辨率无关)。**必须在 res ≥ 61 上筛**:
+    res 41 的一个 θ 格已是 0.05,发丝与真带读数相同。
+    解法是 §24 的 ZGAP 分工用在墙上:**第二个盒子**坐在 θ≈0 的肘部轨迹上,
+    把发丝变成碰撞带(0.033 → 0.090),墙随即 **169/169、γ=2.7、1 轮**。
+
+25. **回灌守卫必须随分辨率缩放。**(§37)`feedback_margin` 的物理含义是
+    **半个格对角线**,res 61 上是 0.019(§32 测的就是这个),
+    但把 0.019 钉死在 res 81/101 上就太宽了。
+    `run_exp4.py --feedback-margin` 默认 −1 = 自动按
+    `0.5·hypot(1/(n−1), 2/(n−1))` 取。
+
+26. **墙闭不闭合是 (场景, 抽样) 的函数,不只是场景的函数。**(§37)
+    同一个 EXP 4 场景、同一个几何瓶颈(0.090),
+    换 (ε,η)-net 的随机种子,结果在"169/169 γ=2.7"和
+    "863/869 γ=212"之间跳。6 分辨率 × 6 种子 = 36 次抽样,
+    **26 次给出完整证明**(`out/exp4_seeds.md`,`docs/exp4_spec.md` §4)。
+    **这不损害可靠性**:Algorithm 3 只会**证不出来**,不会**证出假的**;
+    抽到坏样本是 INCONCLUSIVE,不是反证,所以重抽(`--seed`)是正当的。
+    但**不要把一次成功的 facet 数当成场景的属性**。
+
+27. **证书要查"墙围住了什么",不能只查训练精度。**(§37)
+    accuracy=1.0 只说明**训练点**在正确一侧,而训练集是子采样;
+    闭合性与"每面在 `C_obs` 内"说的是**曲线在哪**,不是**它围住了什么**。
+    `run_exp4.py::containment_check` 对**每一个有效格**做奇偶环绕判定,
+    要求 **起始区域全在内 ∧ 终点分量全在外**(实测 505/505 与 680/680)。
+    发现过一次 containment=FAILED 而 facet 数看着正常的情形(res 81 seed 1)。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
@@ -293,7 +372,19 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
    `edge_anchor_samples` + 回灌守卫 0.019 + 填掉带/环之间的缝
    ⇒ **150/150,closed,训练精度 1.0,2.0 s**(原来 106/122,精度 0.885,292 s)。
    真正决定成败的是**守卫**和**填缝**,锚点是建模上该补的那一半。
-2. ~~**EXP 3 真正实现**~~ **已完成**(§26–30)。§30 的遗留项已有解(§33e):
+2. ~~**EXP 4**~~ **已完成**(§37,`docs/exp4_spec.md`)。
+   **交接说明 `docs/exp4_brief.md` 的场景被否决**:它的四条判据全部复现,
+   但**门过不去**,"余量 +14.46°"只量了终点,没量路径(不变量 21)。
+   现行场景焊缝 x=0.44 z=0.22 half_y=0.34 倾角 45°,页 `+-+ → +--`,
+   q6 门 y=0.6674 θ=−0.2571,**两个盒子**:`cut` 造结构、
+   `split` 把 θ≈0 的发丝变成碰撞带好让墙有地方待(不变量 24)。
+   墙 **169/169 closed γ=2.7**,`run_proof` **1.0 s**
+   给出 `proven=False, goal_reached_via="+--/1"`。
+   过门 **181/181 步**在限位内且无碰撞,终点余量 **+19.62°**。
+   遗留:墙能否闭合**还取决于抽样**(不变量 26),6×6 实测见
+   `docs/exp4_spec.md` §4 与 `out/exp4_seeds.md`。
+
+2b. ~~**EXP 3 真正实现**~~ **已完成**(§26–30)。§30 的遗留项已有解(§33e):
    **用 q6 门**(q2 门必败是结构性的;q6 门伙伴页代表元在限位内)。
    **EXP 4 的场景已经找到并验过(§36)** —— 交接说明见 `docs/exp4_brief.md`:
    ```

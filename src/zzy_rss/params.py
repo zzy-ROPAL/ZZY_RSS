@@ -296,6 +296,23 @@ class WallParams:
     gamma_warn: float = 40.0       # report, do not refuse, above this
     svm_C: float = 10.0            # findings 20: 1e6 pins gamma at 1.0
 
+    # How Algorithm 1 walks the gamma ladder. Both modes walk the SAME rungs
+    # (gamma_init + k * gamma_step) and both return a separating gamma whose
+    # predecessor does not separate, so the wall is the same; only the number
+    # of SVM fits differs.
+    #   "linear"  IJRR as written -- every rung from the bottom. There are
+    #             (gamma_max - gamma_init)/gamma_step = 3990 rungs at these
+    #             defaults, and a hard region climbs most of them: measured on
+    #             the EXP 4 start region, ONE call reached gamma 227.3 after
+    #             ~2270 fits / 70.6 s, and Algorithms 2 and 4 retrain several
+    #             times per region. That is what made run_proof look hung on
+    #             that scene (findings 36 recorded it as unexplained).
+    #   "bisect"  Probe rungs 1, 2, 4, 8, ... then bisect the bracket: ~25
+    #             fits. The rung below the answer is refit and must fail; if
+    #             it does not, it falls back to a linear scan of the bracket,
+    #             so non-monotone separability costs time, never correctness.
+    gamma_search: str = "bisect"   # "bisect" | "linear"
+
     # Page-coordinate scaling applied before the SVM. Without this a single
     # gamma is meaningless across the y and theta axes.
     scale_y: float = 1.0
