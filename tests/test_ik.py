@@ -211,6 +211,43 @@ def test_shared_page_build_matches() -> int:
     return worst
 
 
+def test_fasteval_matches_page_build() -> int:
+    """fasteval.Precomputed must agree with the real page build, cell by cell.
+
+    It is a search accelerator, so it is only useful if it is EXACT. It skips
+    the per-obstacle inverse kinematics on the strength of findings 31, and
+    this is the test that keeps that honest.
+    """
+    import dataclasses
+
+    from zzy_rss.fasteval import Precomputed
+    from zzy_rss.pagemap import build_all_pages_shared
+    from zzy_rss.params import BoxObstacle, PageMapParams, SceneParams
+    from zzy_rss.scene import Scene
+
+    obstacles = (
+        BoxObstacle(center=(0.14, 0.0, 0.38), half_extent=(0.06, 0.06, 0.06)),
+        BoxObstacle(center=(0.14, 0.0, 0.66), half_extent=(0.06, 0.06, 0.06)),
+    )
+    worst = 0
+    for obs in ((), obstacles):
+        cfg = dataclasses.replace(
+            DEFAULT, pagemap=PageMapParams(n_y=31, n_theta=31),
+            scene=SceneParams(gap_open=True, obstacles=obs))
+        arm = SrsArm(cfg.arm)
+        weld = WeldLine(cfg.weld)
+        truth = build_all_pages_shared(cfg, arm, weld, Scene(cfg.arm, cfg.scene),
+                                       with_kin=False, verbose=False)
+        pre = Precomputed(cfg)
+        fast = pre.all_pages(pre.collide(obs))
+        assert set(truth) == set(fast), "page sets differ"
+        for name in truth:
+            diff = int(np.sum(truth[name].tag != fast[name].tag))
+            worst = max(worst, diff)
+            assert diff == 0, f"page {name}: fasteval differs in {diff} cells"
+    return worst
+
+
 if __name__ == "__main__":
     n_ok, n_tried, worst_rt = test_round_trip()
     print(f"[ik] round-trip        : {n_ok}/{n_tried} branches solvable, "
@@ -227,4 +264,7 @@ if __name__ == "__main__":
     worst_cells = test_shared_page_build_matches()
     print(f"[ik] shared page build : identical to the per-page build "
           f"(worst {worst_cells} differing cells over 8 pages x 2 scenes)")
+    worst_fast = test_fasteval_matches_page_build()
+    print(f"[ik] fasteval           : identical to the page build "
+          f"(worst {worst_fast} differing cells over 8 pages x 2 scenes)")
     print("[ik] ALL TESTS PASSED")
