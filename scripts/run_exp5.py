@@ -80,6 +80,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import PillowWriter  # noqa: E402
 from matplotlib.colors import ListedColormap  # noqa: E402
@@ -103,7 +104,35 @@ START_PAGE, START_SIGNS = "++-", (1, 1, -1)
 # The fold door flips s4 and nothing else, so the partner page differs from the
 # start page in its MIDDLE sign only.
 FOLD_PARTNER, PARTNER_SIGNS = "+--", (1, -1, -1)
+# Two palettes. "color" tells the four invalidity REASONS apart, which is what
+# you want while debugging a scene. "bw" collapses them: white = valid posture,
+# black = invalid for ANY reason (no IK, joint limit, or collision), which is
+# what a printed figure wants and what makes the two OVERLAYS -- the fold line
+# and the learned manifold -- the only things carrying ink besides the set
+# itself. Overlay styling is chosen so each reads against both extremes: the
+# manifold is a white line cased in black (it lives inside the black invalid
+# set), the motion is a black dashed line cased in white (it lives in the white
+# valid set), and the fold door is mid grey, which is neither.
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
+CMAP_BW = ListedColormap(["#ffffff", "#000000", "#000000", "#000000"])
+STYLE = "color"          # set from --style in main()
+
+PALETTE = {
+    "color": dict(cmap=CMAP, fold="#1d3557", fold_alpha=0.85,
+                  wall="#9d0208", wall_case=None, wall_lw=3.0,
+                  motion="#e63946", motion_case=None, motion_lw=2.6,
+                  motion_ls="-", band_in="#7a7a7a", band_out="#b0b0b0",
+                  fold_text="#1d3557"),
+    "bw": dict(cmap=CMAP_BW, fold="#808080", fold_alpha=1.0,
+               wall="#ffffff", wall_case="#000000", wall_lw=2.6,
+               motion="#000000", motion_case="#ffffff", motion_lw=2.2,
+               motion_ls=(0, (5, 2)), band_in="#000000", band_out="#ffffff",
+               fold_text="#000000"),
+}
+
+
+def pal():
+    return PALETTE[STYLE]
 
 # ---------------------------------------------------------------- placement --
 #
@@ -481,48 +510,89 @@ Y_VIEW = 0.10
 
 
 def draw_page(ax, pm, path=None, upto=None, wall=None, kinds=None,
-              fold_y=None, title="", mark=None, band=None):
+              fold_y=None, title="", mark=None, band=None, fold_label=True):
     """One page. The wall is the LEARNED MANIFOLD: the SVM's zero level set,
     reconstructed and verified facet by facet."""
+    P = pal()
+    bw = STYLE == "bw"
     if band:
-        ax.axvspan(-Y_VIEW, 0.0, color="#b0b0b0", alpha=0.55, zorder=0)
-        ax.axvspan(1.0, 1.0 + Y_VIEW, color="#b0b0b0", alpha=0.55, zorder=0)
-        ax.axvspan(-band, 0.0, color="#7a7a7a", alpha=0.75, zorder=1)
-        ax.axvspan(1.0, 1.0 + band, color="#7a7a7a", alpha=0.75, zorder=1)
-    ax.imshow(pm.tag.T, origin="lower", aspect="auto", cmap=CMAP, vmin=-.5,
-              vmax=3.5, extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]],
-              zorder=2)
+        # Outside the page: the virtual FREE ring (valid by construction) and,
+        # against the page edge, the virtual INVALID band of IJRR Fig. 5. In
+        # black and white they take the same ink as the real sets they stand
+        # in for -- the band is invalid, so it is black.
+        ax.axvspan(-Y_VIEW, 0.0, color=P["band_out"],
+                   alpha=1.0 if bw else 0.55, zorder=0)
+        ax.axvspan(1.0, 1.0 + Y_VIEW, color=P["band_out"],
+                   alpha=1.0 if bw else 0.55, zorder=0)
+        ax.axvspan(-band, 0.0, color=P["band_in"],
+                   alpha=1.0 if bw else 0.75, zorder=1)
+        ax.axvspan(1.0, 1.0 + band, color=P["band_in"],
+                   alpha=1.0 if bw else 0.75, zorder=1)
+    ax.imshow(pm.tag.T, origin="lower", aspect="auto", cmap=P["cmap"],
+              vmin=-.5, vmax=3.5,
+              extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]], zorder=2)
     if fold_y is not None:
-        ax.axvspan(fold_y - 0.008, fold_y + 0.008, color="#1d3557", alpha=0.85,
-                   zorder=4)
-        ax.text(fold_y, pm.theta_grid[-1] * 0.80, r" $q_4\!=\!0$ fold LINE",
-                fontsize=8.5, color="#1d3557", fontweight="bold", rotation=90,
-                va="top", ha="left", zorder=6)
+        ax.axvspan(fold_y - 0.008, fold_y + 0.008, color=P["fold"],
+                   alpha=P["fold_alpha"], zorder=4)
+        txt = (ax.text(fold_y + 0.012, pm.theta_grid[-1] * 0.80,
+                       r"$q_4\!=\!0$ fold LINE", fontsize=8.5,
+                       color=P["fold_text"], fontweight="bold", rotation=90,
+                       va="top", ha="left", zorder=7)
+               if fold_label else None)
+        if bw and txt is not None:
+            txt.set_path_effects([pe.withStroke(linewidth=2.4,
+                                                foreground="#ffffff")])
+    wall_fx = ([pe.withStroke(linewidth=P["wall_lw"] + 2.6,
+                              foreground=P["wall_case"])]
+               if P["wall_case"] else None)
     for n, loop in enumerate(wall or []):
         kind = (kinds[n] if kinds and n < len(kinds) else "")
         if kind == "wrapping":
             # closes through the theta seam, so draw the closing segment too
             ll = np.vstack([loop, loop[:1] + np.array([0.0, 2 * np.pi])])
-            ax.plot(ll[:, 0], ll[:, 1], color="#9d0208", lw=3, zorder=5)
-            ax.plot(ll[:, 0], ll[:, 1] - 2 * np.pi, color="#9d0208", lw=3,
-                    alpha=0.35, zorder=5)
+            ax.plot(ll[:, 0], ll[:, 1], color=P["wall"], lw=P["wall_lw"],
+                    zorder=6, path_effects=wall_fx)
+            ax.plot(ll[:, 0], ll[:, 1] - 2 * np.pi, color=P["wall"],
+                    lw=P["wall_lw"], alpha=0.35, zorder=6,
+                    path_effects=wall_fx)
         else:
-            ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3, zorder=5)
+            ax.plot(loop[:, 0], loop[:, 1], color=P["wall"], lw=P["wall_lw"],
+                    zorder=6, path_effects=wall_fx)
     if path is not None:
         p = np.asarray(path)
         n = len(p) if upto is None else upto + 1
-        ax.plot(p[:n, 0], p[:n, 1], color="#e63946", lw=2.6, zorder=6)
-        ax.scatter(p[n - 1, 0], p[n - 1, 1], color="#e63946", s=80,
-                   edgecolor="#111", zorder=7)
+        mfx = ([pe.withStroke(linewidth=P["motion_lw"] + 2.4,
+                              foreground=P["motion_case"])]
+               if P["motion_case"] else None)
+        ax.plot(p[:n, 0], p[:n, 1], color=P["motion"], lw=P["motion_lw"],
+                ls=P["motion_ls"], zorder=8, path_effects=mfx)
+        ax.scatter(p[n - 1, 0], p[n - 1, 1], color=P["motion"], s=80,
+                   edgecolor="#ffffff" if bw else "#111", lw=1.4, zorder=9)
     if mark is not None:
-        ax.scatter([mark[0]], [mark[1]], marker="*", s=240, color="#ffffff",
-                   edgecolor="#111", zorder=8)
+        ax.scatter([mark[0]], [mark[1]], marker="*", s=260,
+                   color="#ffffff" if not bw else "#ffffff",
+                   edgecolor="#000000", lw=1.6, zorder=10)
     ax.set_xlim(-Y_VIEW, 1.0 + Y_VIEW)
     ax.set_ylim(pm.theta_grid[0], pm.theta_grid[-1])
     ax.set_xlabel("y  (weld coordinate)")
     ax.set_ylabel(r"$\theta$  (arm angle)")
     ax.set_title(title, fontsize=11)
 
+
+PAGE_NOTE_BW = (
+    "Each panel is ONE IK branch of the same task. The triple is "
+    r"$(s_2,s_4,s_6)$ = the signs of joints 2, 4, 6 — shoulder, elbow, wrist. "
+    "All eight put the tool on the same seam point; they differ only in joint "
+    "values, so they differ by JOINT LIMITS.\n"
+    "WHITE = valid posture.  BLACK = invalid for any reason — obstacle "
+    "collision, joint limit, or no IK — and the virtual boundary band too.\n"
+    r"The page is a CYLINDER in $\theta$ (invariant 5 re-measured: valid cells "
+    r"DO touch $\theta=\pm\pi$ here), so the learned manifold WRAPS it instead "
+    "of enclosing a blob — hence two horizontal loops, not one ring.\n"
+    r"The grey vertical band is the $q_4=0$ FOLD, the singularity door: there "
+    r"the elbow circle has radius 0, so the whole $\theta$ line is ONE posture. "
+    "A wall may not cross it; the proof must go through it."
+)
 
 PAGE_NOTE = (
     "Each panel is ONE IK branch of the same task. The triple is "
@@ -546,7 +616,8 @@ def fig8(pms, walls, kinds, title, out_path, fold_y=None, path=None,
         w = walls.get(n)
         draw_page(ax, pm, wall=w, kinds=kinds.get(n), fold_y=fold_y,
                   path=path if n == START_PAGE else None,
-                  mark=start_mark if n == START_PAGE else None, band=band)
+                  mark=start_mark if n == START_PAGE else None, band=band,
+                  fold_label=n in (START_PAGE, FOLD_PARTNER))
         role = ""
         if n == START_PAGE:
             role = "   <- START PAGE"
@@ -556,21 +627,44 @@ def fig8(pms, walls, kinds, title, out_path, fold_y=None, path=None,
                      f"{'   WALL' if w else ''}{role}", fontsize=11,
                      fontweight="bold" if n in (START_PAGE, FOLD_PARTNER)
                      else "normal")
-    handles = [
-        mpatches.Patch(color="#2a9d8f", label="valid posture"),
-        mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
-        mpatches.Patch(color="#e76f51", label="invalid: collision"),
-        mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
-        mpatches.Patch(color="#1d3557", label=r"$q_4=0$ fold LINE door"),
-        mpatches.Patch(color="#7a7a7a", alpha=0.75,
-                       label="virtual invalid band (IJRR Fig. 5)"),
-        plt.Line2D([], [], color="#9d0208", lw=3,
-                   label="learned manifold (RBF-SVM zero set = the proof)"),
-        plt.Line2D([], [], color="#e63946", lw=3, label="robot motion"),
-    ]
-    fig.legend(handles=handles, loc="lower center", ncol=8, frameon=False,
-               bbox_to_anchor=(0.5, -0.045))
-    fig.suptitle(title + "\n" + PAGE_NOTE, fontsize=11.5)
+    P = pal()
+    if STYLE == "bw":
+        handles = [
+            mpatches.Patch(facecolor="#ffffff", edgecolor="#000000",
+                           label="VALID posture"),
+            mpatches.Patch(facecolor="#000000", edgecolor="#000000",
+                           label="INVALID: collision, joint limit or no IK\n"
+                                 "(incl. the virtual band of IJRR Fig. 5)"),
+            mpatches.Patch(facecolor="#808080", edgecolor="#000000",
+                           label=r"$q_4=0$ fold LINE door (singularity)"),
+            plt.Line2D([], [], color="#ffffff", lw=2.6,
+                       path_effects=[pe.withStroke(linewidth=5.2,
+                                                   foreground="#000000")],
+                       label="learned manifold (RBF-SVM zero set = the proof)"),
+            plt.Line2D([], [], color="#000000", lw=2.2, ls=(0, (5, 2)),
+                       path_effects=[pe.withStroke(linewidth=4.6,
+                                                   foreground="#ffffff")],
+                       label="robot motion"),
+        ]
+        ncol = 5
+    else:
+        handles = [
+            mpatches.Patch(color="#2a9d8f", label="valid posture"),
+            mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
+            mpatches.Patch(color="#e76f51", label="invalid: collision"),
+            mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
+            mpatches.Patch(color="#1d3557", label=r"$q_4=0$ fold LINE door"),
+            mpatches.Patch(color="#7a7a7a", alpha=0.75,
+                           label="virtual invalid band (IJRR Fig. 5)"),
+            plt.Line2D([], [], color="#9d0208", lw=3,
+                       label="learned manifold (RBF-SVM zero set = the proof)"),
+            plt.Line2D([], [], color="#e63946", lw=3, label="robot motion"),
+        ]
+        ncol = 8
+    fig.legend(handles=handles, loc="lower center", ncol=ncol, frameon=False,
+               bbox_to_anchor=(0.5, -0.055))
+    fig.suptitle(title + "\n" + (PAGE_NOTE_BW if STYLE == "bw" else PAGE_NOTE),
+                 fontsize=11.5)
     fig.savefig(out_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
     print(f"[fig] {out_path}")
@@ -807,10 +901,18 @@ def main():
     ap.add_argument("--out", default="out/exp5")
     ap.add_argument("--only", default="ab", help="'a', 'b' or 'ab'")
     ap.add_argument("--no-gif", action="store_true")
+    ap.add_argument("--style", default="color", choices=("color", "bw"),
+                    help="page-map palette: 'color' separates the invalidity "
+                         "reasons; 'bw' is white=valid / black=invalid, with "
+                         "the fold door in grey and the learned manifold "
+                         "cased so it reads on both")
     args = ap.parse_args()
+    global STYLE
+    STYLE = args.style
+    sfx = "_bw" if STYLE == "bw" else ""
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    rpath = out / "exp5_report.json"
+    rpath = out / f"exp5_report{sfx}.json"
     report = json.loads(rpath.read_text()) if rpath.exists() else {}
     timings = {}
     T0 = time.perf_counter()
@@ -905,7 +1007,7 @@ def main():
             print(f"[5b]   door followed ({d['kind']}): {d['from']} -> "
                   f"{d['to']} at y={d['y']:.6f}")
         t_s = lap("5b_run_proof", t_s)
-        write_certificate(res, sig, out / "exp5b_certificate.json")
+        write_certificate(res, sig, out / f"exp5b_certificate{sfx}.json")
         print(f"[cert] {out / 'exp5b_certificate.json'}")
 
         polyA, repA, wA = collected[(START_PAGE, kA)]
@@ -967,11 +1069,11 @@ def main():
         fig8(pms, walls, kinds,
              "EXPERIMENT 5b - INFEASIBLE. The $q_4$ fold LINE door sits inside "
              "the start region, so the proof is forced onto TWO pages.",
-             out / "exp5b_pages.png", fold_y=cert.y, path=pathA,
+             out / f"exp5b_pages{sfx}.png", fold_y=cert.y, path=pathA,
              start_mark=(0.0, 0.0),
              band=cfg.wall.virtual_band * cfg.wall.virtual_band_outer)
         fig_fold_door(cfg, arm, weld, scene, cert,
-                      out / "exp5b_fold_door.png", q_fold)
+                      out / f"exp5b_fold_door{sfx}.png", q_fold)
         t_s = lap("5b_figures", t_s)
 
         if not args.no_gif:
@@ -1014,7 +1116,7 @@ def main():
                         f"3/3  page ({FOLD_PARTNER}), reached through the fold "
                         f"door: y={p[min(n, len(p) - 1), 0]:.2f}.\n"
                         f"The proof must seal this page too -- WALL #2")))
-            render_gif(segs, out / "exp5b_infeasible_twopage.gif")
+            render_gif(segs, out / f"exp5b_infeasible_twopage{sfx}.gif")
             t_s = lap("5b_gif", t_s)
 
         lap("5b_total", t_e)
@@ -1151,7 +1253,7 @@ def main():
         print(f"[5a] goal reached via {res_a.goal_reached_via!r}  => NO "
               f"infeasibility certificate exists, and that is the correct "
               f"answer: the planner returns a path.")
-        write_certificate(res_a, sig, out / "exp5a_certificate.json")
+        write_certificate(res_a, sig, out / f"exp5a_certificate{sfx}.json")
         t_s = lap("5a_run_proof", t_s)
 
         pathA = np.array([[pmA.y_grid[i], pmA.theta_grid[j]] for i, j in cells_a])
@@ -1160,11 +1262,11 @@ def main():
              "EXPERIMENT 5a - FEASIBLE. The plan must flip the elbow, and the "
              "flip is free only at the $q_4$ fold line; the smooth "
              "continuation through it CHANGES PAGE.",
-             out / "exp5a_pages.png", fold_y=cert.y, path=pathA,
+             out / f"exp5a_pages{sfx}.png", fold_y=cert.y, path=pathA,
              start_mark=(0.0, float(pmA.theta_grid[cells_a[0][1]])),
              band=cfg.wall.virtual_band * cfg.wall.virtual_band_outer)
         fig_fold_door(cfg, arm, weld, scene, cert,
-                      out / "exp5a_fold_door.png", q_fold)
+                      out / f"exp5a_fold_door{sfx}.png", q_fold)
         t_s = lap("5a_figures", t_s)
 
         if not args.no_gif:
@@ -1202,7 +1304,7 @@ def main():
                          f"The page changed because that is the SMOOTH "
                          f"continuation (0.019 deg, vs 180 deg to stay).")),
             ]
-            render_gif(segs, out / "exp5a_feasible_elbowflip.gif")
+            render_gif(segs, out / f"exp5a_feasible_elbowflip{sfx}.gif")
             t_s = lap("5a_gif", t_s)
 
         lap("5a_total", t_e)

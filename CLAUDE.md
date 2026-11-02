@@ -15,7 +15,10 @@ Stage 0–5 已实现并可运行,墙严格按 [IJRR] RBF-SVM 方法构造(Algor
 实现过程中发现的问题见 `docs/findings.md`(**37 节**,每条都有数值证据)。
 
 **EXP 5(`q4` 折叠线门)已完成**(§37,待办 10):5a 与 5b 都跑通,
-`scripts/run_exp5.py`,res 61 合计 **50 s**,出 GIF + 八页图 + 证书。
+`scripts/run_exp5.py`。**不可行性证明本身 8.0 s**(res 61;Stage 1+2 1.4 s +
+`run_proof` 6.6 s),res 41/81 是 7.8 / 8.7 s —— `run_proof` **与分辨率基本无关**,
+面数由 (ε,η)-网决定(§37l)。连出 GIF 与八页图的整条流水线 res 61 约 **34 s**。
+`--style bw` 出黑白版(白=有效,黑=任何无效,灰=奇异门)(§37m)。
 焊缝因此从直线推广到**圆弧**(不变量 22 使直缝上内部折叠门不可能),
 页因此必须当**圆柱**(新不变量 24),**待办 5 对线门结清**(认证精确、无采样)。
 
@@ -53,6 +56,9 @@ d_wt=0.0824`,最大臂展 0.651 m。限位:q1/q3/q5 ±178.85°,q2/q4/q6
 |---|---|---|---|---|
 | EXP 5a | 圆弧缝,缝两侧各一立柱 | 1 道**线门**开(精确认证,余量 43.11°) | **可行**(`proven=False`),但必须翻肘 | — |
 | EXP 5b | 同缝,一个 14 cm 立方体 | 同上 | **不可行,跨两页**(`proven=True`) | **142/142 与 142/142,都 closed,γ=1.0** |
+
+EXP 5b 的证明在 res **41/61/81** 都 `proven=True`,面数三处都是 142/142 + 142/142
+(面数由 `net_d_min` 决定,与网格无关);证明耗时 7.8 / 8.0 / 8.7 s(§37l)。
 
 **面覆盖 100% 已达成**(旧的 89–93% 是在 §22 的平凡场景上硬撑出来的)。
 
@@ -145,6 +151,7 @@ python3 scripts/run_e4.py --res 41                         # E4 强制变号搜�
 
 python3 scripts/run_exp5.py --res 61 --iters 6 --out out/exp5       # EXP 5a + 5b(50 s)
 python3 scripts/run_exp5.py --only b --no-gif --out out/exp5        # 只跑 5b,不出 GIF
+python3 scripts/run_exp5.py --res 61 --style bw --out out/exp5      # 黑白版图与 GIF(_bw 后缀)
 python3 scripts/run_three.py --res 61 --iters 14 --out out/three    # 网格流水线 EXP1/2/3
 python3 scripts/run_three.py --only 3 --out out/three               # 只跑 EXP 3(77 s)
 python3 scripts/search_scene.py --mode welds --res 61 --jobs 4      # 焊缝摆放的"门景观"
@@ -179,6 +186,8 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 | **线门的精确认证** | **一次**碰撞 + 关节限位的**区间求交**(无采样,结清待办 5) | `certify_fold_door()` in `doors.py` |
 | **圆柱页的学习器** | θ 嵌成 `(cos θ, sin θ)`,判别函数**精确** 2π 周期 | `WallModel.features()` in `wall.py` |
 | **绕环墙** | 圆柱上分开两端的闭曲线是**绕环**,不是围环 | `reconstruct_wall()` in `wall.py` |
+| **Σ 守卫向量化** | 一个面对**全部**圆盘一次 numpy 调用(线门有 ~190 个盘) | `pack_discs()` / `segment_hits_any_disc()` in `wall.py` |
+| 黑白出图 | `--style bw`:白=有效,黑=任何无效,灰=奇异门 | `PALETTE` in `run_exp5.py` |
 | **图复用证书的墙** | `run_proof(collect=...)` 交出每面墙(待办 9b) | `src/zzy_rss/flood.py` |
 | 碰撞 / 工作空间穿透深度 | 胶囊 vs AABB,全向量化(113 µs/次) | `src/zzy_rss/scene.py` |
 | Stage 1 页图 | 每符号分支一页,`(y,θ)` 网格 + 无效原因标签 | `src/zzy_rss/pagemap.py` |

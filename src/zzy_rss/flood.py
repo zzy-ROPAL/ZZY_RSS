@@ -239,15 +239,25 @@ def live_discs(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     if not cfg.sigma_policy.enable_fiber_certification:
         return list(discs), []
     live, discharged = [], []
+    # Invariant 25, applied here too: a fold LINE is ONE door covered by ~190
+    # discs, so it gets ONE certificate. Certifying per disc gave the same
+    # answer 190 times over, and each answer costs a 362-sample drift check --
+    # measured 380 calls and 14.95 s, 36% of the whole proof, for 2 distinct
+    # questions.
+    decided: dict = {}
     for d in discs:
         if not d.vanishing:
             live.append(d)
             continue
-        fib = door_fiber_validity(cfg, arm, weld, scene, d, signs)
+        key = (("fold", round(float(d.exact_y), 12)) if d.fold
+               else ("point", round(float(d.y), 12), round(float(d.theta), 12)))
+        if key not in decided:
+            decided[key] = door_fiber_validity(cfg, arm, weld, scene, d, signs)
+        fib = decided[key]
         (live if fib["ok"] else discharged).append(d)
-        if verbose:
-            ay, _ = d.anchor
-            print(f"[stage5-fiber] door y={ay:.4f}: "
+    if verbose:
+        for key, fib in decided.items():
+            print(f"[stage5-fiber] door {key[0]} y={key[1]:.4f}: "
                   f"{'OPEN, wall must avoid it' if fib['ok'] else 'BLOCKED, disc discharged'}")
     return live, discharged
 
@@ -509,6 +519,8 @@ def run_proof(
         tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                              pm.theta_grid[1] - pm.theta_grid[0]))
         in_region = discs_in_region(discs, pts, tol, is_periodic(cfg))
+        # fold_line_representatives collapses each fold line to one entry, so
+        # the certification below also runs once per line (invariant 25).
         for d in fold_line_representatives(in_region):
             # Door reachability is a FIBER property. The IK representative can
             # be invalid while other fiber points are valid, so never decide a

@@ -938,6 +938,50 @@ def segment_hits_disc(a: np.ndarray, b: np.ndarray, disc,
     return bool(np.linalg.norm(aa + t * d) <= 1.0)
 
 
+def pack_discs(discs: list) -> tuple | None:
+    """Discs as flat arrays, so a facet can be tested against ALL of them at once.
+
+    check_facet used to loop over the disc list in Python. That was fine while
+    a page had a handful of point doors; a fold LINE needs ~190 discs to cover
+    theta, and the facet check then costs facets x discs scalar calls --
+    measured 845 208 calls and 15.52 s, 38% of the whole proof. The test
+    itself is a closed-form point-segment distance, so it vectorises exactly:
+    same arithmetic, same answers, one numpy call per facet.
+    """
+    if not discs:
+        return None
+    return (np.array([d.y for d in discs], dtype=float),
+            np.array([d.theta for d in discs], dtype=float),
+            np.array([max(d.radius, 1e-12) for d in discs], dtype=float),
+            np.array([max(d.r_theta, 1e-12) for d in discs], dtype=float))
+
+
+def segment_hits_any_disc(a: np.ndarray, b: np.ndarray, packed,
+                          periodic: bool = False) -> int:
+    """Index of the first disc the segment enters, or -1. Vectorised form of
+    segment_hits_disc over the whole disc set."""
+    if packed is None:
+        return -1
+    cy, ct, ry, rt = packed
+    day = (a[0] - cy) / ry
+    dby = (b[0] - cy) / ry
+    dat = a[1] - ct
+    dbt = b[1] - ct
+    if periodic:
+        dat = (dat + np.pi) % (2.0 * np.pi) - np.pi
+        dbt = (dbt + np.pi) % (2.0 * np.pi) - np.pi
+    dat = dat / rt
+    dbt = dbt / rt
+    dy, dt = dby - day, dbt - dat
+    denom = dy * dy + dt * dt
+    t = np.where(denom < 1e-18, 0.0,
+                 np.clip(-(day * dy + dat * dt) / np.where(denom < 1e-18, 1.0,
+                                                           denom), 0.0, 1.0))
+    hit = np.hypot(day + t * dy, dat + t * dt) <= 1.0
+    idx = np.flatnonzero(hit)
+    return int(idx[0]) if len(idx) else -1
+
+
 def y_plus_penetration(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     point: np.ndarray, valid_seeds: np.ndarray,
@@ -1085,7 +1129,7 @@ def _jac_norm_workspace(cfg, arm, weld, signs, point) -> float:
 def check_facet(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     a: np.ndarray, b: np.ndarray, discs: list, valid_seeds: np.ndarray,
-    depth: int = 0,
+    depth: int = 0, packed=None,
 ) -> FacetResult:
     """IJRR Algorithm 3 on one segment, with the Sigma guard checked FIRST.
 
@@ -1096,9 +1140,12 @@ def check_facet(
     scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
     periodic = is_periodic(cfg)
 
-    for d in discs:
-        if segment_hits_disc(a, b, d, periodic):
-            return FacetResult(False, f"crosses Sigma disc ({d.kind})", recursions=depth)
+    if packed is None:
+        packed = pack_discs(discs)
+    k = segment_hits_any_disc(a, b, packed, periodic)
+    if k >= 0:
+        return FacetResult(False, f"crosses Sigma disc ({discs[k].kind})",
+                           recursions=depth)
 
     # The midpoint and the half-length take the short way round in theta, so a
     # facet that crosses the seam is measured as the short segment it is and
@@ -1125,10 +1172,12 @@ def check_facet(
                            depth_used=pd, radius=radius, recursions=depth)
 
     mid = centre
-    left = check_facet(cfg, arm, weld, scene, signs, a, mid, discs, valid_seeds, depth + 1)
+    left = check_facet(cfg, arm, weld, scene, signs, a, mid, discs, valid_seeds,
+                       depth + 1, packed)
     if not left.ok:
         return left
-    return check_facet(cfg, arm, weld, scene, signs, mid, b, discs, valid_seeds, depth + 1)
+    return check_facet(cfg, arm, weld, scene, signs, mid, b, discs, valid_seeds,
+                       depth + 1, packed)
 
 
 @dataclass
@@ -1152,6 +1201,7 @@ def check_polytope(
     failure_points = []
     max_rec = 0
     periodic = is_periodic(cfg)
+    packed = pack_discs(discs)
     for li, loop in enumerate(poly.loops):
         kind = (poly.loop_kinds[li] if li < len(poly.loop_kinds)
                 else "contractible")
@@ -1167,7 +1217,7 @@ def check_polytope(
         for aa, bb in pairs:
             n_facets += 1
             r = check_facet(cfg, arm, weld, scene, signs, aa, bb,
-                            discs, valid_seeds)
+                            discs, valid_seeds, 0, packed)
             max_rec = max(max_rec, r.recursions)
             if r.ok:
                 n_passed += 1
