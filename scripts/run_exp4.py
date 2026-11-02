@@ -378,7 +378,41 @@ def draw_box(ax, c, h):
                                          lw=0.8))
 
 
-def draw_arm(ax, cfg, arm, scene, weld, q, trail, azim=-72.0):
+def closest_approach(scene, frames):
+    """Nearest point of the robot to the nearest point of any box.
+
+    `Scene.check` reports the clearance and names the witness pair but not
+    WHERE they touch, and in a matplotlib 3-D view -- which has no real
+    occlusion and draws the boxes semi-transparent -- "the forearm is about to
+    hit that box" and "the forearm is well behind that box" look identical.
+    Drawing the contact segment removes the ambiguity from every camera angle.
+
+    Uses the same capsule sampling as `Scene.check`, so the clearance returned
+    here is the one the page map was built from.
+    """
+    caps = scene.capsules(frames)
+    if not caps or not scene.boxes:
+        return float("inf"), None, None, ""
+    ts = np.linspace(0.0, 1.0, scene.n_coarse)[:, None]
+    best = (float("inf"), None, None, "")
+    for a, b, r, nm in caps:
+        pts = a + ts * (b - a)
+        for c, h, lbl in scene.boxes:
+            c = np.asarray(c, float)
+            h = np.asarray(h, float)
+            on_box = np.clip(pts, c - h, c + h)
+            d = np.linalg.norm(pts - on_box, axis=1) - r
+            k = int(np.argmin(d))
+            if d[k] < best[0]:
+                u = pts[k] - on_box[k]
+                n = float(np.linalg.norm(u))
+                surf = (u / n) * r if n > 1e-12 else np.zeros(3)
+                best = (float(d[k]), pts[k] - surf, on_box[k], f"{nm}/{lbl}")
+    return best
+
+
+def draw_arm(ax, cfg, arm, scene, weld, q, trail, azim=-72.0, elev=20.0,
+             contact=None):
     p0, p1 = weld.p0, weld.p1
     ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
             color="#e9c46a", lw=9, solid_capstyle="round", zorder=0)
@@ -399,6 +433,15 @@ def draw_arm(ax, cfg, arm, scene, weld, q, trail, azim=-72.0):
         ax.plot(T[:, 0], T[:, 1], T[:, 2], color="#e63946", lw=4)
     ax.scatter(*f["tool"], color="#e63946", s=95, depthshade=False,
                edgecolor="#111", zorder=9)
+    if contact is not None:
+        clr, pa, pb = contact
+        if pa is not None:
+            # red when the arm is about to be stopped, grey when it is clear
+            cc = "#d00000" if clr < 0.025 else "#6c757d"
+            ax.plot([pa[0], pb[0]], [pa[1], pb[1]], [pa[2], pb[2]],
+                    color=cc, lw=3.0, zorder=20)
+            ax.scatter([pa[0], pb[0]], [pa[1], pb[1]], [pa[2], pb[2]],
+                       color=cc, s=34, depthshade=False, zorder=21)
     ax.set_xlim(-0.25, 0.62)
     ax.set_ylim(-0.45, 0.45)
     ax.set_zlim(0, 0.80)
@@ -406,7 +449,7 @@ def draw_arm(ax, cfg, arm, scene, weld, q, trail, azim=-72.0):
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.set_zlabel("z [m]")
-    ax.view_init(elev=20, azim=azim)
+    ax.view_init(elev=elev, azim=azim)
     return f
 
 
@@ -762,44 +805,43 @@ PAGE_COLOUR = {"start": "#1d3557", "cross": "#bb3e03", "partner": "#14746f"}
 def render_gif(segments, out_path, arm, fps=14, dpi=80):
     """The animation, as a GIF (no ffmpeg needed).
 
-    Four things here are not cosmetic.
+    TWO CAMERAS. One three-quarter view reads as a robot; it does not read as
+    "the forearm is 5.7 mm off that box". The plan view does -- the forearm /
+    'cut' contact lives in x-y, and from above you watch the forearm run into
+    the box and stop. The contact segment is drawn in both, in red once the
+    clearance drops below 25 mm, so the blocking is legible from either angle
+    rather than depending on perspective that matplotlib 3-D does not provide.
 
-    THE TRAIL IS GLOBAL. Resetting it per segment threw away the record of
-    how far the tool had got, so the last segment looked like a fresh run
-    rather than the continuation it is.
+    THE TRAIL IS GLOBAL. Resetting it per segment threw away the record of how
+    far the tool had got, so the last phase looked like a fresh run.
 
     THE BANNER NAMES THE PAGE. The two pages' validity maps look almost
-    identical, so without a banner the page change -- the entire point of the
-    experiment -- is invisible.
+    identical, so without it the page change -- the point of the experiment --
+    is invisible.
 
-    THE JOINT STRIP ALWAYS MOVES. The crossing is a gimbal SELF-MOTION: the
-    arm is motionless in space for the whole of it, by construction. With
-    only a 3-D view and a page map on screen that reads as a hung animation,
-    and it is the most interesting part of the run. The strip shows q5 and q7
-    against their limits, so during the crossing the viewer watches the two
-    joints slide 180 degrees past each other while the arm stands still --
-    which is exactly what a q6 door IS.
-
-    PROGRESS IS SHOWN AGAINST THE WHOLE WELD, not per segment, so "stalled at
-    0.82" and "finished at 1.00" are directly comparable.
+    THE READOUT ALWAYS MOVES. The crossing is a gimbal SELF-MOTION: the arm is
+    motionless in space for all of it, by construction. With nothing else
+    changing that reads as a hung animation. The readout line carries delta,
+    q5 and q7 through the crossing, so the numbers slide 180 degrees past each
+    other while the arm stands still -- which is what a q6 door IS.
     """
-    fig = plt.figure(figsize=(14.5, 7.6))
-    gs = fig.add_gridspec(2, 2, height_ratios=(1.0, 0.26),
-                          width_ratios=(1.0, 1.0), hspace=0.32, wspace=0.18,
-                          left=0.04, right=0.97, top=0.88, bottom=0.08)
-    ax = fig.add_subplot(gs[0, 0], projection="3d")
-    ax2 = fig.add_subplot(gs[0, 1])
-    axbar = fig.add_subplot(gs[1, 0])
-    axq = fig.add_subplot(gs[1, 1])
+    fig = plt.figure(figsize=(17.4, 6.0))
+    gs = fig.add_gridspec(1, 3, width_ratios=(1.08, 1.08, 1.0),
+                          wspace=0.10, left=0.005, right=0.975,
+                          top=0.80, bottom=0.17)
+    axA = fig.add_subplot(gs[0, 0], projection="3d")
+    axB = fig.add_subplot(gs[0, 1], projection="3d")
+    ax2 = fig.add_subplot(gs[0, 2])
     banner = fig.text(0.5, 0.955, "", ha="center", va="center",
-                      fontsize=15, fontweight="bold")
-    sub = fig.text(0.5, 0.915, "", ha="center", va="center", fontsize=10.5,
+                      fontsize=16, fontweight="bold")
+    sub = fig.text(0.5, 0.905, "", ha="center", va="center", fontsize=10.5,
                    color="#333333")
+    readout = fig.text(0.5, 0.045, "", ha="center", va="center",
+                       fontsize=11.5, family="monospace")
     L = np.degrees(arm.q_max)
     writer = PillowWriter(fps=fps)
     n_frames = 0
     trail = []                       # GLOBAL: survives across segments
-    y_done = 0.0                     # best weld coordinate reached so far
 
     with writer.saving(fig, str(out_path), dpi=dpi):
         for seg in segments:
@@ -807,20 +849,31 @@ def render_gif(segments, out_path, arm, fps=14, dpi=80):
             for idx in range(n + seg.get("hold", 0)):
                 k = min(idx, n - 1)
                 q = seg["q_list"][k]
-                ax.clear(); ax2.clear(); axbar.clear(); axq.clear()
+                axA.clear(); axB.clear(); ax2.clear()
 
+                clr, pa, pb, wit = closest_approach(seg["scene"],
+                                                    seg["arm"].frames(q))
+                contact = (clr, pa, pb)
                 # A hold frame identical to the one before it is SILENTLY
-                # DROPPED by Pillow's GIF encoder -- measured: 294 frames
-                # written, 236 in the file, the difference being exactly the
-                # holds. Orbiting the camera during a hold makes each frame
-                # distinct, and reads as a deliberate pause rather than a
-                # stutter.
-                azim = -72.0 - 0.30 * max(0, idx - n + 1)
-                f = draw_arm(ax, seg["cfg"], seg["arm"], seg["scene"],
-                             seg["weld"], q, trail, azim=azim)
+                # DROPPED by Pillow's GIF encoder -- measured: 294 written,
+                # 236 in the file, the difference being exactly the holds.
+                # Orbiting during a hold makes each frame distinct and reads
+                # as a deliberate pause.
+                drift = 0.30 * max(0, idx - n + 1)
+                f = draw_arm(axA, seg["cfg"], seg["arm"], seg["scene"],
+                             seg["weld"], q, trail, azim=-72.0 - drift,
+                             elev=20.0, contact=contact)
+                draw_arm(axB, seg["cfg"], seg["arm"], seg["scene"],
+                         seg["weld"], q, trail, azim=-88.0 - drift,
+                         elev=70.0, contact=contact)
                 if idx < n and seg.get("advances", True):
                     trail.append(f["tool"])
-                ax.set_title(seg["caption"](k), fontsize=10.5, pad=0)
+                axA.set_title(seg["caption"](k), fontsize=10.5, pad=-2)
+                axB.set_zticklabels([])
+                axB.set_zlabel("")
+                axB.set_title("the same instant seen FROM ABOVE — "
+                              "where the forearm meets the box",
+                              fontsize=10, pad=-2)
 
                 draw_page(ax2, seg["pm"], path=seg.get("path"),
                           upto=(seg["upto_list"][k]
@@ -837,50 +890,16 @@ def render_gif(segments, out_path, arm, fps=14, dpi=80):
                     spine.set_edgecolor(col)
                     spine.set_linewidth(3.0)
 
-                # ---- weld progress, against the WHOLE seam ---------------
-                y_now = (seg["y_of"](k) if seg.get("y_of") else y_done)
-                y_done = max(y_done, y_now)
-                axbar.barh([0], [1.0], color="#e9e9e9", height=0.55)
-                axbar.barh([0], [y_now], color=col, height=0.55)
-                axbar.axvline(seg["stall_y"], color="#9d0208", lw=2.2, ls="--")
-                axbar.text(seg["stall_y"], 0.52,
-                           f" wall stops page ({seg['start_page']}) here "
-                           f"({seg['stall_y']:.2f})",
-                           fontsize=8, color="#9d0208", va="bottom")
-                axbar.plot([y_now], [0], "o", ms=11, color=col,
-                           mec="#111", zorder=5)
-                axbar.set_xlim(-0.01, 1.01); axbar.set_ylim(-0.6, 1.0)
-                axbar.set_yticks([])
-                axbar.set_xlabel("weld completed    "
-                                 r"($y=0$ start, $y=1$ goal)", fontsize=9)
-                axbar.set_title(f"weld progress: {100 * y_now:.0f}%",
-                                fontsize=10, color=col, fontweight="bold")
-
-                # ---- the joints that carry the page change ---------------
+                y_now = seg["y_of"](k)
                 qd = np.degrees(q)
-                for row, j, name in ((1, 4, r"$q_5$"), (0, 6, r"$q_7$")):
-                    axq.barh([row], [2 * L[j]], left=-L[j], height=0.42,
-                             color="#eef1f3")
-                    axq.plot([-L[j], -L[j]], [row - .26, row + .26],
-                             color="#9d0208", lw=2.0)
-                    axq.plot([L[j], L[j]], [row - .26, row + .26],
-                             color="#9d0208", lw=2.0)
-                    axq.barh([row], [qd[j]], height=0.42, color=col)
-                    axq.plot([qd[j]], [row], "o", ms=9, color=col,
-                             mec="#111", zorder=5)
-                    axq.text(-L[j] - 8, row, name, fontsize=11, ha="right",
-                             va="center")
-                    axq.text(qd[j] + (9 if qd[j] >= 0 else -9), row,
-                             f"{qd[j]:+.0f}°", fontsize=8.5, va="center",
-                             ha="left" if qd[j] >= 0 else "right")
-                axq.axvline(0, color="#999", lw=0.8)
-                axq.set_xlim(-235, 235); axq.set_ylim(-0.6, 1.6)
-                axq.set_yticks([])
-                axq.set_xlabel("joint angle [deg]   "
-                               "(red bars = the real LWA 4D limits)",
-                               fontsize=9)
-                axq.set_title(seg["qtitle"], fontsize=10,
-                              color=col, fontweight="bold")
+                bits = [f"weld {100 * y_now:5.1f}%",
+                        f"clearance to {wit:<14s} {clr * 1e3:7.2f} mm"]
+                if seg["role"] == "cross":
+                    bits.append(f"delta {seg['d_of'](k):+7.1f} deg")
+                bits.append(f"q5 {qd[4]:+7.1f} (lim {L[4]:.0f})")
+                bits.append(f"q7 {qd[6]:+7.1f} (lim {L[6]:.0f})")
+                readout.set_text("     |     ".join(bits))
+                readout.set_color("#d00000" if clr < 0.0 else col)
                 writer.grab_frame()
                 n_frames += 1
     plt.close(fig)
@@ -1126,7 +1145,8 @@ def main():
         qS, keepS = qs_from_path(arm, weld, stall, START_SIGNS)
         stall_y = float(stall[-1, 0])
         common = dict(cfg=cfg, arm=arm, weld=weld, scene=scene,
-                      stall_y=stall_y, start_page=START_PAGE)
+                      stall_y=stall_y, start_page=START_PAGE,
+                      d_of=lambda k: 0.0)
         SUB_A = (f"the wall on page ({START_PAGE}) is a complete "
                  f"infeasibility proof FOR THAT PAGE "
                  f"({repA.n_passed}/{repA.n_facets} facets verified in "
@@ -1151,8 +1171,10 @@ def main():
                 role="start", hold=8, advances=True,
                 banner=f"PAGE ({START_PAGE})  —  STALLED at y={stall_y:.2f}, "
                        f"reversing to the door",
-                sub="the goal is unreachable from here WITHOUT LEAVING THIS "
-                    "PAGE, so the robot backs up to the singular posture",
+                sub="the forearm is hard against the 'cut' box — one more "
+                    "step is a 1.6 mm penetration, and the way round needs a "
+                    "joint angle THIS page forbids, so the robot reverses to "
+                    "the door",
                 qtitle=r"$q_5$ and $q_7$ — still on page " f"({START_PAGE})",
                 y_of=lambda k, p=to_door, kp=keepD: float(p[kp[k], 0]),
                 caption=lambda k, p=to_door, kp=keepD: (
@@ -1168,6 +1190,7 @@ def main():
             upto_list=[len(routeA) - 1] * len(fib_q),
             wall=polyA.loops, discs=sig[START_PAGE], page=START_PAGE,
             role="cross", hold=14, advances=False,
+            d_of=lambda k, d=fib_d: float(d[k]),
             banner="THE PAGE CHANGE  —  "
                    f"({START_PAGE})  ⟶  ({PARTNER_PAGE})",
             sub=r"$q_6=0$ makes the $q_5$ and $q_7$ axes collinear, so this "
@@ -1177,7 +1200,7 @@ def main():
                    "both stay inside the limits",
             y_of=lambda k, v=float(routeA[-1, 0]): v,
             caption=lambda k, d=fib_d, n=len(fib_q): (
-                f"3/4   gimbal self-motion:  $\delta$={d[k]:+.0f}°  "
+                r"3/4   gimbal self-motion:  $\delta$=" f"{d[k]:+.0f}°  "
                 f"— the arm does NOT move  ({100*k/max(1,n-1):.0f}%)")))
         qB, keepB = qs_from_path(arm, weld, pathB, PARTNER_SIGNS)
         segs.append(dict(
@@ -1185,8 +1208,11 @@ def main():
             discs=sig[PARTNER_PAGE], page=PARTNER_PAGE,
             role="partner", hold=26,
             banner=f"PAGE ({PARTNER_PAGE})  —  AFTER THE PAGE CHANGE",
-            sub="same robot, same weld, a different chart — and on this one "
-                "the seam can be finished",
+            sub="same robot, same weld, a different chart. The corridor that "
+                r"gets past the box ($\theta\approx-2.4$) needs "
+                r"$q_7=-179°$, outside the $\pm168.45°$ limit on "
+                f"({START_PAGE}) — the " r"$s_6$ mirror brings it inside on "
+                f"({PARTNER_PAGE})",
             qtitle=r"$q_5$ and $q_7$ — now at the partner page's reading",
             y_of=lambda k, p=pathB, kp=keepB: float(p[kp[k], 0]),
             caption=lambda k, p=pathB, kp=keepB, n=len(keepB): (
