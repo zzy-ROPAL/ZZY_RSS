@@ -73,7 +73,12 @@ ZGAP = (BoxObstacle(center=(0.14, 0.0, 0.38),
                     half_extent=(0.06, 0.06, 0.06), label="high"))
 OBS_CLOSED = ZGAP
 OBS_OPEN = ZGAP
-CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
+# Black and white page: WHITE = valid posture, BLACK = invalid for ANY
+# reason (no IK, joint limit, or collision). Tags are VALID=0,
+# INVALID_NO_IK=1, INVALID_JOINT_LIMIT=2, INVALID_COLLISION=3, so index 0 is
+# white and 1-3 are all black. Overlays (wall, doors, path, start/goal) keep
+# their colour so they read against the monochrome field.
+CMAP = ListedColormap(["#ffffff", "#000000", "#000000", "#000000"])
 
 
 def weld_for(tilt_deg):
@@ -123,7 +128,10 @@ def bfs_path(pm, lab=None, region=None, to_goal=True):
     return np.array([[pm.y_grid[i], pm.theta_grid[j]] for i, j in out])
 
 
-def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6):
+PROOF_SECONDS = {}
+
+
+def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6, tag=""):
     sg = tuple(1 if c == "+" else -1 for c in pm.name)
     rng = np.random.default_rng(0)
     pts = region_points(pm, lab, k)
@@ -142,9 +150,14 @@ def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6):
     labeller = PageLabeller(cfg, arm, weld, scene, sg, pm, lab, k,
                             search_cells=cfg.wall.label_search_cells,
                             motion_samples=cfg.wall.label_motion_samples)
+    import time as _tt
+    _t = _tt.time()
     poly, rep, w, it, rr = find_inf_proof_region(
         cfg, arm, weld, scene, sg, seed, rest, inv, live, max_iters=iters,
         verbose=False, labeller=labeller)
+    PROOF_SECONDS[tag or "wall"] = _tt.time() - _t
+    print(f"[proof-time] {tag or 'wall'}: Alg 1-4 took "
+          f"{PROOF_SECONDS[tag or 'wall']:.1f} s ({it} Alg-4 iteration(s))")
     return poly, rep, live, disch
 
 
@@ -193,21 +206,23 @@ def draw_page(ax, pm, path=None, upto=None, wall=None, discs=None, title=""):
               vmax=3.5, extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]])
     if wall is not None:
         for loop in wall:
-            ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3)
+            ax.plot(loop[:, 0], loop[:, 1], color="#ff2d00", lw=3.2,
+                    zorder=8)
     for d in (discs or []):
         if not d.vanishing:
             continue
         ay, at = d.anchor
         st = d.__dict__.get("_state", "open")
-        ax.plot(ay, at, "o", ms=12, mfc="none",
-                mec="#1d3557" if st == "open" else "#9d0208", mew=2.6)
+        ax.plot(ay, at, "o", ms=13, mfc="none",
+                mec="#1e90ff" if st == "open" else "#ff2d00", mew=2.8,
+                zorder=9)
         if st != "open":
-            ax.plot(ay, at, "x", ms=10, mec="#9d0208", mew=2.6)
+            ax.plot(ay, at, "x", ms=11, mec="#ff2d00", mew=2.8, zorder=9)
     if path is not None:
         n = len(path) if upto is None else upto + 1
-        ax.plot(path[:n, 0], path[:n, 1], color="#e63946", lw=3)
-        ax.scatter(path[n - 1, 0], path[n - 1, 1], color="#e63946", s=80,
-                   edgecolor="#111", zorder=6)
+        ax.plot(path[:n, 0], path[:n, 1], color="#00c853", lw=3.2, zorder=7)
+        ax.scatter(path[n - 1, 0], path[n - 1, 1], color="#00c853", s=90,
+                   edgecolor="#003d1a", zorder=8)
     ax.set_xlim(0, 1); ax.set_ylim(pm.theta_grid[0], pm.theta_grid[-1])
     ax.set_xlabel("y  (weld coordinate)"); ax.set_ylabel(r"$\theta$  (arm angle)")
     ax.set_title(title, fontsize=11)
@@ -250,16 +265,17 @@ def fig8(pms, sigma, walls, title, note, out_path, path=None):
             ax.axvline(1.0, color="#111", lw=2, ls=":")
             ax.text(0.80, -2.9, "goal y=1", fontsize=9)
     handles = [
-        mpatches.Patch(color="#2a9d8f", label="valid posture"),
-        mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
-        mpatches.Patch(color="#e76f51", label="invalid: collision"),
-        mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
-        plt.Line2D([], [], marker="o", ls="none", mfc="none", mec="#1d3557",
-                   mew=2.6, ms=12, label=r"$\Sigma$ door OPEN"),
-        plt.Line2D([], [], marker="x", ls="none", mec="#9d0208", mew=2.6,
-                   ms=10, label=r"$\Sigma$ door BLOCKED"),
-        plt.Line2D([], [], color="#9d0208", lw=3, label="learned wall (the proof)"),
-        plt.Line2D([], [], color="#e63946", lw=3, label="robot motion"),
+        mpatches.Patch(facecolor="#ffffff", edgecolor="#555555",
+                       label="WHITE = valid posture"),
+        mpatches.Patch(facecolor="#000000",
+                       label="BLACK = invalid (no IK / joint limit / collision)"),
+        plt.Line2D([], [], marker="o", ls="none", mfc="none", mec="#1e90ff",
+                   mew=2.8, ms=13, label=r"$\Sigma$ door OPEN"),
+        plt.Line2D([], [], marker="x", ls="none", mec="#ff2d00", mew=2.8,
+                   ms=11, label=r"$\Sigma$ door BLOCKED"),
+        plt.Line2D([], [], color="#ff2d00", lw=3.2,
+                   label="learned manifold (the wall)"),
+        plt.Line2D([], [], color="#00c853", lw=3.2, label="robot motion"),
     ]
     fig.legend(handles=handles, loc="lower center", ncol=8, frameon=False,
                bbox_to_anchor=(0.5, -0.055))
@@ -309,6 +325,8 @@ def qs_from_path(arm, weld, path, signs):
 
 
 def main():
+    import time as _time
+    T = {}
     ap = argparse.ArgumentParser()
     ap.add_argument("--res", type=int, default=61)
     ap.add_argument("--out", default="out/three")
@@ -333,6 +351,7 @@ def main():
         return pms, sig, n_open, n_blk
 
     # ------------------------------- EXP 1 -------------------------------
+    _t1 = _time.time()
     print("\n=== EXP 1 : no obstacle -> the robot FINISHES the weld ===")
     cfg, arm, weld, scene = make(0.0, None, args.res)
     pms, sig, no_, nb = pages_and_sigma(cfg, arm, weld, scene)
@@ -351,10 +370,13 @@ def main():
                      f"EXP 1  no obstacle   weld "
                      f"{100*p[k[i],0]:.0f}% complete"))],
            out / "exp1_feasible.mp4")
+    T["exp1"] = _time.time() - _t1
+    print(f"[1] EXP 1 total {T['exp1']:.1f} s")
     report["exp1"] = {"verdict": "feasible", "waypoints": len(path),
                       "doors_open": no_, "doors_blocked": nb}
 
     # ------------------------------- EXP 2 -------------------------------
+    _t2 = _time.time()
     print("\n=== EXP 2 : obstacle, doors CLOSED -> proof in ONE page ===")
     cfg2, arm2, weld2, scene2 = make(0.0, OBS_CLOSED, args.res)
     pms2, sig2, no2, nb2 = pages_and_sigma(cfg2, arm2, weld2, scene2)
@@ -365,7 +387,8 @@ def main():
     path2 = bfs_path(pm2, lab2, k2, to_goal=False)
     q2l, keep2 = qs_from_path(arm2, weld2, path2, START_SIGNS)
     poly2, rep2, live2, disch2 = prove(cfg2, arm2, weld2, scene2, pm2, lab2, k2,
-                                       sig2[START_PAGE], iters=args.iters)
+                                       sig2[START_PAGE], iters=args.iters,
+                                       tag="exp2")
     ok2 = rep2.ok and poly2.closed
     print(f"[2] doors {no2} open / {nb2} blocked; robot stalls at y={path2[-1,0]:.2f}")
     print(f"[2] wall: {rep2.n_passed}/{rep2.n_facets} facets, closed={poly2.closed}, "
@@ -381,6 +404,8 @@ def main():
                      f"EXP 2  obstacle, doors CLOSED   "
                      f"blocked at y={p[k[i],0]:.2f}"))],
            out / "exp2_infeasible_onepage.mp4")
+    T["exp2"] = _time.time() - _t2
+    print(f"[2] EXP 2 total {T['exp2']:.1f} s")
     report["exp2"] = {"verdict": "proven_one_page" if ok2 else "incomplete",
                       "facets": [rep2.n_passed, rep2.n_facets],
                       "closed": bool(poly2.closed),
@@ -389,6 +414,7 @@ def main():
 
 
     # ------------------------------- EXP 3 -------------------------------
+    _t3 = _time.time()
     print("\n=== EXP 3 : obstacle, doors OPEN -> proof EXPANDS through the door ===")
     cfg3, arm3, weld3, scene3 = make(30.0, OBS_OPEN, args.res)
     pms3, sig3, no3, nb3 = pages_and_sigma(cfg3, arm3, weld3, scene3)
@@ -481,6 +507,8 @@ def main():
          "EXPERIMENT 3 — obstacle, doors OPEN: the proof CROSSES a door and "
          "EXPANDS to a second page", PAGE_NOTE, out / "exp3_pages.png")
     render(segs, out / "exp3_infeasible_twopage.mp4")
+    T["exp3"] = _time.time() - _t3
+    print(f"[3] EXP 3 total {T['exp3']:.1f} s")
     report["exp3"] = {
         "doors_open": no3, "doors_blocked": nb3,
         "door_y": float(door.anchor[0]) if door is not None else None,
@@ -489,6 +517,13 @@ def main():
         "facetsB": ([repB.n_passed, repB.n_facets] if repB else None),
         "closedB": (bool(polyB.closed) if polyB else None)}
 
+    report["seconds"] = {k: round(v, 1) for k, v in T.items()}
+    report["proof_seconds"] = {k: round(v, 1) for k, v in PROOF_SECONDS.items()}
+    print("\n=== wall-clock ===")
+    for k in sorted(T):
+        print(f"  {k}: {T[k]:.1f} s total"
+              + (f", of which Alg 1-4 = {PROOF_SECONDS[k]:.1f} s"
+                 if k in PROOF_SECONDS else ""))
     (out / "three_report.json").write_text(json.dumps(report, indent=2, default=str))
     print(f"\n[out] {out / 'three_report.json'}")
 
