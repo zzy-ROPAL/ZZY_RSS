@@ -60,6 +60,20 @@ d_wt=0.0824`,最大臂展 0.651 m。限位:q1/q3/q5 ±178.85°,q2/q4/q6
 EXP 5b 的证明在 res **41/61/81** 都 `proven=True`,面数三处都是 142/142 + 142/142
 (面数由 `net_d_min` 决定,与网格无关);证明耗时 7.8 / 8.0 / 8.7 s(§37l)。
 
+**两个案例各自的端到端耗时(res 61, iters 6, 4 核,`exp5_report.json`):**
+
+| 阶段 | EXP 5b | EXP 5a |
+|---|---|---|
+| Stage 1+2 八页图 + Σ + 门状态 | 1.44 s | 1.58 s |
+| `run_proof`(判定) | **6.85 s** | **0.05 s** |
+| 出图(八页图 + 线门解剖图) | 1.49 s | 1.41 s |
+| 出 GIF | **10.26 s** | **10.61 s** |
+| **合计** | **20.04 s** | **13.66 s** |
+
+两个案例合起来 **33.7 s**。**证明只占 8.4 s(25%),出 GIF 占 20.9 s(62%)**——
+和 EXP 3 一样,瓶颈在渲染不在证明(§37n)。5a 的 `run_proof` 是 0.05 s,
+因为它一碰到能到终点的区域就返回 `proven=False`,一面墙都不建。
+
 **面覆盖 100% 已达成**(旧的 89–93% 是在 §22 的平凡场景上硬撑出来的)。
 
 EXP 3 的判定由 `flood.run_proof` 给出,它走完整的页/门图:
@@ -149,7 +163,7 @@ python3 scripts/run_stage12.py --res 121 --off-axis --fiber   # 页图 + Σ
 python3 scripts/run_experiment.py --res 81 --fiber         # 完整泛洪证明流程
 python3 scripts/run_e4.py --res 41                         # E4 强制变号搜索(未成功)
 
-python3 scripts/run_exp5.py --res 61 --iters 6 --out out/exp5       # EXP 5a + 5b(50 s)
+python3 scripts/run_exp5.py --res 61 --iters 6 --out out/exp5       # EXP 5a + 5b(34 s)
 python3 scripts/run_exp5.py --only b --no-gif --out out/exp5        # 只跑 5b,不出 GIF
 python3 scripts/run_exp5.py --res 61 --style bw --out out/exp5      # 黑白版图与 GIF(_bw 后缀)
 python3 scripts/run_three.py --res 61 --iters 14 --out out/three    # 网格流水线 EXP1/2/3
@@ -364,7 +378,8 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
    **注意**:校验器现在必须懂圆柱页(绕环的闭合是"端点相差整一个周期")
    与线门(一次碰撞 + 区间求交),见不变量 24/25。
 10. ~~**EXP 5(`q4` 折叠线门)**~~ **已完成**(§37)。`scripts/run_exp5.py`,
-    res 61 两个案例合计 **50 s**,出 GIF + 八页图(含学到的流形)+ 证书。
+    res 61 两个案例合计 **33.7 s**(5b 20.0 + 5a 13.7),出 GIF + 八页图
+    (含学到的流形)+ 证书;**其中证明只占 8.4 s,GIF 占 21 s**(§37l/n)。
     门在页上是一条**线**、在 `Q` 里是一个**点**,和点门恰好对偶。
 
     ```
