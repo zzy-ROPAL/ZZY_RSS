@@ -74,6 +74,11 @@ EXP 5b 的证明在 res **41/61/81** 都 `proven=True`,面数三处都是 142/14
 和 EXP 3 一样,瓶颈在渲染不在证明(§37n)。5a 的 `run_proof` 是 0.05 s,
 因为它一碰到能到终点的区域就返回 `proven=False`,一面墙都不建。
 
+**`run_proof` 里面学墙那部分的真实墙钟(§37o)**:Algorithm 1 拟合 SVM
+**0.13 s(1.8%)**、Algorithm 2 回灌 0.58 s(8%)、**重建零集 2.61 s(36%)**、
+Algorithm 3 逐面验证 3.87 s(53%)。**造一面可检查的流形 3.32 s,
+两面墙各约 3.2–4.0 s;真正"学"的那一步几乎不要钱,贵的是重建与验证。**
+
 **面覆盖 100% 已达成**(旧的 89–93% 是在 §22 的平凡场景上硬撑出来的)。
 
 EXP 3 的判定由 `flood.run_proof` 给出,它走完整的页/门图:
@@ -425,5 +430,6 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 9. 性能:按 `docs/seven_questions.md` Q1 的顺序做——
    (a) `--no-video`(EXP 3 −61%),(b) ~~图复用 `run_proof` 的墙~~ **已做**
    (`run_proof(collect=...)`,§37j;在 EXP 5 里用上了,`run_three.py` 还没改),
-   (c) `reconstruct_wall` 换曲线追踪(`prove()` −44%),
+   (c) `reconstruct_wall` 换曲线追踪 —— **EXP 5 实测它占 `run_proof` 的 36%**
+   (281×421 网格上求 RBF 再追等值线,一次 1.3 s;§37o),
    (d) 解析雅可比(−24%),(e) Alg 2/Alg 3 多进程。**都在 Python 里就能做。**
