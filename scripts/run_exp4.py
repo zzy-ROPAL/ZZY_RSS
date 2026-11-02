@@ -378,7 +378,7 @@ def draw_box(ax, c, h):
                                          lw=0.8))
 
 
-def draw_arm(ax, cfg, arm, scene, weld, q, trail):
+def draw_arm(ax, cfg, arm, scene, weld, q, trail, azim=-72.0):
     p0, p1 = weld.p0, weld.p1
     ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
             color="#e9c46a", lw=9, solid_capstyle="round", zorder=0)
@@ -406,7 +406,7 @@ def draw_arm(ax, cfg, arm, scene, weld, q, trail):
     ax.set_xlabel("x [m]")
     ax.set_ylabel("y [m]")
     ax.set_zlabel("z [m]")
-    ax.view_init(elev=20, azim=-72)
+    ax.view_init(elev=20, azim=azim)
     return f
 
 
@@ -756,30 +756,131 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, discsA, discsB,
     print(f"[fig] {out_path}")
 
 
-def render_gif(segments, out_path, fps=14, dpi=78):
-    """The animation, as a GIF (no ffmpeg needed)."""
-    fig = plt.figure(figsize=(14, 6.2))
-    ax = fig.add_subplot(1, 2, 1, projection="3d")
-    ax2 = fig.add_subplot(1, 2, 2)
+PAGE_COLOUR = {"start": "#1d3557", "cross": "#bb3e03", "partner": "#14746f"}
+
+
+def render_gif(segments, out_path, arm, fps=14, dpi=80):
+    """The animation, as a GIF (no ffmpeg needed).
+
+    Four things here are not cosmetic.
+
+    THE TRAIL IS GLOBAL. Resetting it per segment threw away the record of
+    how far the tool had got, so the last segment looked like a fresh run
+    rather than the continuation it is.
+
+    THE BANNER NAMES THE PAGE. The two pages' validity maps look almost
+    identical, so without a banner the page change -- the entire point of the
+    experiment -- is invisible.
+
+    THE JOINT STRIP ALWAYS MOVES. The crossing is a gimbal SELF-MOTION: the
+    arm is motionless in space for the whole of it, by construction. With
+    only a 3-D view and a page map on screen that reads as a hung animation,
+    and it is the most interesting part of the run. The strip shows q5 and q7
+    against their limits, so during the crossing the viewer watches the two
+    joints slide 180 degrees past each other while the arm stands still --
+    which is exactly what a q6 door IS.
+
+    PROGRESS IS SHOWN AGAINST THE WHOLE WELD, not per segment, so "stalled at
+    0.82" and "finished at 1.00" are directly comparable.
+    """
+    fig = plt.figure(figsize=(14.5, 7.6))
+    gs = fig.add_gridspec(2, 2, height_ratios=(1.0, 0.26),
+                          width_ratios=(1.0, 1.0), hspace=0.32, wspace=0.18,
+                          left=0.04, right=0.97, top=0.88, bottom=0.08)
+    ax = fig.add_subplot(gs[0, 0], projection="3d")
+    ax2 = fig.add_subplot(gs[0, 1])
+    axbar = fig.add_subplot(gs[1, 0])
+    axq = fig.add_subplot(gs[1, 1])
+    banner = fig.text(0.5, 0.955, "", ha="center", va="center",
+                      fontsize=15, fontweight="bold")
+    sub = fig.text(0.5, 0.915, "", ha="center", va="center", fontsize=10.5,
+                   color="#333333")
+    L = np.degrees(arm.q_max)
     writer = PillowWriter(fps=fps)
     n_frames = 0
+    trail = []                       # GLOBAL: survives across segments
+    y_done = 0.0                     # best weld coordinate reached so far
+
     with writer.saving(fig, str(out_path), dpi=dpi):
         for seg in segments:
-            trail = []
-            for idx, q in enumerate(seg["q_list"]):
-                ax.clear()
-                ax2.clear()
+            n = len(seg["q_list"])
+            for idx in range(n + seg.get("hold", 0)):
+                k = min(idx, n - 1)
+                q = seg["q_list"][k]
+                ax.clear(); ax2.clear(); axbar.clear(); axq.clear()
+
+                # A hold frame identical to the one before it is SILENTLY
+                # DROPPED by Pillow's GIF encoder -- measured: 294 frames
+                # written, 236 in the file, the difference being exactly the
+                # holds. Orbiting the camera during a hold makes each frame
+                # distinct, and reads as a deliberate pause rather than a
+                # stutter.
+                azim = -72.0 - 0.30 * max(0, idx - n + 1)
                 f = draw_arm(ax, seg["cfg"], seg["arm"], seg["scene"],
-                             seg["weld"], q, trail)
-                trail.append(f["tool"])
-                ax.set_title(seg["caption"](idx), fontsize=11)
+                             seg["weld"], q, trail, azim=azim)
+                if idx < n and seg.get("advances", True):
+                    trail.append(f["tool"])
+                ax.set_title(seg["caption"](k), fontsize=10.5, pad=0)
+
                 draw_page(ax2, seg["pm"], path=seg.get("path"),
-                          upto=(seg["upto_list"][idx]
+                          upto=(seg["upto_list"][k]
                                 if seg.get("upto_list") else None),
                           wall=seg.get("wall"), discs=seg.get("discs"),
                           title=f"page ({seg['page']})   "
                                 r"coordinate space $Y^+$")
-                fig.tight_layout()
+
+                col = PAGE_COLOUR[seg["role"]]
+                banner.set_text(seg["banner"])
+                banner.set_color(col)
+                sub.set_text(seg["sub"])
+                for spine in ax2.spines.values():
+                    spine.set_edgecolor(col)
+                    spine.set_linewidth(3.0)
+
+                # ---- weld progress, against the WHOLE seam ---------------
+                y_now = (seg["y_of"](k) if seg.get("y_of") else y_done)
+                y_done = max(y_done, y_now)
+                axbar.barh([0], [1.0], color="#e9e9e9", height=0.55)
+                axbar.barh([0], [y_now], color=col, height=0.55)
+                axbar.axvline(seg["stall_y"], color="#9d0208", lw=2.2, ls="--")
+                axbar.text(seg["stall_y"], 0.52,
+                           f" wall stops page ({seg['start_page']}) here "
+                           f"({seg['stall_y']:.2f})",
+                           fontsize=8, color="#9d0208", va="bottom")
+                axbar.plot([y_now], [0], "o", ms=11, color=col,
+                           mec="#111", zorder=5)
+                axbar.set_xlim(-0.01, 1.01); axbar.set_ylim(-0.6, 1.0)
+                axbar.set_yticks([])
+                axbar.set_xlabel("weld completed    "
+                                 r"($y=0$ start, $y=1$ goal)", fontsize=9)
+                axbar.set_title(f"weld progress: {100 * y_now:.0f}%",
+                                fontsize=10, color=col, fontweight="bold")
+
+                # ---- the joints that carry the page change ---------------
+                qd = np.degrees(q)
+                for row, j, name in ((1, 4, r"$q_5$"), (0, 6, r"$q_7$")):
+                    axq.barh([row], [2 * L[j]], left=-L[j], height=0.42,
+                             color="#eef1f3")
+                    axq.plot([-L[j], -L[j]], [row - .26, row + .26],
+                             color="#9d0208", lw=2.0)
+                    axq.plot([L[j], L[j]], [row - .26, row + .26],
+                             color="#9d0208", lw=2.0)
+                    axq.barh([row], [qd[j]], height=0.42, color=col)
+                    axq.plot([qd[j]], [row], "o", ms=9, color=col,
+                             mec="#111", zorder=5)
+                    axq.text(-L[j] - 8, row, name, fontsize=11, ha="right",
+                             va="center")
+                    axq.text(qd[j] + (9 if qd[j] >= 0 else -9), row,
+                             f"{qd[j]:+.0f}°", fontsize=8.5, va="center",
+                             ha="left" if qd[j] >= 0 else "right")
+                axq.axvline(0, color="#999", lw=0.8)
+                axq.set_xlim(-235, 235); axq.set_ylim(-0.6, 1.6)
+                axq.set_yticks([])
+                axq.set_xlabel("joint angle [deg]   "
+                               "(red bars = the real LWA 4D limits)",
+                               fontsize=9)
+                axq.set_title(seg["qtitle"], fontsize=10,
+                              color=col, fontweight="bold")
                 writer.grab_frame()
                 n_frames += 1
     plt.close(fig)
@@ -1023,39 +1124,75 @@ def main():
     if not args.no_gif:
         t = time.perf_counter()
         qS, keepS = qs_from_path(arm, weld, stall, START_SIGNS)
-        segs = [dict(cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pmA,
-                     q_list=qS, path=stall, upto_list=keepS,
-                     wall=polyA.loops, discs=sig[START_PAGE],
-                     page=START_PAGE,
-                     caption=lambda k, p=stall, kp=keepS: (
-                         f"1/4  page ({START_PAGE}): welding along the seam, "
-                         f"y={p[kp[k],0]:.2f} — the wall stops it"))]
+        stall_y = float(stall[-1, 0])
+        common = dict(cfg=cfg, arm=arm, weld=weld, scene=scene,
+                      stall_y=stall_y, start_page=START_PAGE)
+        SUB_A = (f"the wall on page ({START_PAGE}) is a complete "
+                 f"infeasibility proof FOR THAT PAGE "
+                 f"({repA.n_passed}/{repA.n_facets} facets verified in "
+                 r"$C_{obs}$)")
+        segs = [
+            # 1/4 -- weld until the wall stops it
+            dict(common, pm=pmA, q_list=qS, path=stall, upto_list=keepS,
+                 wall=polyA.loops, discs=sig[START_PAGE], page=START_PAGE,
+                 role="start", hold=10,
+                 banner=f"PAGE ({START_PAGE})  —  welding",
+                 sub=SUB_A,
+                 qtitle=r"$q_5$ and $q_7$ — the two joints the door will move",
+                 y_of=lambda k, p=stall, kp=keepS: float(p[kp[k], 0]),
+                 caption=lambda k, p=stall, kp=keepS: (
+                     f"1/4   welding along the seam —  y={p[kp[k],0]:.2f}")),
+        ]
         if to_door is not None:
             qD, keepD = qs_from_path(arm, weld, to_door, START_SIGNS)
             segs.append(dict(
-                cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pmA,
-                q_list=qD, path=to_door, upto_list=keepD,
+                common, pm=pmA, q_list=qD, path=to_door, upto_list=keepD,
                 wall=polyA.loops, discs=sig[START_PAGE], page=START_PAGE,
+                role="start", hold=8, advances=True,
+                banner=f"PAGE ({START_PAGE})  —  STALLED at y={stall_y:.2f}, "
+                       f"reversing to the door",
+                sub="the goal is unreachable from here WITHOUT LEAVING THIS "
+                    "PAGE, so the robot backs up to the singular posture",
+                qtitle=r"$q_5$ and $q_7$ — still on page " f"({START_PAGE})",
+                y_of=lambda k, p=to_door, kp=keepD: float(p[kp[k], 0]),
                 caption=lambda k, p=to_door, kp=keepD: (
-                    f"2/4  page ({START_PAGE}): driving to the OPEN "
-                    f"$q_6$ door at y={ay:.3f}  (now y={p[kp[k],0]:.2f})")))
+                    f"2/4   reversing to the OPEN $q_6$ door at y={ay:.3f}"
+                    f"  (now y={p[kp[k],0]:.2f})")))
+        # 3/4 -- the crossing. The arm is MOTIONLESS here by construction, so
+        # the joint strip is the only thing that moves; without it this reads
+        # as a hung animation (and did).
+        fib_q = fiber[::3]
+        fib_d = np.degrees(deltas[::3])
         segs.append(dict(
-            cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pmA,
-            q_list=fiber[::3], path=routeA,
-            upto_list=[len(routeA) - 1] * len(fiber[::3]),
+            common, pm=pmA, q_list=fib_q, path=routeA,
+            upto_list=[len(routeA) - 1] * len(fib_q),
             wall=polyA.loops, discs=sig[START_PAGE], page=START_PAGE,
-            caption=lambda k, n=len(fiber[::3]): (
-                "3/4  AT THE DOOR: gimbal self-motion — $q_5$ and $q_7$ "
-                f"slide, the arm does NOT move  ({100*k/max(1,n-1):.0f}%)")))
+            role="cross", hold=14, advances=False,
+            banner="THE PAGE CHANGE  —  "
+                   f"({START_PAGE})  ⟶  ({PARTNER_PAGE})",
+            sub=r"$q_6=0$ makes the $q_5$ and $q_7$ axes collinear, so this "
+                r"motion moves NO LINK — watch the joints, not the arm "
+                f"(tool drift {drift*1e3:.0e} mm)",
+            qtitle=r"$q_5$ and $q_7$ slide $180°$ past each other — "
+                   "both stay inside the limits",
+            y_of=lambda k, v=float(routeA[-1, 0]): v,
+            caption=lambda k, d=fib_d, n=len(fib_q): (
+                f"3/4   gimbal self-motion:  $\delta$={d[k]:+.0f}°  "
+                f"— the arm does NOT move  ({100*k/max(1,n-1):.0f}%)")))
         qB, keepB = qs_from_path(arm, weld, pathB, PARTNER_SIGNS)
         segs.append(dict(
-            cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pmB,
-            q_list=qB, path=pathB, upto_list=keepB,
+            common, pm=pmB, q_list=qB, path=pathB, upto_list=keepB,
             discs=sig[PARTNER_PAGE], page=PARTNER_PAGE,
-            caption=lambda k, p=pathB, kp=keepB: (
-                f"4/4  page ({PARTNER_PAGE}): the weld COMPLETES — "
-                f"y={p[kp[k],0]:.2f}")))
-        n_frames = render_gif(segs, out / "exp4.gif")
+            role="partner", hold=26,
+            banner=f"PAGE ({PARTNER_PAGE})  —  AFTER THE PAGE CHANGE",
+            sub="same robot, same weld, a different chart — and on this one "
+                "the seam can be finished",
+            qtitle=r"$q_5$ and $q_7$ — now at the partner page's reading",
+            y_of=lambda k, p=pathB, kp=keepB: float(p[kp[k], 0]),
+            caption=lambda k, p=pathB, kp=keepB, n=len(keepB): (
+                f"4/4   welding to the goal —  y={p[kp[k],0]:.2f}"
+                + ("   ✔ WELD COMPLETE" if k == n - 1 else ""))))
+        n_frames = render_gif(segs, out / "exp4.gif", arm)
         t = lap("gif", t)
 
     # ---- report -----------------------------------------------------------
