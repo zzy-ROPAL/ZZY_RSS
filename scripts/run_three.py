@@ -54,7 +54,7 @@ import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
-from matplotlib.animation import FFMpegWriter  # noqa: E402
+from matplotlib.animation import FFMpegWriter, PillowWriter  # noqa: E402
 from matplotlib.colors import ListedColormap  # noqa: E402
 
 from zzy_rss.arm import SrsArm  # noqa: E402
@@ -147,6 +147,30 @@ OBS_OPEN = (BoxObstacle(center=(0.20, 0.10, 0.34),
 LABEL_MODE = "metric"
 REST_MODE = "goal_only"
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
+
+# --bw: a strictly black-and-white page FILL. WHITE = valid posture, BLACK =
+# invalid for any reason at all -- no IK, joint limit, or collision with the
+# obstacle. The tag codes are VALID=0, NO_IK=1, JOINT_LIMIT=2, COLLISION=3,
+# so one 4-entry map does the whole binarisation and draw_page needs no other
+# change.
+#
+# The OVERLAYS stay in accent colour on purpose: the learned wall and the
+# Sigma doors are the actual content of the figure, and a monochrome wall is
+# invisible by construction -- the wall lives inside C_obs, i.e. inside the
+# black field, so a black wall cannot be seen and a white one disappears the
+# moment it runs along the valid boundary. In --bw each overlay is therefore
+# drawn with a white casing under a coloured core, which reads against both
+# fields. Set from main().
+BW = False
+CMAP_BW = ListedColormap(["#ffffff", "#000000", "#000000", "#000000"])
+
+# Written as a GIF instead of an mp4 when --gif is given. Set from main().
+GIF = False
+
+
+def anim_path(path):
+    """mp4 -> gif when --gif is on. PillowWriter needs no ffmpeg."""
+    return path.with_suffix(".gif") if GIF else path
 
 
 def weld_for(tilt_deg, x=0.28, z=0.46, half_y=0.26):
@@ -338,25 +362,42 @@ def draw_arm(ax, cfg, arm, scene, weld, q, trail):
 
 
 def draw_page(ax, pm, path=None, upto=None, wall=None, discs=None, title=""):
-    ax.imshow(pm.tag.T, origin="lower", aspect="auto", cmap=CMAP, vmin=-.5,
+    ax.imshow(pm.tag.T, origin="lower", aspect="auto",
+              cmap=CMAP_BW if BW else CMAP, vmin=-.5,
               vmax=3.5, extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]])
+    # In --bw every overlay gets a white casing beneath it so it survives both
+    # the black and the white field; off --bw the casing width is 0.
+    case = 4.0 if BW else 0.0
     if wall is not None:
         for loop in wall:
-            ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3)
+            if case:
+                ax.plot(loop[:, 0], loop[:, 1], color="#ffffff",
+                        lw=3 + case, solid_capstyle="round", zorder=4)
+            ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3, zorder=5)
     for d in (discs or []):
         if not d.vanishing:
             continue
         ay, at = d.anchor
         st = d.__dict__.get("_state", "open")
+        if case:
+            ax.plot(ay, at, "o", ms=12, mfc="none", mec="#ffffff",
+                    mew=2.6 + case, zorder=4)
         ax.plot(ay, at, "o", ms=12, mfc="none",
-                mec="#1d3557" if st == "open" else "#9d0208", mew=2.6)
+                mec="#1d3557" if st == "open" else "#9d0208", mew=2.6, zorder=5)
         if st != "open":
-            ax.plot(ay, at, "x", ms=10, mec="#9d0208", mew=2.6)
+            if case:
+                ax.plot(ay, at, "x", ms=10, mec="#ffffff", mew=2.6 + case,
+                        zorder=4)
+            ax.plot(ay, at, "x", ms=10, mec="#9d0208", mew=2.6, zorder=5)
     if path is not None:
         n = len(path) if upto is None else upto + 1
-        ax.plot(path[:n, 0], path[:n, 1], color="#e63946", lw=3)
+        if case:
+            ax.plot(path[:n, 0], path[:n, 1], color="#ffffff", lw=3 + case,
+                    solid_capstyle="round", zorder=4)
+        ax.plot(path[:n, 0], path[:n, 1], color="#e63946", lw=3, zorder=5)
         ax.scatter(path[n - 1, 0], path[n - 1, 1], color="#e63946", s=80,
-                   edgecolor="#111", zorder=6)
+                   edgecolor="#111" if not BW else "#ffffff",
+                   linewidth=1.0 if not BW else 1.8, zorder=6)
     ax.set_xlim(0, 1); ax.set_ylim(pm.theta_grid[0], pm.theta_grid[-1])
     ax.set_xlabel("y  (weld coordinate)"); ax.set_ylabel(r"$\theta$  (arm angle)")
     ax.set_title(title, fontsize=11)
@@ -393,25 +434,37 @@ def fig8(pms, sigma, walls, title, note, out_path, path=None):
                      fontweight="bold" if n in (START_PAGE, PARTNER_PAGE)
                      else "normal")
         if n == START_PAGE:
-            ax.scatter([0.0], [0.0], marker="*", s=240, color="#ffffff",
+            ax.scatter([0.0], [0.0], marker="*", s=240,
+                       color="#ffd60a" if BW else "#ffffff",
                        edgecolor="#111", zorder=8)
-            ax.text(0.02, 0.15, "start", fontsize=9)
-            ax.axvline(1.0, color="#111", lw=2, ls=":")
-            ax.text(0.80, -2.9, "goal y=1", fontsize=9)
-    handles = [
-        mpatches.Patch(color="#2a9d8f", label="valid posture"),
-        mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
-        mpatches.Patch(color="#e76f51", label="invalid: collision"),
-        mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
+            ax.text(0.02, 0.15, "start", fontsize=9,
+                    color="#ffffff" if BW else "#000000")
+            ax.axvline(1.0, color="#1d3557" if BW else "#111", lw=2, ls=":")
+            ax.text(0.80, -2.9, "goal y=1", fontsize=9,
+                    color="#ffffff" if BW else "#000000")
+    # The page FILL is the only thing --bw collapses: four tags become two
+    # swatches. The overlays are the same in both modes, so they are listed
+    # once.
+    fill = ([mpatches.Patch(facecolor="#ffffff", edgecolor="#111",
+                            label="VALID posture"),
+             mpatches.Patch(facecolor="#000000", edgecolor="#111",
+                            label="INVALID: collision / joint limit / no IK")]
+            if BW else
+            [mpatches.Patch(color="#2a9d8f", label="valid posture"),
+             mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
+             mpatches.Patch(color="#e76f51", label="invalid: collision"),
+             mpatches.Patch(color="#e9e9e9", label="invalid: no IK")])
+    handles = fill + [
         plt.Line2D([], [], marker="o", ls="none", mfc="none", mec="#1d3557",
                    mew=2.6, ms=12, label=r"$\Sigma$ door OPEN"),
         plt.Line2D([], [], marker="x", ls="none", mec="#9d0208", mew=2.6,
                    ms=10, label=r"$\Sigma$ door BLOCKED"),
-        plt.Line2D([], [], color="#9d0208", lw=3, label="learned wall (the proof)"),
+        plt.Line2D([], [], color="#9d0208", lw=3,
+                   label="learned wall / manifold (the proof)"),
         plt.Line2D([], [], color="#e63946", lw=3, label="robot motion"),
     ]
-    fig.legend(handles=handles, loc="lower center", ncol=8, frameon=False,
-               bbox_to_anchor=(0.5, -0.055))
+    fig.legend(handles=handles, loc="lower center", ncol=len(handles),
+               frameon=False, bbox_to_anchor=(0.5, -0.055))
     fig.suptitle(title + "\n" + note, fontsize=12)
     fig.savefig(out_path, dpi=100, bbox_inches="tight")
     plt.close(fig)
@@ -607,12 +660,18 @@ def render(segments, out_path, fps=18):
     """segments: list of dicts with keys
          cfg, arm, weld, scene, pm, q_list, path, upto_list, wall, discs,
          caption, page
+
+    A .gif suffix switches to PillowWriter, which needs no ffmpeg. GIF is
+    palette-indexed and has no interframe compression, so it is rendered at a
+    lower fps and dpi to keep the file sane.
     """
+    gif = str(out_path).endswith(".gif")
     fig = plt.figure(figsize=(14, 6.2))
     ax = fig.add_subplot(1, 2, 1, projection="3d")
     ax2 = fig.add_subplot(1, 2, 2)
-    writer = FFMpegWriter(fps=fps, bitrate=2600)
-    with writer.saving(fig, str(out_path), dpi=100):
+    writer = (PillowWriter(fps=min(fps, 12)) if gif
+              else FFMpegWriter(fps=fps, bitrate=2600))
+    with writer.saving(fig, str(out_path), dpi=72 if gif else 100):
         for seg in segments:
             trail = []
             for idx, q in enumerate(seg["q_list"]):
@@ -628,7 +687,7 @@ def render(segments, out_path, fps=18):
                 fig.tight_layout()
                 writer.grab_frame()
     plt.close(fig)
-    print(f"[video] {out_path}")
+    print(f"[{'gif' if gif else 'video'}] {out_path}")
 
 
 def qs_from_path(arm, weld, path, signs):
@@ -652,6 +711,16 @@ def main():
                     help="which valid cells the wall must keep outside: "
                          "'goal_only' = IJRR's start-vs-goal split, "
                          "'all_valid' = every other component too")
+    ap.add_argument("--bw", action="store_true",
+                    help="black-and-white page fill: WHITE = valid posture, "
+                         "BLACK = invalid (collision, joint limit, or no IK). "
+                         "The wall and the Sigma doors keep their accent "
+                         "colour, with a white casing so they read on both.")
+    ap.add_argument("--gif", action="store_true",
+                    help="write animations as .gif (PillowWriter, no ffmpeg) "
+                         "instead of .mp4")
+    ap.add_argument("--no-video", action="store_true",
+                    help="skip every animation; figures and proof only")
     ap.add_argument("--label-mode", default="metric",
                     choices=("metric", "topological"),
                     help="how Algorithm 4 classes a fed-back facet centre: "
@@ -660,9 +729,16 @@ def main():
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     want = args.only
-    global LABEL_MODE, REST_MODE
+    global LABEL_MODE, REST_MODE, BW, GIF
     LABEL_MODE = args.label_mode
     REST_MODE = args.rest_mode
+    BW, GIF = args.bw, args.gif
+    if BW:
+        print("[cfg] page fill: BLACK/WHITE (white = valid, black = invalid)")
+    if args.no_video:
+        print("[cfg] animations: SKIPPED (--no-video)")
+    elif GIF:
+        print("[cfg] animations: GIF (PillowWriter)")
     print(f"[cfg] rest class: {REST_MODE}")
     print(f"[cfg] Algorithm 4 feed-back labelling: {LABEL_MODE}")
     # keep the other experiments' entries when only some are re-run
@@ -670,6 +746,16 @@ def main():
     report = json.loads(rpath.read_text()) if rpath.exists() else {}
     T0 = time.perf_counter()
     timings = {}
+
+    def animate(segments, path):
+        """One gate for all three animations: --no-video skips, --gif swaps
+        the container. Returns the path written, or None."""
+        if args.no_video:
+            print(f"[anim] skipped (--no-video): {anim_path(path).name}")
+            return None
+        q = anim_path(path)
+        render(segments, q)
+        return q
 
     def lap(label, since):
         dt = time.perf_counter() - since
@@ -708,13 +794,13 @@ def main():
               f"doors {no_} open / {nb} blocked")
         fig8(pms, sig, {}, "EXPERIMENT 1 — no obstacle: the robot FINISHES the weld",
              PAGE_NOTE, out / "exp1_pages.png", path=path)
-        render([dict(cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pm, q_list=qlist,
-                     path=path, upto_list=keep, discs=sig[START_PAGE],
-                     page=START_PAGE,
-                     caption=lambda i, p=path, k=keep: (
-                         f"EXP 1  no obstacle   weld "
-                         f"{100*p[k[i],0]:.0f}% complete"))],
-               out / "exp1_feasible.mp4")
+        animate([dict(cfg=cfg, arm=arm, weld=weld, scene=scene, pm=pm,
+                      q_list=qlist, path=path, upto_list=keep,
+                      discs=sig[START_PAGE], page=START_PAGE,
+                      caption=lambda i, p=path, k=keep: (
+                          f"EXP 1  no obstacle   weld "
+                          f"{100*p[k[i],0]:.0f}% complete"))],
+                out / "exp1_feasible.mp4")
         lap("exp1_total", t_e)
         report["exp1"] = {"verdict": "feasible", "waypoints": len(path),
                           "doors_open": no_, "doors_blocked": nb,
@@ -723,17 +809,21 @@ def main():
     if "2" in want:
         # ------------------------------- EXP 2 -------------------------------
         print("\n=== EXP 2 : obstacle, doors CLOSED -> proof in ONE page ===")
-        t_e = time.perf_counter()
+        t_e = t_s = time.perf_counter()
         cfg2, arm2, weld2, scene2 = make(0.0, OBS_CLOSED, args.res)
         pms2, sig2, no2, nb2 = pages_and_sigma(cfg2, arm2, weld2, scene2)
+        t_s = lap("exp2_pages_and_doors", t_s)
+        seam2 = theta_seam_check(pms2, " exp2")
         pm2 = pms2[START_PAGE]
         lab2, regs2 = label_regions(cfg2, pm2)
         k2 = sorted([r for r in regs2 if r.reaches_start and not r.reaches_goal],
                     key=lambda r: -r.n_cells)[0].index
         path2 = bfs_path(pm2, lab2, k2, to_goal=False)
         q2l, keep2 = qs_from_path(arm2, weld2, path2, START_SIGNS)
+        t_s = time.perf_counter()
         poly2, rep2, live2, disch2 = prove(cfg2, arm2, weld2, scene2, pm2, lab2, k2,
                                            sig2[START_PAGE], iters=args.iters)
+        t_s = lap("exp2_wall", t_s)
         ok2 = rep2.ok and poly2.closed
         print(f"[2] doors {no2} open / {nb2} blocked; robot stalls at y={path2[-1,0]:.2f}")
         print(f"[2] wall: {rep2.n_passed}/{rep2.n_facets} facets, closed={poly2.closed}, "
@@ -742,19 +832,23 @@ def main():
         fig8(pms2, sig2, {START_PAGE: poly2.loops},
              "EXPERIMENT 2 — obstacle, doors CLOSED: the proof closes INSIDE ONE PAGE",
              PAGE_NOTE, out / "exp2_pages.png")
-        render([dict(cfg=cfg2, arm=arm2, weld=weld2, scene=scene2, pm=pm2,
-                     q_list=q2l, path=path2, upto_list=keep2, wall=poly2.loops,
-                     discs=sig2[START_PAGE], page=START_PAGE,
-                     caption=lambda i, p=path2, k=keep2: (
-                         f"EXP 2  obstacle, doors CLOSED   "
-                         f"blocked at y={p[k[i],0]:.2f}"))],
-               out / "exp2_infeasible_onepage.mp4")
+        t_s = lap("exp2_figures", t_s)
+        animate([dict(cfg=cfg2, arm=arm2, weld=weld2, scene=scene2, pm=pm2,
+                      q_list=q2l, path=path2, upto_list=keep2, wall=poly2.loops,
+                      discs=sig2[START_PAGE], page=START_PAGE,
+                      caption=lambda i, p=path2, k=keep2: (
+                          f"EXP 2  obstacle, doors CLOSED   "
+                          f"blocked at y={p[k[i],0]:.2f}"))],
+                out / "exp2_infeasible_onepage.mp4")
+        t_s = lap("exp2_video", t_s)
         lap("exp2_total", t_e)
         report["exp2"] = {"verdict": "proven_one_page" if ok2 else "incomplete",
                           "facets": [rep2.n_passed, rep2.n_facets],
                           "closed": bool(poly2.closed),
                           "doors_open": no2, "doors_blocked": nb2,
                           "discs_discharged": len(disch2),
+                          "theta_seam_touching_pages": [n for n, _, _ in seam2],
+                          "wall_seconds": timings.get("exp2_wall"),
                           "seconds": timings.get("exp2_total")}
 
     if "3" in want:
@@ -970,7 +1064,7 @@ def main():
                               drift_mm=drift * 1e3 if drift is not None else None,
                               q_route=q_route_A, rep_a=rep_a, rep_b=rep_b)
         t_s = lap("exp3_figures", t_s)
-        render(segs, out / "exp3_infeasible_twopage.mp4")
+        animate(segs, out / "exp3_infeasible_twopage.mp4")
         t_s = lap("exp3_video", t_s)
         lap("exp3_total", t_e)
         report["exp3"] = {
@@ -983,6 +1077,9 @@ def main():
             "facetsB": ([repB.n_passed, repB.n_facets] if repB else None),
             "closedB": (bool(polyB.closed) if polyB else None),
             "theta_seam_touching_pages": [n for n, _, _ in seam3],
+            "run_proof_seconds": timings.get("exp3_run_proof"),
+            "wall1_seconds": timings.get("exp3_wall1"),
+            "wall2_seconds": timings.get("exp3_wall2"),
         "partner_representative": mirror,
             "verdict": {"proven": bool(res3.proven), "reason": res3.reason,
                         "regions_visited": len(res3.regions_visited),
