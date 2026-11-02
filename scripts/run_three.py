@@ -53,6 +53,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import FFMpegWriter  # noqa: E402
 from matplotlib.colors import ListedColormap  # noqa: E402
@@ -147,6 +148,14 @@ OBS_OPEN = (BoxObstacle(center=(0.20, 0.10, 0.34),
 LABEL_MODE = "metric"
 REST_MODE = "goal_only"
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
+# --bw: print-ready pages. WHITE = valid posture, BLACK = every invalid cell
+# (collision with an obstacle, joint limit, or no IK). The overlays then have
+# to read on both, so each is drawn with a contrasting casing rather than a
+# colour: the wall is a white ribbon cased in black, the robot's route is a
+# black dashed line cased in white, and the doors are white-filled rings with
+# black edges.
+CMAP_BW = ListedColormap(["#ffffff", "#000000", "#000000", "#000000"])
+BW = False
 
 
 def weld_for(tilt_deg, x=0.28, z=0.46, half_y=0.26):
@@ -305,31 +314,50 @@ def draw_box(ax, c, h):
                   for y in (lo[1], hi[1]) for z in (lo[2], hi[2])])
     f = [[0, 1, 3, 2], [4, 5, 7, 6], [0, 1, 5, 4],
          [2, 3, 7, 6], [0, 2, 6, 4], [1, 3, 7, 5]]
-    ax.add_collection3d(Poly3DCollection([v[i] for i in f], facecolor="#c1121f",
-                                         alpha=0.45, edgecolor="#780000", lw=0.8))
+    ax.add_collection3d(Poly3DCollection(
+        [v[i] for i in f],
+        facecolor="#9a9a9a" if BW else "#c1121f",
+        alpha=0.55 if BW else 0.45,
+        edgecolor="#000000" if BW else "#780000", lw=0.9 if BW else 0.8))
 
 
 def draw_arm(ax, cfg, arm, scene, weld, q, trail):
+    # In --bw the whole frame is greyscale so it prints: the links step from
+    # black through mid grey, the seam is a black bar, the obstacles are grey
+    # with black edges, and the tool is a white dot with a black rim.
+    seam = "#d2d2d2" if BW else "#e9c46a"
+    base = "#bdbdbd" if BW else "#888888"
+    links = (("#000000", "#5a5a5a", "#9e9e9e") if BW
+             else ("#1d3557", "#4895ef", "#e76f51"))
     p0, p1 = weld.p0, weld.p1
     ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
-            color="#e9c46a", lw=9, solid_capstyle="round", zorder=0)
-    ax.plot([0, 0], [0, 0], [0, cfg.arm.d_bs], color="#888888", lw=10,
+            color=seam, lw=11 if BW else 9, solid_capstyle="round", zorder=0)
+    if BW:
+        # a dotted black centreline marks the seam as the WORKPIECE, so it is
+        # not mistaken for one of the (solid) arm links in greyscale
+        ax.plot([p0[0], p1[0]], [p0[1], p1[1]], [p0[2], p1[2]],
+                color="#000000", lw=1.6, ls=(0, (2, 2)), zorder=1)
+    ax.plot([0, 0], [0, 0], [0, cfg.arm.d_bs], color=base, lw=10,
             solid_capstyle="round", zorder=0)
     for c, h, _l in scene.boxes:
         draw_box(ax, c, h)
     f = arm.frames(q)
     pts = [f["shoulder"], f["elbow"], f["wrist"], f["tool"]]
-    for i, col in enumerate(("#1d3557", "#4895ef", "#e76f51")):
+    for i, col in enumerate(links):
         a, b = pts[i], pts[i + 1]
         ax.plot([a[0], b[0]], [a[1], b[1]], [a[2], b[2]], color=col, lw=7,
                 solid_capstyle="round")
     for pt in pts[:3]:
-        ax.scatter(*pt, color="#222", s=40, depthshade=False)
+        ax.scatter(*pt, color="#000000" if BW else "#222", s=40,
+                   depthshade=False)
     if trail:
         T = np.array(trail)
-        ax.plot(T[:, 0], T[:, 1], T[:, 2], color="#e63946", lw=4)
-    ax.scatter(*f["tool"], color="#e63946", s=95, depthshade=False,
-               edgecolor="#111", zorder=9)
+        ax.plot(T[:, 0], T[:, 1], T[:, 2],
+                color="#000000" if BW else "#e63946", lw=4,
+                ls=(0, (4, 2)) if BW else "-")
+    ax.scatter(*f["tool"], color="#ffffff" if BW else "#e63946", s=95,
+               depthshade=False, edgecolor="#000000" if BW else "#111",
+               linewidth=1.6 if BW else 1.0, zorder=9)
     ax.set_xlim(-0.25, 0.60); ax.set_ylim(-0.42, 0.42); ax.set_zlim(0, 0.80)
     ax.set_box_aspect((0.85, 0.84, 0.80))
     ax.set_xlabel("x [m]"); ax.set_ylabel("y [m]"); ax.set_zlabel("z [m]")
@@ -338,25 +366,47 @@ def draw_arm(ax, cfg, arm, scene, weld, q, trail):
 
 
 def draw_page(ax, pm, path=None, upto=None, wall=None, discs=None, title=""):
-    ax.imshow(pm.tag.T, origin="lower", aspect="auto", cmap=CMAP, vmin=-.5,
+    ax.imshow(pm.tag.T, origin="lower", aspect="auto",
+              cmap=CMAP_BW if BW else CMAP, vmin=-.5,
               vmax=3.5, extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]])
     if wall is not None:
         for loop in wall:
-            ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3)
+            if BW:
+                ax.plot(loop[:, 0], loop[:, 1], color="#ffffff", lw=3.2,
+                        solid_capstyle="round", zorder=5,
+                        path_effects=[pe.withStroke(linewidth=6.6,
+                                                    foreground="#000000")])
+            else:
+                ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3)
     for d in (discs or []):
         if not d.vanishing:
             continue
         ay, at = d.anchor
         st = d.__dict__.get("_state", "open")
-        ax.plot(ay, at, "o", ms=12, mfc="none",
-                mec="#1d3557" if st == "open" else "#9d0208", mew=2.6)
-        if st != "open":
-            ax.plot(ay, at, "x", ms=10, mec="#9d0208", mew=2.6)
+        if BW:
+            # white disc with a black rim: readable on black AND on white
+            ax.plot(ay, at, "o", ms=13, mfc="#ffffff", mec="#000000",
+                    mew=2.6, zorder=7)
+            if st != "open":
+                ax.plot(ay, at, "x", ms=9, mec="#000000", mew=2.8, zorder=8)
+        else:
+            ax.plot(ay, at, "o", ms=12, mfc="none",
+                    mec="#1d3557" if st == "open" else "#9d0208", mew=2.6)
+            if st != "open":
+                ax.plot(ay, at, "x", ms=10, mec="#9d0208", mew=2.6)
     if path is not None:
         n = len(path) if upto is None else upto + 1
-        ax.plot(path[:n, 0], path[:n, 1], color="#e63946", lw=3)
-        ax.scatter(path[n - 1, 0], path[n - 1, 1], color="#e63946", s=80,
-                   edgecolor="#111", zorder=6)
+        if BW:
+            ax.plot(path[:n, 0], path[:n, 1], color="#000000", lw=2.6,
+                    ls=(0, (5, 2)), zorder=6,
+                    path_effects=[pe.withStroke(linewidth=5.6,
+                                                foreground="#ffffff")])
+            ax.scatter(path[n - 1, 0], path[n - 1, 1], s=95, facecolor="#ffffff",
+                       edgecolor="#000000", linewidth=2.0, zorder=9)
+        else:
+            ax.plot(path[:n, 0], path[:n, 1], color="#e63946", lw=3)
+            ax.scatter(path[n - 1, 0], path[n - 1, 1], color="#e63946", s=80,
+                       edgecolor="#111", zorder=6)
     ax.set_xlim(0, 1); ax.set_ylim(pm.theta_grid[0], pm.theta_grid[-1])
     ax.set_xlabel("y  (weld coordinate)"); ax.set_ylabel(r"$\theta$  (arm angle)")
     ax.set_title(title, fontsize=11)
@@ -393,24 +443,57 @@ def fig8(pms, sigma, walls, title, note, out_path, path=None):
                      fontweight="bold" if n in (START_PAGE, PARTNER_PAGE)
                      else "normal")
         if n == START_PAGE:
-            ax.scatter([0.0], [0.0], marker="*", s=240, color="#ffffff",
-                       edgecolor="#111", zorder=8)
-            ax.text(0.02, 0.15, "start", fontsize=9)
-            ax.axvline(1.0, color="#111", lw=2, ls=":")
-            ax.text(0.80, -2.9, "goal y=1", fontsize=9)
-    handles = [
-        mpatches.Patch(color="#2a9d8f", label="valid posture"),
-        mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
-        mpatches.Patch(color="#e76f51", label="invalid: collision"),
-        mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
-        plt.Line2D([], [], marker="o", ls="none", mfc="none", mec="#1d3557",
-                   mew=2.6, ms=12, label=r"$\Sigma$ door OPEN"),
-        plt.Line2D([], [], marker="x", ls="none", mec="#9d0208", mew=2.6,
-                   ms=10, label=r"$\Sigma$ door BLOCKED"),
-        plt.Line2D([], [], color="#9d0208", lw=3, label="learned wall (the proof)"),
-        plt.Line2D([], [], color="#e63946", lw=3, label="robot motion"),
-    ]
-    fig.legend(handles=handles, loc="lower center", ncol=8, frameon=False,
+            ax.scatter([0.0], [0.0], marker="*", s=260, color="#ffffff",
+                       edgecolor="#000000", linewidth=1.4, zorder=8)
+            ax.text(0.02, 0.15, "start", fontsize=9,
+                    color="#000000" if BW else "#000000",
+                    fontweight="bold" if BW else "normal",
+                    path_effects=([pe.withStroke(linewidth=3.0,
+                                                 foreground="#ffffff")]
+                                  if BW else None))
+            ax.axvline(1.0, color="#000000" if BW else "#111", lw=2,
+                       ls=":" if not BW else (0, (2, 1.6)))
+            ax.text(0.80, -2.9, "goal y=1", fontsize=9,
+                    fontweight="bold" if BW else "normal",
+                    path_effects=([pe.withStroke(linewidth=3.0,
+                                                 foreground="#ffffff")]
+                                  if BW else None))
+    if BW:
+        handles = [
+            mpatches.Patch(facecolor="#ffffff", edgecolor="#000000",
+                           label="VALID posture"),
+            mpatches.Patch(facecolor="#000000", edgecolor="#000000",
+                           label="INVALID: obstacle, joint limit or no IK"),
+            plt.Line2D([], [], marker="o", ls="none", mfc="#ffffff",
+                       mec="#000000", mew=2.6, ms=13,
+                       label=r"$\Sigma$ singularity door OPEN"),
+            plt.Line2D([], [], marker="x", ls="none", mec="#000000", mew=2.8,
+                       ms=9, label=r"$\Sigma$ singularity door BLOCKED"),
+            plt.Line2D([], [], color="#ffffff", lw=3.2,
+                       path_effects=[pe.withStroke(linewidth=6.6,
+                                                   foreground="#000000")],
+                       label="learned manifold / wall (the proof)"),
+            plt.Line2D([], [], color="#000000", lw=2.6, ls=(0, (5, 2)),
+                       path_effects=[pe.withStroke(linewidth=5.6,
+                                                   foreground="#ffffff")],
+                       label="robot motion"),
+        ]
+    else:
+        handles = [
+            mpatches.Patch(color="#2a9d8f", label="valid posture"),
+            mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
+            mpatches.Patch(color="#e76f51", label="invalid: collision"),
+            mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
+            plt.Line2D([], [], marker="o", ls="none", mfc="none", mec="#1d3557",
+                       mew=2.6, ms=12, label=r"$\Sigma$ door OPEN"),
+            plt.Line2D([], [], marker="x", ls="none", mec="#9d0208", mew=2.6,
+                       ms=10, label=r"$\Sigma$ door BLOCKED"),
+            plt.Line2D([], [], color="#9d0208", lw=3,
+                       label="learned wall (the proof)"),
+            plt.Line2D([], [], color="#e63946", lw=3, label="robot motion"),
+        ]
+    fig.legend(handles=handles, loc="lower center",
+               ncol=6 if BW else 8, frameon=False,
                bbox_to_anchor=(0.5, -0.055))
     fig.suptitle(title + "\n" + note, fontsize=12)
     fig.savefig(out_path, dpi=100, bbox_inches="tight")
@@ -647,6 +730,9 @@ def main():
     ap.add_argument("--iters", type=int, default=14)
     ap.add_argument("--only", default="123",
                     help="which experiments to run, e.g. 3 or 23 (default all)")
+    ap.add_argument("--bw", action="store_true",
+                    help="print-ready pages: WHITE = valid posture, BLACK = "
+                         "every invalid cell (obstacle / joint limit / no IK)")
     ap.add_argument("--rest-mode", default="goal_only",
                     choices=("goal_only", "all_valid"),
                     help="which valid cells the wall must keep outside: "
@@ -660,10 +746,14 @@ def main():
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     want = args.only
-    global LABEL_MODE, REST_MODE
+    global LABEL_MODE, REST_MODE, BW
     LABEL_MODE = args.label_mode
     REST_MODE = args.rest_mode
+    BW = bool(args.bw)
     print(f"[cfg] rest class: {REST_MODE}")
+    if BW:
+        print("[cfg] pages rendered BLACK/WHITE: white = valid, "
+              "black = invalid (obstacle, joint limit, no IK)")
     print(f"[cfg] Algorithm 4 feed-back labelling: {LABEL_MODE}")
     # keep the other experiments' entries when only some are re-run
     rpath = out / "three_report.json"
