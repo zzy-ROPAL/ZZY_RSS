@@ -74,6 +74,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")
 import matplotlib.patches as mpatches  # noqa: E402
+import matplotlib.patheffects as pe  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 from matplotlib.animation import PillowWriter  # noqa: E402
 from matplotlib.colors import ListedColormap, TwoSlopeNorm  # noqa: E402
@@ -132,6 +133,26 @@ START_SIGNS = tuple(1 if c == "+" else -1 for c in START_PAGE)
 PARTNER_SIGNS = tuple(1 if c == "+" else -1 for c in PARTNER_PAGE)
 
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
+# Tag order is VALID, INVALID_NO_IK, INVALID_JOINT_LIMIT, INVALID_COLLISION.
+# In black and white every reason for invalidity collapses to one colour,
+# which is the honest rendering: what the wall has to lie in is C_obs, and
+# C_obs does not care WHY a configuration is unavailable.
+CMAP_BW = ListedColormap(["#ffffff", "#000000", "#000000", "#000000"])
+BW = False      # set from --bw; see draw_page
+
+
+def _bw_line(ax, xs, ys, lw=3.0, dashed=False, z=5):
+    """A line that reads on BOTH black and white, with no colour.
+
+    A single black line vanishes on the invalid set and a single white line
+    vanishes on the valid set, so draw a white casing with a black core: on
+    white you see a black line with white edging, on black you see a white
+    band with a black centre. Solid is the wall, dashed is the robot.
+    """
+    ax.plot(xs, ys, color="#ffffff", lw=lw + 3.0, solid_capstyle="round",
+            zorder=z)
+    ax.plot(xs, ys, color="#000000", lw=lw, zorder=z + 1,
+            ls=(0, (5, 3)) if dashed else "-", solid_capstyle="round")
 
 PAGE_NOTE = (
     "Each panel is ONE IK branch of the same task. The triple is "
@@ -454,25 +475,46 @@ def draw_arm(ax, cfg, arm, scene, weld, q, trail, azim=-72.0, elev=20.0,
 
 
 def draw_page(ax, pm, path=None, upto=None, wall=None, discs=None, title=""):
-    ax.imshow(pm.tag.T, origin="lower", aspect="auto", cmap=CMAP, vmin=-.5,
+    ax.imshow(pm.tag.T, origin="lower", aspect="auto",
+              cmap=CMAP_BW if BW else CMAP, vmin=-.5,
               vmax=3.5, extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]])
     if wall is not None:
         for loop in wall:
-            ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3)
+            if BW:
+                _bw_line(ax, loop[:, 0], loop[:, 1], lw=3.0, z=5)
+            else:
+                ax.plot(loop[:, 0], loop[:, 1], color="#9d0208", lw=3)
     for d in (discs or []):
         if not d.vanishing:
             continue
         ay, at = d.anchor
         st = d.__dict__.get("_state", "open")
-        ax.plot(ay, at, "o", ms=12, mfc="none",
-                mec="#1d3557" if st == "open" else "#9d0208", mew=2.6)
-        if st != "open":
-            ax.plot(ay, at, "x", ms=10, mec="#9d0208", mew=2.6)
+        if BW:
+            # White face so the door is found on the black invalid set, black
+            # edge so it is found on the white valid set. A blocked door adds
+            # a cross, which survives photocopying where a colour would not.
+            ax.plot(ay, at, "o", ms=13, mfc="#ffffff", mec="#000000",
+                    mew=2.2, zorder=8)
+            if st != "open":
+                ax.plot(ay, at, "x", ms=9, mec="#000000", mew=2.4, zorder=9)
+        else:
+            ax.plot(ay, at, "o", ms=12, mfc="none",
+                    mec="#1d3557" if st == "open" else "#9d0208", mew=2.6)
+            if st != "open":
+                ax.plot(ay, at, "x", ms=10, mec="#9d0208", mew=2.6)
     if path is not None:
         n = len(path) if upto is None else upto + 1
-        ax.plot(path[:n, 0], path[:n, 1], color="#e63946", lw=3)
-        ax.scatter(path[n - 1, 0], path[n - 1, 1], color="#e63946", s=80,
-                   edgecolor="#111", zorder=6)
+        if BW:
+            _bw_line(ax, path[:n, 0], path[:n, 1], lw=2.2, dashed=True, z=3)
+            # A DIAMOND, not a circle: the doors are circles, and on a black
+            # background two white discs are indistinguishable.
+            ax.scatter(path[n - 1, 0], path[n - 1, 1], s=130, marker="D",
+                       facecolor="#ffffff", edgecolor="#000000",
+                       linewidths=2.0, zorder=10)
+        else:
+            ax.plot(path[:n, 0], path[:n, 1], color="#e63946", lw=3)
+            ax.scatter(path[n - 1, 0], path[n - 1, 1], color="#e63946", s=80,
+                       edgecolor="#111", zorder=6)
     ax.set_xlim(0, 1)
     ax.set_ylim(pm.theta_grid[0], pm.theta_grid[-1])
     ax.set_xlabel("y  (weld coordinate)")
@@ -498,19 +540,39 @@ def fig8(pms, sigma, walls, title, note, out_path, kA=None, kB=None):
         if n == START_PAGE:
             ax.axvline(1.0, color="#111", lw=2, ls=":")
             ax.text(0.80, -2.9, "goal y=1", fontsize=9)
-    handles = [
-        mpatches.Patch(color="#2a9d8f", label="valid posture"),
-        mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
-        mpatches.Patch(color="#e76f51", label="invalid: collision"),
-        mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
-        plt.Line2D([], [], marker="o", ls="none", mfc="none", mec="#1d3557",
-                   mew=2.6, ms=12, label=r"$\Sigma$ door OPEN"),
-        plt.Line2D([], [], marker="x", ls="none", mec="#9d0208", mew=2.6,
-                   ms=10, label=r"$\Sigma$ door BLOCKED"),
-        plt.Line2D([], [], color="#9d0208", lw=3,
-                   label="learned wall (the proof)"),
-    ]
-    fig.legend(handles=handles, loc="lower center", ncol=7, frameon=False,
+    if BW:
+        handles = [
+            mpatches.Patch(facecolor="#ffffff", edgecolor="#000000",
+                           label="VALID posture"),
+            mpatches.Patch(facecolor="#000000", edgecolor="#000000",
+                           label=r"INVALID ($C_{obs}$): collision, joint "
+                                 r"limit or no IK"),
+            plt.Line2D([], [], marker="o", ls="none", mfc="#ffffff",
+                       mec="#000000", mew=2.2, ms=13,
+                       label=r"$\Sigma$ door OPEN"),
+            plt.Line2D([], [], marker="x", ls="none", mec="#000000", mew=2.4,
+                       ms=10, label=r"$\Sigma$ door BLOCKED"),
+            plt.Line2D([], [], color="#000000", lw=3, path_effects=[
+                pe.Stroke(linewidth=6, foreground="#bbbbbb"), pe.Normal()],
+                label="learned manifold (the wall / the proof)"),
+        ]
+        ncol = 5
+    else:
+        handles = [
+            mpatches.Patch(color="#2a9d8f", label="valid posture"),
+            mpatches.Patch(color="#e9c46a", label="invalid: joint limit"),
+            mpatches.Patch(color="#e76f51", label="invalid: collision"),
+            mpatches.Patch(color="#e9e9e9", label="invalid: no IK"),
+            plt.Line2D([], [], marker="o", ls="none", mfc="none",
+                       mec="#1d3557", mew=2.6, ms=12,
+                       label=r"$\Sigma$ door OPEN"),
+            plt.Line2D([], [], marker="x", ls="none", mec="#9d0208", mew=2.6,
+                       ms=10, label=r"$\Sigma$ door BLOCKED"),
+            plt.Line2D([], [], color="#9d0208", lw=3,
+                       label="learned wall (the proof)"),
+        ]
+        ncol = 7
+    fig.legend(handles=handles, loc="lower center", ncol=ncol, frameon=False,
                bbox_to_anchor=(0.5, -0.055))
     fig.suptitle(title + "\n" + note, fontsize=12)
     fig.savefig(out_path, dpi=100, bbox_inches="tight")
@@ -546,7 +608,8 @@ def fig_manifold(cfg, pm, wmodel, poly, rep, seed_pts, rest_pts, discs,
     # -- 1. the decision field and its zero set ---------------------------
     ax = axes[0]
     lim = float(np.max(np.abs(D)))
-    im = ax.pcolormesh(ys, ts, D.T, cmap="RdBu_r", shading="auto",
+    im = ax.pcolormesh(ys, ts, D.T, cmap="Greys" if BW else "RdBu_r",
+                       shading="auto",
                        norm=TwoSlopeNorm(vcenter=0.0, vmin=-lim, vmax=lim))
     ax.contour(ys, ts, D.T, levels=[0.0], colors="#111111", linewidths=3)
     fig.colorbar(im, ax=ax, label=r"SVM decision value  $d(y,\theta)$")
@@ -560,34 +623,50 @@ def fig_manifold(cfg, pm, wmodel, poly, rep, seed_pts, rest_pts, discs,
     # -- 2. the zero set against the page's validity ----------------------
     ax = axes[1]
     draw_page(ax, pm, wall=poly.loops, discs=discs, title="")
-    ax.plot(rest_pts[:, 0], rest_pts[:, 1], ".", ms=2.0, color="#0b3954",
-            alpha=0.55)
-    ax.plot(seed_pts[:, 0], seed_pts[:, 1], ".", ms=2.0, color="#6a040f",
-            alpha=0.55)
+    if BW:
+        ax.plot(rest_pts[:, 0], rest_pts[:, 1], "+", ms=3.2, mew=0.7,
+                color="#000000", alpha=0.8)
+        ax.plot(seed_pts[:, 0], seed_pts[:, 1], ".", ms=2.4,
+                color="#000000", alpha=0.8)
+    else:
+        ax.plot(rest_pts[:, 0], rest_pts[:, 1], ".", ms=2.0, color="#0b3954",
+                alpha=0.55)
+        ax.plot(seed_pts[:, 0], seed_pts[:, 1], ".", ms=2.0, color="#6a040f",
+                alpha=0.55)
     ax.set_xlim(pmp.y_min - m, pmp.y_max + m)
     ax.set_ylim(pmp.theta_min - m, pmp.theta_max + m)
     ax.set_title(f"2.  the wall on page ({pm.name}), region {kA}\n"
-                 f"seed class = the start region (dark red dots), "
-                 f"rest class = goal component + virtual ring (navy dots)\n"
-                 r"every facet must lie in $C_{obs}$ — i.e. OFF the green",
+                 + ("seed class = the start region (dots), rest class = goal "
+                    "component + virtual ring (crosses)\n"
+                    r"every facet must lie in $C_{obs}$ — i.e. on the BLACK"
+                    if BW else
+                    "seed class = the start region (dark red dots), "
+                    "rest class = goal component + virtual ring (navy dots)\n"
+                    r"every facet must lie in $C_{obs}$ — i.e. OFF the green"),
                  fontsize=11)
 
     # -- 3. the reconstructed polytope and the facet verdicts -------------
     ax = axes[2]
-    ax.imshow(pm.tag.T, origin="lower", aspect="auto", cmap=CMAP, vmin=-.5,
-              vmax=3.5, extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]],
-              alpha=0.35)
+    ax.imshow(pm.tag.T, origin="lower", aspect="auto",
+              cmap=CMAP_BW if BW else CMAP, vmin=-.5, vmax=3.5,
+              extent=[0, 1, pm.theta_grid[0], pm.theta_grid[-1]],
+              alpha=0.22 if BW else 0.35)
     for loop in poly.loops:
-        ax.plot(loop[:, 0], loop[:, 1], "-", color="#9d0208", lw=2.4,
-                zorder=4)
+        if BW:
+            _bw_line(ax, loop[:, 0], loop[:, 1], lw=2.4, z=4)
+        else:
+            ax.plot(loop[:, 0], loop[:, 1], "-", color="#9d0208", lw=2.4,
+                    zorder=4)
         mids = 0.5 * (loop[:-1] + loop[1:])
-        ax.plot(mids[:, 0], mids[:, 1], "o", ms=3.0, mfc="#2a9d8f",
-                mec="#14504a", mew=0.5, zorder=5)
+        ax.plot(mids[:, 0], mids[:, 1], "o", ms=3.0,
+                mfc="#ffffff" if BW else "#2a9d8f",
+                mec="#000000" if BW else "#14504a", mew=0.5, zorder=6)
     bad = np.asarray([c for c, _ in rep.failure_points], dtype=float
                      ).reshape(-1, 2)
     if len(bad):
-        ax.plot(bad[:, 0], bad[:, 1], "X", ms=11, mfc="#ffb703",
-                mec="#9d0208", mew=1.8, zorder=7)
+        ax.plot(bad[:, 0], bad[:, 1], "X", ms=11,
+                mfc="#ffffff" if BW else "#ffb703",
+                mec="#000000" if BW else "#9d0208", mew=1.8, zorder=7)
     ax.set_xlim(pmp.y_min - m, pmp.y_max + m)
     ax.set_ylim(pmp.theta_min - m, pmp.theta_max + m)
     ax.set_xlabel("y  (weld coordinate)")
@@ -602,17 +681,23 @@ def fig_manifold(cfg, pm, wmodel, poly, rep, seed_pts, rest_pts, discs,
                     f"{rep.n_facets - rep.n_passed} facet(s) unverified "
                     f"(gold X) → not yet a proof"),
                  fontsize=11,
-                 color="#14504a" if ok else "#9d0208")
+                 color=("#000000" if BW else ("#14504a" if ok else "#9d0208")))
     handles = [
-        plt.Line2D([], [], color="#9d0208", lw=2.4, label="wall (zero set)"),
-        plt.Line2D([], [], marker="o", ls="none", mfc="#2a9d8f",
-                   mec="#14504a", ms=7,
+        plt.Line2D([], [], color="#000000" if BW else "#9d0208", lw=2.4,
+                   label="wall (zero set)"),
+        plt.Line2D([], [], marker="o", ls="none",
+                   mfc="#ffffff" if BW else "#2a9d8f",
+                   mec="#000000" if BW else "#14504a", ms=7,
                    label=r"facet verified in $C_{obs}$ (Algorithm 3)"),
-        plt.Line2D([], [], marker="X", ls="none", mfc="#ffb703",
-                   mec="#9d0208", ms=11, label="facet NOT verified"),
+        plt.Line2D([], [], marker="X", ls="none",
+                   mfc="#ffffff" if BW else "#ffb703",
+                   mec="#000000" if BW else "#9d0208", ms=11,
+                   label="facet NOT verified"),
     ]
-    ax.legend(handles=handles, loc="lower right", fontsize=8.5,
-              framealpha=0.95)
+    leg = ax.legend(handles=handles, loc="upper center", fontsize=8.5,
+                    framealpha=1.0, ncol=1,
+                    bbox_to_anchor=(0.5, -0.09))
+    leg.set_zorder(20)
 
     fig.suptitle(
         "EXPERIMENT 4 — THE LEARNED MANIFOLD ON THE START PAGE\n"
@@ -644,6 +729,13 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, discsA, discsB,
     Mid-3  the two pages' readings of the one posture at the far end.
     Right  page B: the weld completes.
     """
+    # In black and white every annotation goes to ink, and anything sitting
+    # over the invalid set needs a white plate under it to stay readable.
+    def C(c):
+        return "#000000" if BW else c
+
+    PLATE = dict(boxstyle="round,pad=0.25", fc="white", ec="none", alpha=0.9)
+
     fig = plt.figure(figsize=(23, 8.8))
     gs = fig.add_gridspec(3, 3, width_ratios=(1.0, 1.30, 1.0),
                           height_ratios=(1.25, 0.72, 0.72),
@@ -663,16 +755,18 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, discsA, discsB,
     axA.annotate("START", xy=(routeA[0, 0], routeA[0, 1]),
                  xytext=(0.10, routeA[0, 1] + 1.1), fontsize=9,
                  fontweight="bold",
-                 arrowprops=dict(arrowstyle="-|>", lw=1.8, color="#111"))
+                 arrowprops=dict(arrowstyle="-|>", lw=1.8, color="#111"),
+                 bbox=PLATE if BW else None)
     axA.axvline(1.0, color="#111", lw=2.4, ls=":")
     axA.text(0.965, -2.62, "GOAL  y=1\nunreachable on THIS page", fontsize=9,
-             fontweight="bold", ha="right", va="top", color="#9d0208",
+             fontweight="bold", ha="right", va="top", color=C("#9d0208"),
              bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none",
                        alpha=0.85))
     axA.annotate(f"OPEN DOOR  $q_6=0$\ny={ay:.4f}", xy=(ay, at),
                  xytext=(max(ay - 0.42, 0.02), at + 1.5), fontsize=9,
-                 fontweight="bold", color="#1d3557",
-                 arrowprops=dict(arrowstyle="-|>", lw=2.0, color="#1d3557"))
+                 fontweight="bold", color=C("#1d3557"),
+                 bbox=PLATE if BW else None,
+                 arrowprops=dict(arrowstyle="-|>", lw=2.0, color=C("#1d3557")))
 
     # -- the fiber in 3-D --------------------------------------------------
     p0, p1 = weld.p0, weld.p1
@@ -710,21 +804,22 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, discsA, discsB,
     dd = np.degrees(np.asarray(deltas))
     Q = np.degrees(np.asarray(fiber))
     L = np.degrees(arm.q_max)
-    axq.axhspan(-L[4], L[4], color="#2a9d8f", alpha=0.08)
-    axq.plot(dd, Q[:, 4], lw=2.8, color="#1d3557", label=r"$q_5$")
-    axq.plot(dd, Q[:, 6], lw=2.8, color="#e76f51", label=r"$q_7$")
-    for v, c, lbl in ((L[4], "#1d3557", r"$q_5$ limit"),
-                      (-L[4], "#1d3557", None),
-                      (L[6], "#e76f51", r"$q_7$ limit"),
-                      (-L[6], "#e76f51", None)):
+    axq.axhspan(-L[4], L[4], color="#888888" if BW else "#2a9d8f",
+                alpha=0.08)
+    axq.plot(dd, Q[:, 4], lw=2.8, color=C("#1d3557"), label=r"$q_5$")
+    axq.plot(dd, Q[:, 6], lw=2.8, color=C("#555555"), label=r"$q_7$")
+    for v, c, lbl in ((L[4], C("#1d3557"), r"$q_5$ limit"),
+                      (-L[4], C("#1d3557"), None),
+                      (L[6], C("#555555"), r"$q_7$ limit"),
+                      (-L[6], C("#555555"), None)):
         axq.axhline(v, color=c, lw=1.4, ls="--", alpha=0.8, label=lbl)
-    axq.scatter([dd[0]], [Q[0, 4]], s=90, color="#1d3557", zorder=6,
+    axq.scatter([dd[0]], [Q[0, 4]], s=90, color=C("#1d3557"), zorder=6,
                 edgecolor="#111")
-    axq.scatter([dd[-1]], [Q[-1, 4]], s=90, color="#1d3557", zorder=6,
+    axq.scatter([dd[-1]], [Q[-1, 4]], s=90, color=C("#1d3557"), zorder=6,
                 edgecolor="#111")
-    axq.scatter([dd[0]], [Q[0, 6]], s=90, color="#e76f51", zorder=6,
+    axq.scatter([dd[0]], [Q[0, 6]], s=90, color=C("#555555"), zorder=6,
                 edgecolor="#111")
-    axq.scatter([dd[-1]], [Q[-1, 6]], s=90, color="#e76f51", zorder=6,
+    axq.scatter([dd[-1]], [Q[-1, 6]], s=90, color=C("#555555"), zorder=6,
                 edgecolor="#111")
     axq.set_xlabel(r"$\delta$ along the gimbal fiber  [deg]"
                    "      (0 = this page's reading, "
@@ -745,12 +840,14 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, discsA, discsB,
         idx = np.arange(7)
         a_deg, b_deg = np.degrees(rep_a), np.degrees(rep_b)
         w = 0.38
-        axrep.bar(idx - w / 2, a_deg, w, color="#1d3557",
+        axrep.bar(idx - w / 2, a_deg, w, color=C("#1d3557"),
                   label=f"page ({pmA.name}) reading")
-        axrep.bar(idx + w / 2, b_deg, w, color="#e76f51",
+        axrep.bar(idx + w / 2, b_deg, w,
+                  color="#bbbbbb" if BW else "#e76f51",
+                  edgecolor="#000000" if BW else None,
                   label=f"page ({pmB.name}) reading")
-        axrep.plot(idx, L, "_", ms=22, color="#9d0208", mew=2.2)
-        axrep.plot(idx, -L, "_", ms=22, color="#9d0208", mew=2.2,
+        axrep.plot(idx, L, "_", ms=22, color=C("#9d0208"), mew=2.2)
+        axrep.plot(idx, -L, "_", ms=22, color=C("#9d0208"), mew=2.2,
                    label="joint limit")
         marg = float(np.min(L - np.abs(b_deg)))
         axrep.set_xticks(idx)
@@ -772,10 +869,10 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, discsA, discsB,
                         f"feasible across TWO pages")
         axB.axvline(1.0, color="#111", lw=2.4, ls=":")
         axB.text(0.965, -2.62, "GOAL  y=1\nREACHED", fontsize=9,
-                 fontweight="bold", ha="right", va="top", color="#14504a",
+                 fontweight="bold", ha="right", va="top", color=C("#14504a"),
                  bbox=dict(boxstyle="round,pad=0.25", fc="white", ec="none",
                            alpha=0.85))
-        axB.plot([ay], [at], marker="s", ms=13, mfc="none", mec="#1d3557",
+        axB.plot([ay], [at], marker="s", ms=13, mfc="none", mec=C("#1d3557"),
                  mew=2.8, zorder=10)
         axB.annotate("the robot arrives HERE,\nin limits, clearance "
                      f"{clear_mm:.0f} mm", xy=(ay, at),
@@ -802,7 +899,7 @@ def fig_door_crossing(arm, weld, scene, pmA, pmB, wallA, discsA, discsB,
 PAGE_COLOUR = {"start": "#1d3557", "cross": "#bb3e03", "partner": "#14746f"}
 
 
-def render_gif(segments, out_path, arm, fps=14, dpi=80):
+def render_gif(segments, out_path, arm, fps=14, dpi=72):
     """The animation, as a GIF (no ffmpeg needed).
 
     TWO CAMERAS. One three-quarter view reads as a robot; it does not read as
@@ -940,6 +1037,17 @@ def main():
                          "only ever fails to certify, it never certifies "
                          "something false -- so re-drawing is legitimate. See "
                          "docs/exp4_spec.md.")
+    ap.add_argument("--bw", action="store_true",
+                    help="render every page map in black and white: WHITE is "
+                         "the valid set, BLACK is C_obs (collision, joint "
+                         "limit and no-IK all together, since the wall only "
+                         "has to lie in C_obs and does not care which). The "
+                         "learned manifold and the robot's route stay "
+                         "legible without colour by drawing a black core "
+                         "inside a white casing -- solid for the wall, dashed "
+                         "for the robot -- and the doors become white discs "
+                         "with a black edge, crossed when blocked. Print- and "
+                         "photocopy-safe.")
     ap.add_argument("--no-gif", action="store_true")
     ap.add_argument("--no-proof", action="store_true",
                     help="skip flood.run_proof (figures only)")
@@ -951,6 +1059,11 @@ def main():
             0.5 * np.hypot(1.0 / (args.res - 1), 2.0 / (args.res - 1)))
         print(f"[cfg] feedback_margin auto = {args.feedback_margin:.4f} "
               f"(half a cell diagonal at res {args.res})")
+    global BW
+    BW = bool(args.bw)
+    if BW:
+        print("[cfg] page maps in BLACK AND WHITE "
+              "(white = valid, black = C_obs)")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
 
