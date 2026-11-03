@@ -55,6 +55,7 @@ d_wt=0.0824`,最大臂展 0.651 m。限位:q1/q3/q5 ±178.85°,q2/q4/q6
 | 案例 | 场景 | 门 | 判定 | 墙 |
 |---|---|---|---|---|
 | EXP 5a | 圆弧缝,缝两侧各一立柱 | 1 道**线门**开(精确认证,余量 43.11°) | **可行**(`proven=False`),但必须翻肘 | — |
+| **EXP 5a′** | **圆弧缝 + 一个 12 cm 立方体(`run_exp5a.py`)** | **同一道线门开,精确,两页余量 +28.67°** | **起始页被证明不可行,伙伴页到终点**(`proven=False via '+--/1'`) | **(++-) 上 301/301,closed,γ=19.7** |
 | EXP 5b | 同缝,一个 14 cm 立方体 | 同上 | **不可行,跨两页**(`proven=True`) | **142/142 与 142/142,都 closed,γ=1.0** |
 
 EXP 5b 的证明在 res **41/61/81** 都 `proven=True`,面数三处都是 142/142 + 142/142
@@ -169,6 +170,8 @@ python3 scripts/run_experiment.py --res 81 --fiber         # 完整泛洪证明�
 python3 scripts/run_e4.py --res 41                         # E4 强制变号搜索(未成功)
 
 python3 scripts/run_exp5.py --res 61 --iters 6 --out out/exp5       # EXP 5a + 5b(34 s)
+python3 scripts/run_exp5a.py --out out/exp5a                       # EXP 5a′ 起始页证明(112 s,301/301)
+python3 scripts/run_exp5a.py --style bw --no-gif --out out/exp5a   # 黑白版,不出 GIF
 python3 scripts/run_exp5.py --only b --no-gif --out out/exp5        # 只跑 5b,不出 GIF
 python3 scripts/run_exp5.py --res 61 --style bw --out out/exp5      # 黑白版图与 GIF(_bw 后缀)
 python3 scripts/run_three.py --res 61 --iters 14 --out out/three    # 网格流水线 EXP1/2/3
@@ -210,6 +213,8 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 | **Σ 守卫向量化** | 一个面对**全部**圆盘一次 numpy 调用(线门有 ~190 个盘) | `pack_discs()` / `segment_hits_any_disc()` in `wall.py` |
 | 黑白出图 | `--style bw`:白=有效,黑=任何无效,灰=奇异门 | `PALETTE` in `run_exp5.py` |
 | **图复用证书的墙** | `run_proof(collect=...)` 交出每面墙(待办 9b) | `src/zzy_rss/flood.py` |
+| **精确边界锚点** | 二分 `classify()` 把真实类边界钉进训练集(不变量 26) | `boundary_anchor_samples()` in `wall.py` |
+| **EXP 5a′ 起始页证明** | 锚点 8/边 + 守卫 0.25 格 ⇒ 301/301 | `scripts/run_exp5a.py` |
 | 碰撞 / 工作空间穿透深度 | 胶囊 vs AABB,全向量化(113 µs/次) | `src/zzy_rss/scene.py` |
 | Stage 1 页图 | 每符号分支一页,`(y,θ)` 网格 + 无效原因标签 | `src/zzy_rss/pagemap.py` |
 | **八页共享构建** | 一次 IK + 一次碰撞 + 镜像恒等式 ⇒ 八页(4.5×,逐格精确) | `build_all_pages_shared()` in `pagemap.py` |
@@ -357,6 +362,25 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     整条线是**一个姿态**,不可能一半属种子类一半属其余类;逐个定类会把线劈开,
     SVM 于是试图**沿着折叠线**穿一面墙,每个面都被 Σ 守卫拒。
     **过门与报告**同样每条线只算一道门,否则 8 道门会报成 1512 道。
+
+26. **精确边界锚点与回灌守卫必须一起调,单独任何一个都不行。**(§37r,`docs/exp5a_scene.md` §13)
+    网格每 dy/dθ 采一次,**有效集的真实边界可以离任何训练点差整整一格**,
+    SVM 就把零集放进那个空档里 —— EXP 5a′ 的穿越面实测在真实有效边界内
+    **0.0002–0.062 rad(0.001–0.395 个格,无一超过一格)**,
+    且 7 个失败里 6 个落在**网格判无效、精确判有效**的**亚格细丝**上。
+    `wall.boundary_anchors=8`(每条格边钉 8 个精确有效姿态,**只进训练集**,
+    不变量 18)把穿越从 16 压到 4;**但必须同时把 `feedback_margin` 缩小**
+    (0.25 格对角线,0.00 也行):守卫原本只为保证可分(§29),这件事现在归锚点,
+    守卫一大就把 Algorithm 4 真正的修复路径堵死。
+    **线索**:那 6 个穿越对守卫 1.0/1.5/2.0 与 `alg4_iters` 16/24 **完全一样**,
+    说明 Alg 4 根本没碰它们。默认 `boundary_anchors=0`(EXP 1–3 / 5b 就是这么量的)。
+
+27. **不要用"走廊宽度""逐列余量""全局 y 间隙"预测墙能不能闭合 —— 实测全不成立。**(§37r)
+    2.68 格对角线的盒子给 16–20 个穿越,1.79 的只给 6;逐列余量 +4/+5 行、交错列 0;
+    全局间隙 +2 行的盒子仍然 16–20;网格加密**不单调**(res 61 给 17,res 81 给 6)。
+    **唯一成立的机制是亚格细丝**(不变量 26)。
+    这四条我都写进过汇报文字才被自己的测量推翻 —— **连同 §34a / §35 / §37g / §37p,
+    这是同一个错误的第五到第八次:测量成立,结论不成立。**
 
 ## 待办
 
