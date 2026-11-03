@@ -194,9 +194,10 @@ def main() -> None:
 
     # ---------------------------------------------------------------- C ----
     axC = fig.add_subplot(2, 2, 3)
-    axC.set_title("C.  what DOES differ: the link is ROLLED 180° about its own "
-                  "axis\ncross-section through the upper arm, looking down "
-                  "$S\\rightarrow E$", fontsize=11)
+    axC.set_title("C.  what DOES differ: flipping $s_2$ ROLLS frame 2 "
+                  "(the upper-arm housing,\njoint 2$\\to$3) by 180° about its "
+                  "own axis — cross-section looking down $S\\rightarrow E$",
+                  fontsize=10.5)
     # project the computed feature positions into the plane normal to S->E
     u = (E - S) / np.linalg.norm(E - S)
     tmp = np.array([0.0, 0.0, 1.0])
