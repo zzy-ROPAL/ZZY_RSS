@@ -186,7 +186,9 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 `run_sampled.py --feedback-margin`(默认 0.019)是采样流水线的回灌守卫,
 **不可关掉**:关掉墙就不闭合(§32)。网格流水线保持 IJRR 原文的 0。
 
-**实验交接说明**(给新会话用,自包含):**`docs/exp4_brief.md`**(场景已找到)、
+**实验交接说明**(给新会话用,自包含):**`docs/exp5a_scene.md`**
+(`q4` 折叠门 + 起始页堵 + 伙伴页到终点,**场景已找到并验过,墙差最后 4%**)、
+**`docs/exp4_brief.md`**(场景已找到)、
 **`docs/exp5_brief.md`** + **`docs/exp5_spec.md`**(规格,场景未搜)。
 
 七个汇报问题的完整回答(含全部实测数字)见 **`docs/seven_questions.md`**。
