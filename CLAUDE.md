@@ -163,7 +163,7 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 | 焊缝任务 | 直线 + 固定姿态 + 焊枪倾角 | `src/zzy_rss/weld.py` |
 | 碰撞 / 工作空间穿透深度 | 胶囊 vs AABB,全向量化(113 µs/次) | `src/zzy_rss/scene.py` |
 | Stage 1 页图 | 每符号分支一页,`(y,θ)` 网格 + 无效原因标签 | `src/zzy_rss/pagemap.py` |
-| **八页共享构建** | 一次 IK + 一次碰撞 + 镜像恒等式 ⇒ 八页(4.5×,逐格精确) | `build_all_pages_shared()` in `pagemap.py` |
+| **八页共享构建** | 一次 IK + 一次碰撞 + 镜像恒等式 ⇒ 八页(4.5×,逐格精确);离轴几何时自动退回逐页碰撞 | `build_all_pages_shared()` / `geometry_is_page_dependent()` in `pagemap.py` |
 | Stage 2 奇异集 Σ | **解析**门(二次方程)+ 数值交叉验证,**椭圆**圆盘覆盖 | `src/zzy_rss/doors.py` |
 | 门的纤维有效性 | 自运动纤维扫描,锚定在**精确**解析门位 | `src/zzy_rss/doors.py` |
 | Stage 5 纤维认证(可选) | 纤维全无效 ⇒ 门认证关闭 | `src/zzy_rss/doors.py` |
@@ -258,13 +258,25 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     画图可以用,**训练集可以加(§32 已验证:`edge_anchor_samples`,面 144→150)**,
     **路图不行**。
 
-19. **八页共享构建是精确的,不是近似。**(§33)IK 存在性只取决于
-    `|W(y)−S|` 落在圆环内(与符号无关),碰撞逐格与页无关(§31),
-    镜像恒等式给出其余七个关节向量的闭式解(断言到 1e-9)。
-    `build_all_pages_shared` 因此每格只做一次 IK/FK/碰撞:3.64 s → 0.80 s,
-    两场景 × 八页逐格 tag 差异 **0/3721**。
-    改 `ik_branch`、`scene.check` 或镜像恒等式后必须重跑
-    `tests/test_ik.py::test_shared_page_build_matches`。
+19. **八页共享构建是精确的,不是近似 —— 但"碰撞与页无关"是**碰撞模型**的性质,
+    不是运动学的性质。**(§33,2026-11-03 补充)
+    IK 存在性只取决于 `|W(y)−S|` 落在圆环内(与符号无关),
+    镜像恒等式给出其余七个关节向量的闭式解(断言到 1e-9)——**这两条是普适的**。
+    但"碰撞逐格与页无关"只在**连杆几何关于自身关节-关节轴旋转对称**时成立:
+    我们的胶囊挂在 S-E-W-tool 骨架上,实测八页位移 **0.0 mm**;
+    而**离轴**几何不是 —— `use_off_axis_upper_arm` 的 hub 挂在 frame 2 上,
+    翻 `s₂` 它移动 **210 mm**;`use_off_axis_elbow` 翻 `s₄` 移动 **180 mm**。
+    `geometry_is_page_dependent(cfg)` 判这件事;为真时
+    `build_all_pages_shared` **自动退回逐页算碰撞**(IK 仍共享),
+    `fasteval.Precomputed` **直接报错拒绝**(它的缓存设计不支持)。
+    实测:离轴打开 + 一个 5 cm 盒子压在 hub 上,八页有效率差 **11 pp**,
+    沿用参考分支的碰撞报告会在四个 `s₂=−` 页上各错 **26/961** 格。
+    默认两个离轴开关都是 `False`,所以 §31/§33 的 0/3721 成立。
+    **取得真实 STL 网格(待办 4)后这一条会失效**:网格关于那些轴不对称,
+    碰撞将变成依页的,4.5× 会退化(IK 共享仍在)。
+    改 `ik_branch`、`scene.check`、胶囊集合或镜像恒等式后必须重跑
+    `tests/test_ik.py::test_shared_page_build_matches` 与
+    `::test_shared_build_handles_page_dependent_geometry`。
 
 20. **虚拟障碍带与虚拟自由环必须相邻,中间不能留缝。**(§32)
     原来带到 `1·ε`、环在 `2·ε`,中间 `(−2ε, −ε)` 既不是带也不是环;

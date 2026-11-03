@@ -9,7 +9,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from zzy_rss.arm import SIGN_BRANCHES, SrsArm, rot_y, rot_z  # noqa: E402
+from zzy_rss.arm import SIGN_BRANCHES, VALID, SrsArm, rot_y, rot_z  # noqa: E402
 from zzy_rss.params import DEFAULT  # noqa: E402
 from zzy_rss.weld import WeldLine  # noqa: E402
 
@@ -248,6 +248,76 @@ def test_fasteval_matches_page_build() -> int:
     return worst
 
 
+def test_shared_build_handles_page_dependent_geometry() -> int:
+    """The eight-pages-for-one trick must NOTICE when it no longer applies.
+
+    One collision check per cell serves all eight pages only because the
+    mirrors leave the arm's skeleton alone -- the upper-arm, forearm and tool
+    capsules move 0.0 mm between pages. An OFF-AXIS capsule breaks that: the
+    hubs hang off frames 2 and 3, which do rotate, so flipping s2 moves the
+    upper-arm hub by 210 mm and flipping s4 moves the elbow hub by 180 mm.
+
+    Measured with a 5 cm box parked on the upper-arm hub's position: the eight
+    pages' valid fractions spread over 11 percentage points, and reusing the
+    reference branch's collision report gets 26 of 961 cells wrong on each of
+    the four s2 = - pages. build_all_pages_shared must therefore fall back to
+    one collision check per page, and fasteval -- whose whole design caches one
+    set of capsule points per cell -- must refuse the configuration outright.
+    """
+    import dataclasses
+
+    from zzy_rss import pagemap as PM
+    from zzy_rss.fasteval import Precomputed
+    from zzy_rss.params import BoxObstacle, PageMapParams, SceneParams
+    from zzy_rss.scene import Scene
+
+    cfg = dataclasses.replace(
+        DEFAULT,
+        arm=dataclasses.replace(DEFAULT.arm, use_off_axis_upper_arm=True,
+                                use_off_axis_elbow=True),
+        pagemap=PageMapParams(n_y=31, n_theta=31),
+        scene=SceneParams(gap_open=True, obstacles=(
+            BoxObstacle(center=(0.198819, 0.088679, 0.191399),
+                        half_extent=(0.025, 0.025, 0.025), label="hub"),)))
+    assert PM.geometry_is_page_dependent(cfg), "off-axis geometry must be flagged"
+    arm = SrsArm(cfg.arm)
+    weld = WeldLine(cfg.weld)
+    scene = Scene(cfg.arm, cfg.scene)
+
+    truth = PM.build_all_pages(cfg, arm, weld, scene, with_kin=False,
+                               verbose=False, shared=False)
+    # the pages really do differ by collision here, or the test proves nothing
+    fracs = [float((truth[n].tag == VALID).mean()) for n in truth]
+    assert max(fracs) - min(fracs) > 0.05, (
+        f"pages do not differ enough to be a test: {fracs}")
+
+    shared = PM.build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
+                                       verbose=False)
+    worst = max(int(np.sum(truth[n].tag != shared[n].tag)) for n in truth)
+    assert worst == 0, f"shared build differs in {worst} cells"
+
+    # and the old, wrong behaviour must really have been wrong
+    original = PM.geometry_is_page_dependent
+    try:
+        PM.geometry_is_page_dependent = lambda _cfg: False
+        naive = PM.build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
+                                          verbose=False)
+    finally:
+        PM.geometry_is_page_dependent = original
+    naive_worst = max(int(np.sum(truth[n].tag != naive[n].tag)) for n in truth)
+    assert naive_worst > 0, (
+        "reusing one collision report should be WRONG here; if it is not, this "
+        "test no longer guards anything")
+
+    try:
+        Precomputed(cfg)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("fasteval must refuse page-dependent geometry")
+    return naive_worst
+
+
 if __name__ == "__main__":
     n_ok, n_tried, worst_rt = test_round_trip()
     print(f"[ik] round-trip        : {n_ok}/{n_tried} branches solvable, "
@@ -267,4 +337,7 @@ if __name__ == "__main__":
     worst_fast = test_fasteval_matches_page_build()
     print(f"[ik] fasteval           : identical to the page build "
           f"(worst {worst_fast} differing cells over 8 pages x 2 scenes)")
+    naive = test_shared_build_handles_page_dependent_geometry()
+    print(f"[ik] page-dep geometry : shared build falls back correctly; "
+          f"reusing one report would have been wrong in {naive} cells")
     print("[ik] ALL TESTS PASSED")
