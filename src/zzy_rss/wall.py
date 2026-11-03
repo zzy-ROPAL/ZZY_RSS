@@ -394,6 +394,89 @@ def edge_anchor_samples(
     return np.asarray(out, dtype=float).reshape(-1, 2)
 
 
+def boundary_anchor_samples(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, pm,
+    mask: np.ndarray, dens: int | None = None, n_bisect: int = 24,
+) -> np.ndarray:
+    """Exact VALID postures ON the true boundary of `mask`, for TRAINING.
+
+    edge_anchor_samples above supplies the page's y EDGES, which is where the
+    sampled pipeline's wall was cutting in (findings 32). This supplies the
+    other missing fact: where the class stops in the INTERIOR of the page.
+
+    The grid samples the page every dy / dtheta, so the true edge of the valid
+    set can sit up to a full cell away from any training point and the SVM is
+    free to place its zero set anywhere in that gap. Measured on the EXP 5a
+    candidate: all 16 crossed facets sat 0.0002-0.062 rad inside the true
+    valid edge near the theta seam -- 0.001 to 0.395 of ONE cell, every one
+    within a cell, i.e. the wall was hugging the joint-limit band and
+    undershooting by a sub-cell amount it had no way to see.
+
+    An SVM is a max-margin classifier, so pinning the true edge of BOTH
+    classes puts the zero set down the middle of the corridor between them
+    rather than in the middle of the sampling gap. On that scene it took the
+    crossings from 16 to 6 while keeping the wall closed and gamma at 6.3.
+
+    For every 4-adjacent pair (cell in `mask`, cell outside it) the segment
+    between the two is bisected on classify(), and the valid-side point kept.
+    A neighbour that is VALID but merely in a different component is skipped:
+    there is no validity edge to find there. theta is treated as periodic when
+    the page is, so the seam is covered like any other column.
+
+    TRAINING SET ONLY. Putting these in the roadmap is invariant 18's mistake.
+    """
+    if dens is None:
+        dens = int(getattr(cfg.wall, "boundary_anchors", 0) or 0)
+    if dens <= 0:
+        return np.zeros((0, 2), dtype=float)
+    per = is_periodic(cfg)
+    ys, ts = pm.y_grid, pm.theta_grid
+    signs = pm.signs
+    ny, nt = mask.shape
+    out: list[tuple[float, float]] = []
+    neigh = ((1, 0), (-1, 0), (0, 1), (0, -1))
+    for i in range(ny):
+        for j in range(nt):
+            if not mask[i, j]:
+                continue
+            for di, dj in neigh:
+                i2 = i + di
+                if i2 < 0 or i2 >= ny:
+                    continue
+                j2 = j + dj
+                if j2 < 0 or j2 >= nt:
+                    if not per:
+                        continue
+                    j2 %= nt
+                if mask[i2, j2]:
+                    continue
+                ay, at = float(ys[i]), float(ts[j])
+                by = float(ys[i2])
+                dt = float(ts[j2]) - at
+                if per:
+                    dt -= 2.0 * np.pi * round(dt / (2.0 * np.pi))
+                if classify(cfg, arm, weld, scene, by,
+                            _wrap_theta(at + dt), signs)[0]:
+                    continue
+                lo, hi = 0.0, 1.0
+                for _ in range(n_bisect):
+                    m = 0.5 * (lo + hi)
+                    if classify(cfg, arm, weld, scene, ay + m * (by - ay),
+                                _wrap_theta(at + m * dt), signs)[0]:
+                        lo = m
+                    else:
+                        hi = m
+                for sub in range(dens):
+                    f = (sub + 0.5) / dens if dens > 1 else 1.0
+                    m = lo * f
+                    out.append((ay + m * (by - ay), _wrap_theta(at + m * dt)))
+    return np.asarray(out, dtype=float).reshape(-1, 2)
+
+
+def _wrap_theta(t: float) -> float:
+    return float(np.arctan2(np.sin(t), np.cos(t)))
+
+
 def in_virtual_invalid(cfg: Config, pts: np.ndarray) -> np.ndarray:
     """The positive-thickness invalid band just outside the page boundary.
 

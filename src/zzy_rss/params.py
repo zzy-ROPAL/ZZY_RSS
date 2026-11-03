@@ -375,6 +375,23 @@ class WallParams:
     # between region k and a small neighbour -- gamma 2 -> 10 on EXP 3's
     # partner page, with facets landing in valid cells (findings 29).
     rest_mode: str = "goal_only"
+    # Exact boundary anchors (findings 37r). Density of exact VALID postures
+    # placed ON the true boundary of each training class, found by bisecting
+    # classify() across every grid edge that leaves the class. 0 disables them,
+    # which is what EXP 1-3 and 5b were measured with, so that stays default.
+    #
+    # Why they exist: the grid only samples the page every dy / dtheta, so the
+    # true edge of the valid set can lie up to a full cell away from any
+    # training point, and the SVM puts its zero set in that gap. Measured on
+    # the EXP 5a candidate: the 16 crossed facets sat 0.0002-0.062 rad inside
+    # the true edge -- 0.001 to 0.395 of ONE cell, every one within a cell. An
+    # SVM is a max-margin classifier, so pinning the true edge of BOTH classes
+    # puts the wall down the middle of the corridor instead. 16 failures -> 6.
+    #
+    # Density > 1 pins several points along each cell edge rather than one, so
+    # the boundary cannot bulge between anchors. These belong in the TRAINING
+    # set only, never the roadmap (invariant 18).
+    boundary_anchors: int = 0
     # Algorithm 4 feeds a failed facet centre back into the training data. If
     # that centre sits closer than this (in SCALED page units) to a point of
     # the class it is NOT being given, the two classes stop being separable at

@@ -27,7 +27,8 @@ from .pagemap import PageMap, page_name
 from .scene import Scene
 from .doors import door_fiber_validity
 from .wall import (
-    LABEL_TOPOLOGICAL, PageLabeller, assign_label, is_periodic, page_dist,
+    LABEL_TOPOLOGICAL, PageLabeller, assign_label, boundary_anchor_samples,
+    is_periodic, page_dist,
     sigma_disc_samples,
     CheckReport, Polytope, check_polytope, reconstruct_wall, sample_wall,
     train_wall, virtual_boundary_samples,
@@ -468,6 +469,33 @@ def run_proof(
                                   cfg.wall.rest_mode)
         ring = virtual_boundary_samples(cfg, 80)
         rest_pts = np.vstack([thin(rest, n_train_max, rng), ring])
+
+        # Exact boundary anchors (findings 37r), off unless asked for. The grid
+        # samples the page every dy / dtheta, so the true edge of either class
+        # can sit up to a full cell from any training point and the SVM puts
+        # its zero set in that gap -- which is where every crossed facet of the
+        # EXP 5a candidate's wall sat, 0.001 to 0.395 of a cell inside the true
+        # valid edge. Pinning both edges makes the max-margin surface run down
+        # the middle of the corridor instead. Thinning is applied BEFORE these
+        # are added, so an anchor is never thinned away.
+        if int(getattr(cfg.wall, "boundary_anchors", 0) or 0) > 0:
+            a_seed = boundary_anchor_samples(cfg, arm, weld, scene, pm,
+                                             lab == k)
+            goal_mask = np.zeros_like(lab, dtype=bool)
+            for r in regions_by_page[name]:
+                if r.index != k and r.reaches_goal:
+                    goal_mask |= (lab == r.index)
+            a_rest = (boundary_anchor_samples(cfg, arm, weld, scene, pm,
+                                              goal_mask)
+                      if goal_mask.any() else np.zeros((0, 2)))
+            if len(a_seed):
+                seed_pts = np.vstack([seed_pts, a_seed])
+            if len(a_rest):
+                rest_pts = np.vstack([rest_pts, a_rest])
+            if verbose:
+                print(f"[stage3] boundary anchors: {len(a_seed)} on the seed "
+                      f"class, {len(a_rest)} on the rest class "
+                      f"(density {cfg.wall.boundary_anchors})")
         inv = thin(invalid_points(pm), n_invalid_max, rng)
         # Discharge the doors that fiber certification has proved impassable,
         # exactly as the demo's prove() does. A disc exists to stop the wall
