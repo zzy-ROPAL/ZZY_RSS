@@ -348,6 +348,63 @@ def find_inf_proof_region(
     return poly, rep, wall, max_iters, alg2_total
 
 
+class GridPageSource:
+    """run_proof's view of ONE page, backed by the Stage 1 grid.
+
+    Every place run_proof touches the grid goes through here, so a sampled
+    backend only has to provide the same five answers. Four of the five are
+    "give me points of class X", which a roadmap supplies perfectly well --
+    IJRR's own training classes are PRM vertices. The fifth, `regions_under`,
+    is the one that needs EXHAUSTIVE coverage: a region that is never enqueued
+    is never examined again, so "no region here" has to be a fact about the
+    page rather than a fact about where we happened to look. That asymmetry,
+    not the dimension, is why the grid is still load-bearing.
+    """
+
+    def __init__(self, cfg: Config, pm: PageMap):
+        self.cfg, self.pm = cfg, pm
+        self.name, self.signs = pm.name, pm.signs
+        self.lab, self._regions = label_regions(cfg, pm)
+
+    def regions(self) -> list:
+        return self._regions
+
+    def seed_points(self, k: int) -> np.ndarray:
+        return region_points(self.pm, self.lab, k)
+
+    def rest_points(self, k: int, mode: str) -> np.ndarray:
+        return other_valid_points(self.pm, self.lab, k, self._regions, mode)
+
+    def obstacle_points(self) -> np.ndarray:
+        return invalid_points(self.pm)
+
+    def tol(self) -> float:
+        """One cell diagonal: how close a disc must be to count as "in here"."""
+        return float(np.hypot(self.pm.y_grid[1] - self.pm.y_grid[0],
+                              self.pm.theta_grid[1] - self.pm.theta_grid[0]))
+
+    def regions_under(self, y: float, theta: float, radius: float) -> list:
+        """Every region inside a disc's footprint -- the conservative answer.
+
+        The footprint window exists because the stored disc centre may be
+        grid-snapped. A sampled backend can use SigmaDisc.anchor directly
+        instead: the whole fiber over a door maps to ONE page point.
+        """
+        i = int(np.argmin(np.abs(self.pm.y_grid - y)))
+        j = int(np.argmin(np.abs(self.pm.theta_grid - theta)))
+        rad = max(1, int(np.ceil(radius / (self.pm.y_grid[1] - self.pm.y_grid[0]))))
+        sub = self.lab[max(0, i - rad): i + rad + 1,
+                       max(0, j - rad): j + rad + 1]
+        return sorted(set(int(v) for v in np.unique(sub) if v > 0))
+
+    def labeller(self, arm: SrsArm, weld: WeldLine, scene: Scene, k: int):
+        return PageLabeller(
+            self.cfg, arm, weld, scene, self.signs, self.pm, self.lab, k,
+            search_cells=self.cfg.wall.label_search_cells,
+            motion_samples=self.cfg.wall.label_motion_samples,
+        )
+
+
 def run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
@@ -365,11 +422,11 @@ def run_proof(
     raise it.
     """
     rng = np.random.default_rng(cfg.planner.rng_seed)
-    labels, regions_by_page = {}, {}
-    for name, pm in pages.items():
-        lab, regs = label_regions(cfg, pm)
-        labels[name] = lab
-        regions_by_page[name] = regs
+    # `pages` may hold PageMaps (the grid) or page sources already. Wrapping
+    # here keeps every existing caller unchanged.
+    sources = {n: (p if hasattr(p, "regions_under") else GridPageSource(cfg, p))
+               for n, p in pages.items()}
+    regions_by_page = {n: s.regions() for n, s in sources.items()}
 
     # Seed the queue. By default: every region that touches the start of the
     # weld, on every page -- which proves the STRONGER claim that no posture
@@ -404,12 +461,11 @@ def run_proof(
         if (name, k) in visited:
             continue
         visited.add((name, k))
-        pm = pages[name]
-        lab = labels[name]
+        src = sources[name]
         reg = next(r for r in regions_by_page[name] if r.index == k)
         visited_list.append(asdict(reg))
 
-        pts = region_points(pm, lab, k)
+        pts = src.seed_points(k)
         if verbose:
             print(f"\n[stage4] region ({name}, {k}): {reg.n_cells} cells, "
                   f"y in [{reg.y_min:.3f}, {reg.y_max:.3f}]")
@@ -425,11 +481,10 @@ def run_proof(
             )
 
         seed_pts = thin(pts, n_train_max, rng)
-        rest = other_valid_points(pm, lab, k, regions_by_page[name],
-                                  cfg.wall.rest_mode)
+        rest = src.rest_points(k, cfg.wall.rest_mode)
         ring = virtual_boundary_samples(cfg, 80)
         rest_pts = np.vstack([thin(rest, n_train_max, rng), ring])
-        inv = thin(invalid_points(pm), n_invalid_max, rng)
+        inv = thin(src.obstacle_points(), n_invalid_max, rng)
         # Discharge the doors that fiber certification has proved impassable,
         # exactly as the demo's prove() does. A disc exists to stop the wall
         # routing through a door that MIGHT be passable (invariant 7); a door
@@ -438,15 +493,14 @@ def run_proof(
         # page that is 8 of 16 doors, and the detour is what drove gamma from
         # 1.3 to 334 while prove() -- which does discharge them -- settled at
         # 1.3 (findings 29).
-        discs, discharged = live_discs(cfg, arm, weld, scene, pm.signs,
+        discs, discharged = live_discs(cfg, arm, weld, scene, src.signs,
                                        sigma.get(name, []), verbose=False)
         if verbose and discharged:
             print(f"[stage5-fiber] {len(discharged)} disc(s) discharged on "
                   f"{name}: their doors are certified blocked")
 
         # Teach the wall where the doors are, so it cannot route through one.
-        tol_d = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
-                               pm.theta_grid[1] - pm.theta_grid[0]))
+        tol_d = src.tol()
         # Stage A (door_routing="wall_side"): a cheap UNVERIFIED wall trained
         # on the seed/rest split alone proposes which side each door is on,
         # replacing the grid connectivity test. It is only a proposer -- the
@@ -473,13 +527,9 @@ def run_proof(
         if len(r_extra):
             rest_pts = np.vstack([rest_pts, r_extra])
 
-        labeller = PageLabeller(
-            cfg, arm, weld, scene, pm.signs, pm, lab, k,
-            search_cells=cfg.wall.label_search_cells,
-            motion_samples=cfg.wall.label_motion_samples,
-        )
+        labeller = src.labeller(arm, weld, scene, k)
         poly, rep, wmodel, iters, rounds = find_inf_proof_region(
-            cfg, arm, weld, scene, pm.signs, seed_pts, rest_pts, inv, discs,
+            cfg, arm, weld, scene, src.signs, seed_pts, rest_pts, inv, discs,
             max_iters=alg4_iters, verbose=verbose, labeller=labeller,
         )
         if verbose:
@@ -494,8 +544,7 @@ def run_proof(
         )))
 
         # --- follow every door inside this region ---------------------------
-        tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
-                             pm.theta_grid[1] - pm.theta_grid[0]))
+        tol = src.tol()
         if (cfg.flood.door_routing == DOOR_ROUTING_WALL
                 and rep.ok and poly.closed and poly.loops):
             to_follow = [d for d in discs if point_in_loops(poly.loops, d.anchor)]
@@ -513,7 +562,7 @@ def run_proof(
             # (the default) doors are simply assumed open, which is the
             # conservative direction for an infeasibility proof.
             if cfg.sigma_policy.enable_fiber_certification:
-                fib = door_fiber_validity(cfg, arm, weld, scene, d, pm.signs)
+                fib = door_fiber_validity(cfg, arm, weld, scene, d, src.signs)
                 if not fib["ok"]:
                     if verbose:
                         print(f"[stage5-fiber] door at (y={d.y:.4f}, "
@@ -528,13 +577,8 @@ def run_proof(
             for other in d.pages:
                 if other == name or other not in pages:
                     continue
-                opm, olab = pages[other], labels[other]
-                i = int(np.argmin(np.abs(opm.y_grid - d.y)))
-                j = int(np.argmin(np.abs(opm.theta_grid - d.theta)))
                 # Conservative: enqueue every region within the disc footprint.
-                rad = max(1, int(np.ceil(d.radius / (opm.y_grid[1] - opm.y_grid[0]))))
-                sub = olab[max(0, i - rad): i + rad + 1, max(0, j - rad): j + rad + 1]
-                for kk in sorted(set(int(v) for v in np.unique(sub) if v > 0)):
+                for kk in sources[other].regions_under(d.y, d.theta, d.radius):
                     doors_followed.append({
                         "from": f"{name}/{k}", "to": f"{other}/{kk}",
                         "y": d.y, "theta": d.theta, "kind": d.kind,
