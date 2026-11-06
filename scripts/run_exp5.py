@@ -207,7 +207,7 @@ CX, CX_RESIDUAL = solve_fixture_x(0.0, CZ, R_ARC, TILT)
 Y_STAR = (0.0 - PHI0) / (PHI1 - PHI0)      # the far point sits at phi = 0
 
 
-def make(obstacles=(), res=61):
+def make(obstacles=(), res=61, routing="connectivity"):
     base = Config()
     cfg = dataclasses.replace(
         base,
@@ -219,6 +219,7 @@ def make(obstacles=(), res=61):
         scene=SceneParams(gap_open=True, obstacles=tuple(obstacles)),
         sigma_policy=dataclasses.replace(base.sigma_policy,
                                          enable_fiber_certification=True),
+        flood=dataclasses.replace(base.flood, door_routing=routing),
         wall=dataclasses.replace(base.wall, pd_mode="lipschitz"))
     return cfg, SrsArm(cfg.arm), WeldLine(cfg.weld), Scene(cfg.arm, cfg.scene)
 
@@ -900,6 +901,11 @@ def main():
     ap.add_argument("--iters", type=int, default=6)
     ap.add_argument("--out", default="out/exp5")
     ap.add_argument("--only", default="ab", help="'a', 'b' or 'ab'")
+    ap.add_argument("--door-routing", dest="door_routing",
+                    default="connectivity",
+                    choices=("connectivity", "wall_side"),
+                    help="who decides a door's side: grid connected "
+                         "components, or the verified wall itself")
     ap.add_argument("--no-gif", action="store_true")
     ap.add_argument("--style", default="color", choices=("color", "bw"),
                     help="page-map palette: 'color' separates the invalidity "
@@ -946,7 +952,8 @@ def main():
               "the proof is TWO-PAGE")
         print("-" * 78)
         t_e = t_s = time.perf_counter()
-        cfg, arm, weld, scene = make(OBS_5B, args.res)
+        cfg, arm, weld, scene = make(OBS_5B, args.res, args.door_routing)
+        print(f"[cfg] door routing = {cfg.flood.door_routing}")
         pms, sig, n_open, n_blk = pages_and_sigma(cfg, arm, weld, scene)
         t_s = lap("5b_pages_and_doors", t_s)
         seam = seam_report(pms, " 5b")
@@ -1155,7 +1162,8 @@ def main():
               "flip is free only at the fold")
         print("-" * 78)
         t_e = t_s = time.perf_counter()
-        cfg, arm, weld, scene = make(OBS_5A, args.res)
+        cfg, arm, weld, scene = make(OBS_5A, args.res, args.door_routing)
+        print(f"[cfg] door routing = {cfg.flood.door_routing}")
         pms, sig, n_open, n_blk = pages_and_sigma(cfg, arm, weld, scene)
         t_s = lap("5a_pages_and_doors", t_s)
         seam_report(pms, " 5a")

@@ -319,6 +319,97 @@ def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
             np.asarray(rest_extra, dtype=float).reshape(-1, 2))
 
 
+def sigma_disc_samples_by_side(discs: list, inside: list, n_ring: int = 12,
+                               n_ring_fold: int = 2) -> tuple:
+    """sigma_disc_samples with the side GIVEN instead of inferred from a region.
+
+    `inside[i]` is True when disc i is to be held on the SEED side. The ring
+    construction is identical to sigma_disc_samples -- including the thin ring
+    for fold discs and the "one decision per fold LINE" rule, because a fold
+    line is ONE posture and may not be split between the classes -- so the two
+    routings differ only in the split itself and their walls stay comparable.
+    """
+    seed_extra, rest_extra = [], []
+    groups: dict = {}
+    singles = []
+    for d, ins in zip(discs, inside):
+        if getattr(d, "fold", False) and d.exact_y is not None:
+            groups.setdefault(round(float(d.exact_y), 12), []).append((d, ins))
+        else:
+            singles.append((d, ins))
+
+    def _ring(c, rad, n):
+        pts = [c]
+        for a in np.linspace(0.0, 2.0 * np.pi, max(1, n), endpoint=False):
+            pts.append(c + rad * np.array([np.cos(a), np.sin(a)]))
+        return pts
+
+    for d, ins in singles:
+        c = np.array([d.y, d.theta])
+        (seed_extra if ins else rest_extra).extend(_ring(c, d.radius, n_ring))
+
+    # If ANY disc of the line is inside the wall, the whole line is reachable:
+    # the line is a single configuration of the arm (sigma_disc_samples has the
+    # argument in full), so it cannot be partly seed and partly rest.
+    for _y, grp in groups.items():
+        bucket = seed_extra if any(ins for _d, ins in grp) else rest_extra
+        for d, _ins in grp:
+            bucket.extend(_ring(np.array([d.y, d.theta]), d.radius, n_ring_fold))
+
+    return (np.asarray(seed_extra, dtype=float).reshape(-1, 2),
+            np.asarray(rest_extra, dtype=float).reshape(-1, 2))
+
+
+def point_in_loops(loops: list, pt, loop_kinds: list | None = None,
+                   theta_span: float | None = None) -> bool:
+    """Even-odd membership against the polytope's loops. Cylinder-correct.
+
+    Membership must be read off the POLYTOPE, not the SVM: only the polytope's
+    facets are checked against C_obs, so only it is the proof object (IJRR
+    4.3-4.4). The SVM zero set may carry extra components nobody verified.
+
+    The ray is cast in +y at fixed theta, NOT in theta at fixed y, and that
+    choice is what makes one test serve both loop kinds:
+
+      contractible  the loop bounds a disc; the ray leaves the page through
+                    y > y_max into the virtual free ring, so an odd count
+                    means the point is enclosed.
+      wrapping      the loop goes once round the theta circle, so at the query
+                    theta it has an odd number of branches above the point iff
+                    the point is below it. The two ends are the SAME page
+                    point (reconstruct_wall cuts exactly one period), so the
+                    loop must NOT be closed with a chord -- that chord would
+                    straddle every theta and corrupt the count.
+
+    Two wrapping loops bound a band in y, which is the natural separating
+    shape on a cylinder: inside the band gives 1 crossing, below gives 2,
+    above gives 0.
+    """
+    yq, tq0 = float(pt[0]), float(pt[1])
+    kinds = list(loop_kinds) if loop_kinds else ["contractible"] * len(loops)
+    inside = False
+    for loop, kind in zip(loops, kinds):
+        a = np.asarray(loop, dtype=float)
+        if len(a) < 3:
+            continue
+        tq = tq0
+        if kind == "wrapping":
+            lo = float(a[:, 1].min())
+            span = (float(theta_span) if theta_span
+                    else float(a[:, 1].max() - lo))
+            if span > 1e-12:
+                tq = lo + (tq0 - lo) % span
+        elif not np.allclose(a[0], a[-1]):
+            a = np.vstack([a, a[0]])
+        yA, tA, yB, tB = a[:-1, 0], a[:-1, 1], a[1:, 0], a[1:, 1]
+        straddles = (tA > tq) != (tB > tq)
+        dt = np.where(np.abs(tB - tA) < 1e-18, 1e-18, tB - tA)
+        yint = yA + (tq - tA) * (yB - yA) / dt
+        if int(np.count_nonzero(straddles & (yq < yint))) % 2 == 1:
+            inside = not inside
+    return inside
+
+
 def virtual_boundary_samples(cfg: Config, n_per_edge: int = 120) -> np.ndarray:
     """Virtual-VALID ring outside the page, sampled as training data.
 

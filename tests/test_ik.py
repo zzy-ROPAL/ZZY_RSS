@@ -493,6 +493,37 @@ def test_cylinder_wall_closes() -> tuple:
     return len(poly.loops), float(np.max(np.abs(a - b)))
 
 
+def test_point_in_loops_on_a_cylinder():
+    """Membership must be read with a +y ray, and wrapping loops not chorded.
+
+    reconstruct_wall returns one period of a wrapping loop, whose two ends are
+    the SAME page point but differ by 2*pi in theta. Closing it with a chord
+    would straddle every theta and corrupt the count; casting the ray in theta
+    instead of y would make a wrapping loop have no interior at all. Two
+    wrapping loops bound a BAND in y, which is the separating shape EXP 5
+    actually produces, so that case is checked explicitly.
+    """
+    from zzy_rss.wall import point_in_loops
+    T = np.linspace(-np.pi, np.pi, 50)
+    wrap = lambda y: np.column_stack([np.full_like(T, y), T])
+    sq = np.array([[0.4, -1.0], [0.6, -1.0], [0.6, 1.0], [0.4, 1.0], [0.4, -1.0]])
+    cases = [
+        ([wrap(0.5)], ["wrapping"], (0.3, 0.0), True),
+        ([wrap(0.5)], ["wrapping"], (0.7, 0.0), False),
+        ([wrap(0.5)], ["wrapping"], (0.3, 3.1415), True),     # at the seam
+        ([wrap(0.2), wrap(0.8)], ["wrapping"] * 2, (0.5, 0.0), True),
+        ([wrap(0.2), wrap(0.8)], ["wrapping"] * 2, (0.1, 0.0), False),
+        ([wrap(0.2), wrap(0.8)], ["wrapping"] * 2, (0.9, 0.0), False),
+        ([sq], ["contractible"], (0.5, 0.0), True),
+        ([sq], ["contractible"], (0.5, 1.5), False),
+        ([sq], ["contractible"], (0.7, 0.0), False),
+    ]
+    for loops, kinds, pt, want in cases:
+        got = point_in_loops(loops, pt, kinds, 2.0 * np.pi)
+        assert got == want, f"point_in_loops({pt}, {kinds}) = {got}, want {want}"
+    return len(cases)
+
+
 if __name__ == "__main__":
     n_ok, n_tried, worst_rt = test_round_trip()
     print(f"[ik] round-trip        : {n_ok}/{n_tried} branches solvable, "
@@ -525,4 +556,7 @@ if __name__ == "__main__":
     nloops, per = test_cylinder_wall_closes()
     print(f"[ik] cylinder wall      : decision exactly periodic ({per:.1e}), "
           f"{nloops} WRAPPING loops, closed")
+    ncase = test_point_in_loops_on_a_cylinder()
+    print(f"[ik] cylinder membership: +y-ray even-odd correct on wrapping and "
+          f"contractible loops ({ncase} cases)")
     print("[ik] ALL TESTS PASSED")

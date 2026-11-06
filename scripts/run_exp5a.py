@@ -119,7 +119,8 @@ def solve_radius(arm_p) -> tuple[float, float]:
     return rad, phi_far
 
 
-def make(res: int, anchors: int, guard_cells: float):
+def make(res: int, anchors: int, guard_cells: float,
+         routing: str = "connectivity"):
     base = Config()
     rad, phi_far = solve_radius(base.arm)
     a = np.radians(TILT)
@@ -140,6 +141,7 @@ def make(res: int, anchors: int, guard_cells: float):
         scene=SceneParams(gap_open=True, obstacles=(OBSTACLE,)),
         sigma_policy=dataclasses.replace(base.sigma_policy,
                                          enable_fiber_certification=True),
+        flood=dataclasses.replace(base.flood, door_routing=routing),
         wall=dataclasses.replace(base.wall, pd_mode="lipschitz",
                                  feedback_margin=guard_cells * diag,
                                  boundary_anchors=anchors))
@@ -159,6 +161,11 @@ def main() -> int:
     ap.add_argument("--style", choices=("color", "bw"), default="color")
     ap.add_argument("--no-gif", dest="no_gif", action="store_true")
     ap.add_argument("--out", default="out/exp5a")
+    ap.add_argument("--door-routing", dest="door_routing",
+                    default="connectivity",
+                    choices=("connectivity", "wall_side"),
+                    help="who decides a door's side: grid connected "
+                         "components, or the verified wall itself")
     args = ap.parse_args()
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -177,7 +184,9 @@ def main() -> int:
         timings[name] = round(now - t, 3)
         t = now
 
-    cfg, arm, weld, scene, rad = make(args.res, args.anchors, args.guard)
+    cfg, arm, weld, scene, rad = make(args.res, args.anchors, args.guard,
+                                      args.door_routing)
+    print(f"[cfg] door routing = {cfg.flood.door_routing}")
     y_star = SPAN_BEFORE / (SPAN_BEFORE + SPAN_AFTER)
     print(f"[5a] arc centre ({CX}, {CY}, {CZ})  R = {rad:.6f}  "
           f"tilt {TILT:.0f} azim {AZIM:.0f}   fold at y* = {y_star:.6f}")
