@@ -169,15 +169,63 @@ def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
     seed_extra, rest_extra = [], []
     for d in discs:
         c = np.array([d.y, d.theta])
-        pts = [c]
-        for a in np.linspace(0.0, 2.0 * np.pi, n_ring, endpoint=False):
-            pts.append(c + d.radius * np.array([np.cos(a), np.sin(a)]))
         near = (len(region_pts) > 0
                 and float(np.min(np.linalg.norm(region_pts - c, axis=1)))
                 <= max(tol, d.radius))
-        (seed_extra if near else rest_extra).extend(pts)
+        (seed_extra if near else rest_extra).extend(_disc_ring(d, n_ring))
     return (np.asarray(seed_extra, dtype=float).reshape(-1, 2),
             np.asarray(rest_extra, dtype=float).reshape(-1, 2))
+
+
+def _disc_ring(d, n_ring: int = 12) -> list:
+    """A disc's centre plus a ring of points on it, in page coordinates."""
+    c = np.array([d.y, d.theta])
+    pts = [c]
+    for a in np.linspace(0.0, 2.0 * np.pi, n_ring, endpoint=False):
+        pts.append(c + d.radius * np.array([np.cos(a), np.sin(a)]))
+    return pts
+
+
+def sigma_disc_samples_by_side(discs: list, inside: list,
+                               n_ring: int = 12) -> tuple:
+    """sigma_disc_samples with the side GIVEN instead of inferred from a region.
+
+    `inside[i]` is True when disc i is to be held on the SEED side. The ring
+    construction is identical to sigma_disc_samples, so the two routings
+    differ only in the split itself and their walls stay comparable.
+    """
+    seed_extra, rest_extra = [], []
+    for d, ins in zip(discs, inside):
+        (seed_extra if ins else rest_extra).extend(_disc_ring(d, n_ring))
+    return (np.asarray(seed_extra, dtype=float).reshape(-1, 2),
+            np.asarray(rest_extra, dtype=float).reshape(-1, 2))
+
+
+def point_in_loops(loops: list, pt) -> bool:
+    """Even-odd point-in-polygon against the polytope's closed loops.
+
+    Membership must be read off the POLYTOPE, not the SVM: only the polytope's
+    facets are checked against C_obs, so only it is the proof object (IJRR
+    4.3-4.4). The SVM zero set may carry extra components nobody verified.
+
+    Planar test. Exact while no loop touches the theta seam (invariant 5); a
+    genuinely cylindrical page would need the periodic version.
+    """
+    x, y = float(pt[0]), float(pt[1])
+    inside = False
+    for loop in loops:
+        a = np.asarray(loop, dtype=float)
+        if len(a) < 3:
+            continue
+        if not np.allclose(a[0], a[-1]):
+            a = np.vstack([a, a[0]])
+        x0, y0, x1, y1 = a[:-1, 0], a[:-1, 1], a[1:, 0], a[1:, 1]
+        straddles = (y0 > y) != (y1 > y)
+        dy = np.where(np.abs(y1 - y0) < 1e-18, 1e-18, y1 - y0)
+        xint = x0 + (y - y0) * (x1 - x0) / dy
+        if int(np.count_nonzero(straddles & (x < xint))) % 2 == 1:
+            inside = not inside
+    return inside
 
 
 def virtual_boundary_samples(cfg: Config, n_per_edge: int = 120) -> np.ndarray:

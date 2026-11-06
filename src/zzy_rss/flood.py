@@ -28,10 +28,13 @@ from .scene import Scene
 from .doors import door_fiber_validity
 from .wall import (
     LABEL_TOPOLOGICAL, PageLabeller, assign_label,
-    sigma_disc_samples,
+    point_in_loops, sigma_disc_samples, sigma_disc_samples_by_side,
     CheckReport, Polytope, check_polytope, reconstruct_wall, sample_wall,
     train_wall, virtual_boundary_samples,
 )
+
+DOOR_ROUTING_CONNECTIVITY = "connectivity"
+DOOR_ROUTING_WALL = "wall_side"
 from .weld import WeldLine
 
 
@@ -444,7 +447,27 @@ def run_proof(
         # Teach the wall where the doors are, so it cannot route through one.
         tol_d = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                                pm.theta_grid[1] - pm.theta_grid[0]))
-        s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d)
+        # Stage A (door_routing="wall_side"): a cheap UNVERIFIED wall trained
+        # on the seed/rest split alone proposes which side each door is on,
+        # replacing the grid connectivity test. It is only a proposer -- the
+        # verified polytope below is what the certificate rests on, and a
+        # wrong proposal cannot survive it (see FloodParams.door_routing).
+        side_A = None
+        if cfg.flood.door_routing == DOOR_ROUTING_WALL and discs:
+            wall_A = train_wall(cfg, seed_pts, rest_pts)
+            poly_A = reconstruct_wall(cfg, wall_A)
+            if poly_A.closed and poly_A.loops:
+                side_A = [point_in_loops(poly_A.loops, d.anchor) for d in discs]
+                if verbose:
+                    print(f"[stage4-side] stage A wall gamma={wall_A.gamma:.2f}: "
+                          f"{sum(side_A)}/{len(discs)} door(s) proposed INSIDE")
+            elif verbose:
+                print("[stage4-side] stage A wall not closed -> connectivity "
+                      "split for this region")
+        if side_A is not None:
+            s_extra, r_extra = sigma_disc_samples_by_side(discs, side_A)
+        else:
+            s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d)
         if len(s_extra):
             seed_pts = np.vstack([seed_pts, s_extra])
         if len(r_extra):
@@ -473,7 +496,17 @@ def run_proof(
         # --- follow every door inside this region ---------------------------
         tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                              pm.theta_grid[1] - pm.theta_grid[0]))
-        for d in discs_in_region(discs, pts, tol):
+        if (cfg.flood.door_routing == DOOR_ROUTING_WALL
+                and rep.ok and poly.closed and poly.loops):
+            to_follow = [d for d in discs if point_in_loops(poly.loops, d.anchor)]
+            by_conn = discs_in_region(discs, pts, tol)
+            if verbose:
+                print(f"[stage4-side] verified polytope follows {len(to_follow)}"
+                      f"/{len(discs)} door(s); connectivity would follow "
+                      f"{len(by_conn)}")
+        else:
+            to_follow = discs_in_region(discs, pts, tol)
+        for d in to_follow:
             # Door reachability is a FIBER property. The IK representative can
             # be invalid while other fiber points are valid, so never decide a
             # door from the representative alone. With fiber certification off
