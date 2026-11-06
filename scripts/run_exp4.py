@@ -182,7 +182,7 @@ def weld_for(x, z, half_y, tilt_deg):
 
 
 def make(res, feedback_margin, rest_mode="goal_only", label_mode="metric",
-         seed=None):
+         seed=None, door_routing="connectivity"):
     base = Config()
     obstacles = tuple(BoxObstacle(center=tuple(c), half_extent=tuple(h),
                                   label=lbl)
@@ -195,6 +195,7 @@ def make(res, feedback_margin, rest_mode="goal_only", label_mode="metric",
         scene=SceneParams(gap_open=True, obstacles=obstacles),
         sigma_policy=dataclasses.replace(base.sigma_policy,
                                          enable_fiber_certification=True),
+        flood=dataclasses.replace(base.flood, door_routing=door_routing),
         wall=dataclasses.replace(base.wall, pd_mode="lipschitz",
                                  rest_mode=rest_mode, label_mode=label_mode,
                                  feedback_margin=feedback_margin))
@@ -1012,6 +1013,14 @@ def main():
     ap.add_argument("--out", default="out/exp4")
     ap.add_argument("--iters", type=int, default=14)
     ap.add_argument("--n-train", type=int, default=450)
+    ap.add_argument("--door-routing", dest="door_routing",
+                    default="connectivity",
+                    choices=("connectivity", "wall_side"),
+                    help="who decides which side of the wall a door is on: "
+                         "grid connected components (the original), or the "
+                         "wall itself -- a cheap unverified Stage A wall "
+                         "proposes the split and the VERIFIED polytope "
+                         "confirms it (FloodParams.door_routing)")
     ap.add_argument("--feedback-margin", type=float, default=-1.0,
                     help="Algorithm 4 guard, in SCALED page units; -1 (the "
                          "default) means HALF A CELL DIAGONAL at the chosen "
@@ -1087,8 +1096,10 @@ def main():
 
     t = time.perf_counter()
     cfg, arm, weld, scene = make(args.res, args.feedback_margin,
-                                 seed=args.seed)
+                                 seed=args.seed,
+                                 door_routing=args.door_routing)
     print(f"[cfg] training subsample seed = {cfg.planner.rng_seed}")
+    print(f"[cfg] door routing = {args.door_routing}")
     pms, sig, n_open, n_blk = pages_and_sigma(cfg, arm, weld, scene)
     t = lap("pages_and_doors", t)
     seam = theta_seam_check(pms, " exp4")
