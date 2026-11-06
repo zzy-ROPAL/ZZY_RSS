@@ -323,6 +323,64 @@ def test_gamma_search_modes_agree() -> tuple[int, int, float]:
     assert n_cases >= 3, f"only {n_cases} cases exercised"
     return n_cases, 2, worst
 
+def test_unevaluable_doors_are_left_open() -> int:
+    """A door we cannot evaluate must be left OPEN, never discharged.
+
+    live_discs reads door_fiber_validity()["ok"] == False as "certified
+    blocked" and DISCHARGES the disc: the wall is then free to cross it and
+    run_proof stops following it. Both are the unsound direction, so the two
+    cases where the fiber cannot be evaluated at all -- no IK at the anchor,
+    and a disc whose vanishing set names no characterised fiber -- must both
+    come back ok=True (invariant 2). certify_fiber has always done this; this
+    test pins door_fiber_validity to agree with it.
+
+    Also checks the q4 fold branch, whose certification is EXACT (the whole
+    theta-line is one configuration) rather than sampled.
+    """
+    import dataclasses
+    from zzy_rss.doors import SigmaDisc, DOOR_FOLD, SIGMA_COORD, door_fiber_validity
+    from zzy_rss.flood import live_discs
+    from zzy_rss.scene import Scene
+
+    cfg = DEFAULT
+    arm, weld = SrsArm(cfg.arm), WeldLine(cfg.weld)
+    scene = Scene(cfg.arm, cfg.scene)
+    signs = (1, 1, -1)
+    cfg_cert = dataclasses.replace(cfg, sigma_policy=dataclasses.replace(
+        cfg.sigma_policy, enable_fiber_certification=True))
+
+    checked = 0
+    # (a) vanishing set names no characterised fiber -> must be left OPEN
+    for kind, vanish in ((SIGMA_COORD, frozenset()),
+                         ("kin", frozenset())):
+        d = SigmaDisc(kind=kind, y=0.5, theta=0.0, radius=0.03,
+                      radius_theta=0.2, vanishing=vanish)
+        fib = door_fiber_validity(cfg, arm, weld, scene, d, signs)
+        assert fib["ok"], f"{kind} disc was discharged: {fib['reason']}"
+        live, disch = live_discs(cfg_cert, arm, weld, scene, signs, [d])
+        assert len(live) == 1 and not disch, f"{kind} disc discharged by live_discs"
+        checked += 1
+
+    # (b) no IK at the anchor -> must be left OPEN
+    d = SigmaDisc(kind=DOOR_FOLD, y=0.5, theta=0.0, radius=0.03,
+                  radius_theta=0.2, vanishing=frozenset({1}),
+                  exact_y=0.5, exact_theta=0.0)
+    far = dataclasses.replace(cfg, weld=dataclasses.replace(
+        cfg.weld, p0=(9.0, -0.26, 0.46), p1=(9.0, 0.26, 0.46)))
+    fib = door_fiber_validity(far, arm, WeldLine(far.weld), scene, d, signs)
+    assert fib["ok"], f"out-of-reach anchor was discharged: {fib['reason']}"
+    checked += 1
+
+    # (c) a q4 fold whose single configuration IS valid -> open, and EXACT
+    fib = door_fiber_validity(cfg, arm, weld, scene, d, signs)
+    assert "EXACT" in fib["reason"], f"fold not handled exactly: {fib['reason']}"
+    if fib["ok"]:
+        assert fib["valid_fraction"] == 1.0
+        live, disch = live_discs(cfg_cert, arm, weld, scene, signs, [d])
+        assert len(live) == 1 and not disch, "valid fold disc was discharged"
+    checked += 1
+    return checked
+
 
 if __name__ == "__main__":
     n_ok, n_tried, worst_rt = test_round_trip()
@@ -346,4 +404,8 @@ if __name__ == "__main__":
     n_g, n_sc, worst_g = test_gamma_search_modes_agree()
     print(f"[ik] gamma search       : bisect == linear on {n_g} real page "
           f"regions over {n_sc} scenes (max gamma diff {worst_g:.1e})")
+
+    n_doors = test_unevaluable_doors_are_left_open()
+    print(f"[ik] door discharge     : {n_doors} unevaluable/fold door case(s) "
+          f"left OPEN, never discharged (invariant 2)")
     print("[ik] ALL TESTS PASSED")

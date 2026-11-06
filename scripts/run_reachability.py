@@ -108,7 +108,10 @@ def run(res: int, gap_open: bool, fiber: bool) -> dict:
           f"certified BLOCKED: {len(blocked)}   open: {len(open_doors)}")
     for o in open_doors[:4]:
         print(f"         OPEN  {o['page']}/{o['region']} at y={o['y']:.4f} "
-              f"th={o['theta']:+.4f}  ({o['valid_fraction'] * 100:.1f}% of fiber valid)")
+              f"th={o['theta']:+.4f}  ("
+              + (f"{o['valid_fraction'] * 100:.1f}% of fiber valid"
+                 if np.isfinite(o['valid_fraction']) else "fiber not evaluated")
+              + ")")
     for b in blocked[:4]:
         bl = ",".join(f"{k}:{v}" for k, v in list(b["blockers"].items())[:2])
         print(f"         BLOCKED {b['page']}/{b['region']} at y={b['y']:.4f} "
