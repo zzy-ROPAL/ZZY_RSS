@@ -41,6 +41,14 @@ def main():
     ap.add_argument("--n-train", dest="n_train", type=int, default=450)
     ap.add_argument("--door-routing", dest="door_routing",
                     default="wall_side", choices=("connectivity", "wall_side"))
+    ap.add_argument("--feedback-margin", dest="feedback_margin", type=float,
+                    default=0.0,
+                    help="Algorithm 4 / Algorithm 2 feed-back guard (findings "
+                         "32). The grid pipeline keeps IJRR's 0; the sampled "
+                         "one needs 0.019. A fed-back point closer than this "
+                         "to the class it was NOT given is dropped instead of "
+                         "being allowed to make the training data "
+                         "inseparable.")
     ap.add_argument("--out", default="out/exp4")
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
@@ -60,12 +68,14 @@ def main():
                                          enable_fiber_certification=True),
         flood=dataclasses.replace(base.flood, door_routing=args.door_routing),
         wall=dataclasses.replace(base.wall, pd_mode="lipschitz",
-                                 label_mode="metric", rest_mode="goal_only"))
+                                 label_mode="metric", rest_mode="goal_only",
+                                 feedback_margin=args.feedback_margin))
     arm, weld, scene = SrsArm(cfg.arm), WeldLine(cfg.weld), Scene(cfg.arm, cfg.scene)
     print(f"=== EXP 4 : page {START_PAGE} is sealed, the q6 door leads to "
           f"{PARTNER_PAGE} where the goal IS reachable ===", flush=True)
     print(f"[cfg] res={args.res} iters={args.iters} n_train={args.n_train} "
-          f"door_routing={args.door_routing}", flush=True)
+          f"door_routing={args.door_routing} "
+          f"feedback_margin={args.feedback_margin}", flush=True)
 
     t_all = t = time.perf_counter()
     built = build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
