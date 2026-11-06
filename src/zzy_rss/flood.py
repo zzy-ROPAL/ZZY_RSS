@@ -405,6 +405,151 @@ class GridPageSource:
         )
 
 
+class RoadmapPageSource:
+    """run_proof's view of ONE page, backed by a PRM instead of the grid.
+
+    Answers the same five questions as GridPageSource. Four are exact: the
+    training classes are roadmap vertices, which is what IJRR uses, and the
+    obstacle points are the samples the planner rejected, which is IJRR's
+    P_obs. The wall itself is unaffected -- it never sees a grid either way,
+    only point sets, and every facet is re-checked against C_obs.
+
+    `regions_under` is the one that is NOT exact, and the difference matters.
+    A grid evaluated every cell, so "no valid cell near this door" is a fact
+    about the page. A roadmap only knows where it happened to sample, so "no
+    vertex near this door" could equally mean "I did not look" -- and a region
+    that is never enqueued is never examined again, by anything. Seeding the
+    roadmap at every exact door anchor (doors.door_anchor_vertices) is what
+    makes the answer meaningful rather than accidental; it is a mitigation,
+    not a proof. Certifying it needs interval arithmetic or a Lipschitz bound
+    on the page, which is the same open problem as certifying door ABSENCE.
+
+    Note the errors in the other four are self-correcting. A roadmap
+    UNDER-estimates connectivity, so a split region, or a missed link to the
+    goal, asks the wall to separate points that valid space actually joins --
+    some facet then lands in the valid region and Algorithm 3 rejects it. The
+    result is INCONCLUSIVE, never a false proof.
+    """
+
+    def __init__(self, cfg: Config, name: str, signs: tuple,
+                 verts: np.ndarray, component: np.ndarray,
+                 obstacle: np.ndarray, edge_anchors: np.ndarray | None = None,
+                 connects=None):
+        self.cfg, self.name, self.signs = cfg, name, tuple(signs)
+        self.verts = np.asarray(verts, dtype=float).reshape(-1, 2)
+        self.obs = np.asarray(obstacle, dtype=float).reshape(-1, 2)
+        # 1-based, so index 0 stays free for "nothing here" as on the grid.
+        self.comp = np.asarray(component, dtype=int).reshape(-1) + 1
+        self._scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+        fp = cfg.flood
+        self._regions = []
+        for k in sorted(set(int(v) for v in self.comp)):
+            ys = self.verts[self.comp == k][:, 0]
+            self._regions.append(Region(
+                page=name, index=k, n_cells=int((self.comp == k).sum()),
+                y_min=float(ys.min()), y_max=float(ys.max()),
+                reaches_start=bool(ys.min() <= fp.start_y + fp.start_y_tol),
+                reaches_goal=bool(ys.max() >= fp.goal_y - fp.goal_y_tol)))
+
+        # IJRR Fig. 5's virtual ring says "beyond the page is the other
+        # class"; it never says where the seed region STOPS. A random roadmap
+        # practically never samples y = 0, so without this the wall has no
+        # left edge to close against and cuts into the valid start region --
+        # every failed facet of the sampled EXP 2 wall sat at y ~ 0
+        # (findings 32). The exact edge configurations supply the missing
+        # fact. They belong in the TRAINING data ONLY: putting them in the
+        # ROADMAP puts graph vertices on the virtual boundary band itself and
+        # the wall can then no longer close against it (invariant 18, measured
+        # 111/122 closed -> 132/152 OPEN). So they are classed here and never
+        # enter self.comp or self._regions.
+        # An anchor joins the class it is CONNECTED to, never the class it is
+        # merely NEAREST to. Nearest-vertex labelling can put an anchor on the
+        # far side of a thin obstacle and then the training data contradicts
+        # itself -- measured here as accuracy 0.9956 < 1 with gamma pinned at
+        # the cap, i.e. a wall that does not separate its own data. Connecting
+        # by local planning is the same addToTraining rule Algorithms 2 and 4
+        # use, so an anchor cannot contradict the roadmap's own components.
+        # Anchors that connect to nothing are DROPPED rather than guessed at.
+        raw = (np.asarray(edge_anchors, dtype=float).reshape(-1, 2)
+               if edge_anchors is not None else np.zeros((0, 2)))
+        keep, lab = [], []
+        if len(raw) and len(self.verts):
+            for a in raw:
+                order = np.argsort(np.linalg.norm(
+                    (self.verts - a) * self._scale, axis=1))
+                for j in order[:self.cfg.planner.k_neighbors]:
+                    if connects is None or connects(a, self.verts[j]):
+                        keep.append(a); lab.append(int(self.comp[j])); break
+        self.anchors = (np.asarray(keep, dtype=float).reshape(-1, 2)
+                        if keep else np.zeros((0, 2)))
+        self.anchor_comp = np.asarray(lab, dtype=int)
+        self.n_anchors_dropped = len(raw) - len(self.anchors)
+
+    def regions(self) -> list:
+        return self._regions
+
+    def seed_points(self, k: int) -> np.ndarray:
+        out = [self.verts[self.comp == k]]
+        if len(self.anchors):
+            out.append(self.anchors[self.anchor_comp == k])
+        return np.vstack(out)
+
+    def rest_points(self, k: int, mode: str) -> np.ndarray:
+        if mode == "goal_only":
+            goal_k = [r.index for r in self._regions if r.reaches_goal]
+            if goal_k:
+                m = np.isin(self.comp, goal_k) & (self.comp != k)
+                if m.any():
+                    out = [self.verts[m]]
+                    if len(self.anchors):
+                        am = np.isin(self.anchor_comp, goal_k) & \
+                             (self.anchor_comp != k)
+                        out.append(self.anchors[am])
+                    return np.vstack(out)
+        out = [self.verts[self.comp != k]]
+        if len(self.anchors):
+            out.append(self.anchors[self.anchor_comp != k])
+        return np.vstack(out)
+
+    def obstacle_points(self) -> np.ndarray:
+        return self.obs
+
+    def tol(self) -> float:
+        """The nominal cell diagonal of cfg.pagemap.
+
+        A roadmap has no cells, but this is only a LENGTH SCALE -- how close a
+        disc has to be to count as belonging here -- and the page's nominal
+        resolution is the same scale the grid backend uses, so the two agree.
+        """
+        pm = self.cfg.pagemap
+        return float(np.hypot((pm.y_max - pm.y_min) / max(pm.n_y - 1, 1),
+                              (pm.theta_max - pm.theta_min) / max(pm.n_theta - 1, 1)))
+
+    def regions_under(self, y: float, theta: float, radius: float) -> list:
+        """Components with a vertex inside the disc's footprint.
+
+        Door anchors are analytic and seeded into the roadmap before any of
+        this runs, so a door that belongs to a component has a vertex on it.
+        What this cannot do is tell an EMPTY neighbourhood from an unsampled
+        one -- see the class docstring.
+        """
+        if not len(self.verts):
+            return []
+        c = np.array([y, theta])
+        d = np.linalg.norm((self.verts - c) * self._scale, axis=1)
+        near = d <= max(radius, self.tol())
+        return sorted(set(int(v) for v in self.comp[near]))
+
+    def labeller(self, arm: SrsArm, weld: WeldLine, scene: Scene, k: int):
+        """Algorithm 4's feed-back labeller.
+
+        None is correct for the default metric mode, which is the only mode
+        find_inf_proof_region consults it in; the topological mode needs a
+        roadmap-backed labeller, which run_sampled.py already has.
+        """
+        return None
+
+
 def run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
