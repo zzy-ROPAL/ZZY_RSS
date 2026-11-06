@@ -520,9 +520,11 @@ def run_proof(
                               f"th={d.theta:+.4f}) on {name}: {fib['reason']}")
                     continue
                 if verbose:
-                    print(f"[stage5-fiber] door at (y={d.y:.4f}, th={d.theta:+.4f}) "
-                          f"on {name}: OPEN ({fib['valid_fraction'] * 100:.1f}% of "
-                          f"fiber valid)")
+                    vf = fib["valid_fraction"]
+                    how = (f"{vf * 100:.1f}% of fiber valid"
+                           if np.isfinite(vf) else fib["reason"])
+                    print(f"[stage5-fiber] door at (y={d.y:.4f}, "
+                          f"th={d.theta:+.4f}) on {name}: OPEN ({how})")
             for other in d.pages:
                 if other == name or other not in pages:
                     continue

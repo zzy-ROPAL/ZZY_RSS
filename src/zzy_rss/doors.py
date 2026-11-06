@@ -580,6 +580,14 @@ def certify_fiber(
         free_pair = (0, 2)       # q1 / q3 counter-rotation
     elif 2 in disc.vanishing:
         free_pair = (4, 6)       # q5 / q7 counter-rotation
+    elif 1 in disc.vanishing:
+        # q4 fold: one configuration, so this is exact. See door_fiber_validity.
+        ok = bool(arm.within_limits(q0)
+                  and not scene.check(arm.frames(q0)).in_collision)
+        return FiberReport(
+            disc.kind, disc.y, disc.theta, ok, 0.0 if ok else 1.0,
+            ("q4 fold: the theta-line is ONE configuration, so this is EXACT "
+             "-- " + ("traversable" if ok else "door CERTIFIED BLOCKED")), 1)
     else:
         return FiberReport(disc.kind, disc.y, disc.theta, True, 0.0,
                            "fiber not characterised for this disc kind; left open", 0)
@@ -638,16 +646,40 @@ def door_fiber_validity(
     pos, rot = weld.pose(anchor_y)
     res = arm.ik_branch(pos, rot, anchor_theta, page)
     if not res.ok:
-        return {"ok": False, "reason": "no IK at door", "valid_fraction": 0.0,
-                "intervals": []}
+        # Invariant 2: a door we cannot EVALUATE must be left OPEN. live_discs
+        # reads ok=False as "certified blocked" and DISCHARGES the disc, which
+        # lets the wall cross it, and run_proof then skips the door -- both are
+        # the unsound direction. certify_fiber already returns traversable=True
+        # here ("no IK at door; left open"); the two must agree, and live_discs
+        # calls THIS one.
+        return {"ok": True, "reason": "no IK at door; left OPEN (invariant 2)",
+                "valid_fraction": float("nan"), "intervals": []}
 
     if 0 in disc.vanishing:
         pair = (0, 2)
     elif 2 in disc.vanishing:
         pair = (4, 6)
+    elif 1 in disc.vanishing:
+        # q4 fold. The elbow circle collapses, so the WHOLE theta-line at this
+        # y degenerates to ONE configuration (find_fold_doors). There is no 1-D
+        # fiber to sample: certification is EXACT -- one limit check and one
+        # collision check on that single configuration. This is what makes fold
+        # certification exact in exp5_spec, and why todo 5 (the fiber is a
+        # zero-measure set, so sampling is evidence rather than proof) does not
+        # apply to folds.
+        ok = bool(arm.within_limits(res.q)
+                  and not scene.check(arm.frames(res.q)).in_collision)
+        return {"ok": ok,
+                "reason": ("q4 fold: the theta-line is ONE configuration, so "
+                           "this is EXACT -- "
+                           + ("traversable" if ok else "blocked")),
+                "valid_fraction": 1.0 if ok else 0.0,
+                "intervals": [(-np.pi, np.pi)] if ok else []}
     else:
-        return {"ok": False, "reason": "fiber not characterised", "valid_fraction": 0.0,
-                "intervals": []}
+        # Not characterised is NOT the same as blocked. See the res.ok branch.
+        return {"ok": True,
+                "reason": "fiber not characterised; left OPEN (invariant 2)",
+                "valid_fraction": float("nan"), "intervals": []}
 
     i, k = pair
     q0 = res.q
