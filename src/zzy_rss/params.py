@@ -443,6 +443,17 @@ class FloodParams:
     # Anchor the per-page labels on the seed region (flood) or on the goal
     # component across all pages (the strictly IJRR-shaped variant).
     anchor: str = "seed"   # "seed" | "goal"
+    # Which source decides a door's side -- its TRAINING class and whether the
+    # flood follows it.
+    #   "connectivity" -- grid connected components (discs_in_region). Fast,
+    #                     but nothing verifies the labelling.
+    #   "wall_side"    -- a cheap unverified Stage A wall PROPOSES the split;
+    #                     the VERIFIED polytope confirms it. A wrong proposal
+    #                     cannot produce a wrong proof: asking a wall to
+    #                     exclude a door joined to the seed by valid space
+    #                     forces a facet into the valid region, which
+    #                     Algorithm 3 rejects.
+    door_routing: str = "connectivity"   # "connectivity" | "wall_side"
 
 
 # --------------------------------------------------------------------------
