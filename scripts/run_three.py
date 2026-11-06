@@ -147,6 +147,10 @@ OBS_OPEN = (BoxObstacle(center=(0.20, 0.10, 0.34),
 # Algorithm 4 feed-back labelling; set from --label-mode in main().
 LABEL_MODE = "metric"
 REST_MODE = "goal_only"
+# Which source decides a door's side: grid connected components, or the wall
+# itself (Stage A proposes, the verified polytope confirms). See
+# FloodParams.door_routing. Set from --door-routing in main().
+DOOR_ROUTING = "connectivity"
 CMAP = ListedColormap(["#2a9d8f", "#e9e9e9", "#e9c46a", "#e76f51"])
 # --bw: print-ready pages. WHITE = valid posture, BLACK = every invalid cell
 # (collision with an obstacle, joint limit, or no IK). The overlays then have
@@ -181,6 +185,7 @@ def make(tilt, obstacles, res, weld_kw=None):
         scene=SceneParams(gap_open=True, obstacles=tuple(obstacles or ())),
         sigma_policy=dataclasses.replace(base.sigma_policy,
                                          enable_fiber_certification=True),
+        flood=dataclasses.replace(base.flood, door_routing=DOOR_ROUTING),
         wall=dataclasses.replace(base.wall, pd_mode="lipschitz",
                                  label_mode=LABEL_MODE,
                                  rest_mode=REST_MODE))
@@ -738,6 +743,12 @@ def main():
                     help="which valid cells the wall must keep outside: "
                          "'goal_only' = IJRR's start-vs-goal split, "
                          "'all_valid' = every other component too")
+    ap.add_argument("--door-routing", dest="door_routing",
+                    default="connectivity",
+                    choices=("connectivity", "wall_side"),
+                    help="who decides a door's side: grid connectivity (the "
+                         "original) or the wall itself (Stage A proposes, the "
+                         "verified polytope confirms)")
     ap.add_argument("--label-mode", default="metric",
                     choices=("metric", "topological"),
                     help="how Algorithm 4 classes a fed-back facet centre: "
@@ -746,11 +757,13 @@ def main():
     args = ap.parse_args()
     out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     want = args.only
-    global LABEL_MODE, REST_MODE, BW
+    global LABEL_MODE, REST_MODE, BW, DOOR_ROUTING
     LABEL_MODE = args.label_mode
     REST_MODE = args.rest_mode
+    DOOR_ROUTING = args.door_routing
     BW = bool(args.bw)
     print(f"[cfg] rest class: {REST_MODE}")
+    print(f"[cfg] door routing: {DOOR_ROUTING}")
     if BW:
         print("[cfg] pages rendered BLACK/WHITE: white = valid, "
               "black = invalid (obstacle, joint limit, no IK)")
