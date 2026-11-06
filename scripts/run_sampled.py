@@ -55,7 +55,8 @@ from scipy.sparse import coo_matrix  # noqa: E402
 from scipy.sparse.csgraph import connected_components  # noqa: E402
 from scipy.spatial import cKDTree  # noqa: E402
 
-from zzy_rss.doors import build_sigma, door_fiber_validity  # noqa: E402
+from zzy_rss.doors import (build_sigma, door_anchor_vertices,  # noqa: E402
+                           door_fiber_validity)
 from zzy_rss.flood import find_inf_proof_region, live_discs  # noqa: E402
 from zzy_rss.pagemap import build_page_map  # noqa: E402
 from zzy_rss.prm import classify  # noqa: E402
@@ -351,10 +352,49 @@ def run_case(tag, tilt, obstacles, args, out):
     cfg, arm, weld, scene = rt.make(tilt, obstacles, args.res)
     rng = np.random.default_rng(1)
 
-    data, pms = {}, {}
+    # ---- pass 1: page backgrounds, then Sigma -----------------------------
+    # Sigma must exist BEFORE the roadmaps, because the exact door anchors are
+    # seeded as roadmap vertices (findings: door-anchor seeding). The Sigma
+    # detectors still read a grid for Sigma_coord / Sigma_kin; the analytic
+    # door finders do not.
+    data, pms, shades = {}, {}, {}
+    for name in PAGES:
+        signs = tuple(1 if c == "+" else -1 for c in name)
+        pms[name] = page_background(cfg, arm, weld, scene, signs, args.res)
+        # a finer grid for the picture only: at 61 cells imshow paints a
+        # whole 0.0167 x 0.105 block one colour, which swallows valid
+        # samples sitting in thin slivers and makes start/goal look as if
+        # they are inside an obstacle.
+        shades[name] = build_page_map(
+            dataclasses.replace(
+                cfg, pagemap=dataclasses.replace(
+                    cfg.pagemap, n_y=args.fig_res, n_theta=args.fig_res)),
+            arm, weld, scene, signs, with_kin=False)
+    sig = build_sigma(cfg, arm, weld, pms, verbose=False)
+
+    # ---- pass 2: roadmaps, seeded at every exact door anchor --------------
     for name in PAGES:
         signs = tuple(1 if c == "+" else -1 for c in name)
         verts, obs = sample_page(cfg, arm, weld, scene, signs, args.samples, rng)
+        # A uniform roadmap only knows where it happened to look, so "no vertex
+        # near this door" cannot be told apart from "no region near this door".
+        # Doors are analytic and known before sampling, so seed them: the
+        # partner-region lookup is the one flood decision with no downstream
+        # verifier. Anchors whose representative is INVALID are reported, not
+        # silently dropped -- that is invariant 3 territory (the fiber may hold
+        # valid points the representative misses).
+        n_anc = n_anc_bad = 0
+        if args.door_seeds:
+            anc = door_anchor_vertices(cfg, sig, name)
+            keep = []
+            for a in anc:
+                if classify(cfg, arm, weld, scene, float(a[0]), float(a[1]),
+                            signs)[0]:
+                    keep.append(a); n_anc += 1
+                else:
+                    n_anc_bad += 1
+            if keep:
+                verts = np.vstack([np.asarray(keep, dtype=float), verts])
         # Exact y=0 / y=1 configurations are computed for the FIGURE only.
         # Inserting them as roadmap vertices put training points exactly on
         # the page boundary, where the IJRR Fig. 5 virtual band operates, and
@@ -365,26 +405,16 @@ def run_case(tag, tilt, obstacles, args, out):
         lab, ncomp, edges = build_roadmap(cfg, arm, weld, scene, signs, verts,
                                           k=args.k)
         ing = goal_classes(verts, lab)
-        pm = page_background(cfg, arm, weld, scene, signs, args.res)
-        pms[name] = pm
-        # a finer grid for the picture only: at 61 cells imshow paints a
-        # whole 0.0167 x 0.105 block one colour, which swallows valid
-        # samples sitting in thin slivers and makes start/goal look as if
-        # they are inside an obstacle.
-        shade = build_page_map(
-            dataclasses.replace(
-                cfg, pagemap=dataclasses.replace(
-                    cfg.pagemap, n_y=args.fig_res, n_theta=args.fig_res)),
-            arm, weld, scene, signs, with_kin=False)
         data[name] = dict(verts=verts, obs=obs, lab=lab, ncomp=ncomp,
-                          in_goal=ing, pm=pm, shade=shade, start_theta=0.0,
-                          start_xy=None, edges=edges,
-                          goal_pts=ends["goal"], bad=[])
+                          in_goal=ing, pm=pms[name], shade=shades[name],
+                          start_theta=0.0, start_xy=None, edges=edges,
+                          goal_pts=ends["goal"], bad=[],
+                          n_door_seeds=n_anc, n_door_seeds_invalid=n_anc_bad)
         print(f"  page {name}: {len(verts)} valid / {args.samples} sampled, "
-              f"{ncomp} component(s), {int(ing.sum())} reach the goal",
+              f"{ncomp} component(s), {int(ing.sum())} reach the goal"
+              + (f", door seeds {n_anc} valid / {n_anc_bad} invalid"
+                 if args.door_seeds else ""),
               flush=True)
-
-    sig = build_sigma(cfg, arm, weld, pms, verbose=False)
     n_open = n_blk = 0
     for name in PAGES:
         sg = tuple(1 if c == "+" else -1 for c in name)
@@ -570,6 +600,10 @@ def main():
     # and keeps the default of 0 (IJRR as written).
     ap.add_argument("--feedback-margin", dest="feedback_margin", type=float,
                     default=0.019)
+    ap.add_argument("--no-door-seeds", dest="door_seeds",
+                    action="store_false", default=True,
+                    help="do not seed the roadmap at the exact door anchors "
+                         "(control for the seeding experiment)")
     ap.add_argument("--only", choices=("all", "exp1", "exp2"), default="all")
     ap.add_argument("--out", default="out/sampled")
     args = ap.parse_args()

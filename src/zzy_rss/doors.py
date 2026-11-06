@@ -411,6 +411,60 @@ def _merge_discs(discs: list[SigmaDisc], radius: float) -> list[SigmaDisc]:
     return out
 
 
+def door_anchor_vertices(cfg: Config, sigma: dict, page: str,
+                         n_ring: int = 8) -> np.ndarray:
+    """Every EXACT door anchor that touches `page`, from any page's disc list.
+
+    A roadmap can only ever report what it happened to sample, so "no vertex
+    near this door" is indistinguishable from "no region near this door" --
+    the first means `I do not know`, the second means `nothing is there`. The
+    flood's partner-region lookup is the one decision with no downstream
+    verifier (a region never enqueued is never re-examined), so that ambiguity
+    is the place a sampled proof can go wrong silently.
+
+    Doors are known analytically in Stage 2, BEFORE any sampling, so seeding
+    the roadmap at them costs nothing and turns `I do not know` into
+    `I looked`. This is the same move exact_endpoints already makes for the
+    start and goal: IJRR names those as roadmap vertices rather than hoping a
+    sample lands on them.
+
+    The anchor ALONE is not enough. The IK representative at a door can be
+    invalid while the fiber over it holds valid points (invariant 3): measured
+    on EXP 3, both anchors are invalid on all four s2 = -1 pages, because the
+    s2 mirror lands at |q1| = 180 deg, 1.15 deg outside the limit (findings
+    30). Seeding only the anchor would therefore add NO vertex on exactly the
+    partner pages the flood needs to reach.
+
+    So each anchor also contributes an elliptical ring at the disc radius --
+    the sampled counterpart of the grid lookup's footprint window. The robot
+    arrives AT the door, so the component it lands in is the one holding
+    points arbitrarily close to the anchor; the ring finds that component even
+    when the anchor itself does not classify valid.
+    """
+    pm = cfg.pagemap
+    seen, out = set(), []
+
+    def add(y, th):
+        if not (pm.y_min <= y <= pm.y_max
+                and pm.theta_min <= th <= pm.theta_max):
+            return
+        key = (round(float(y), 9), round(float(th), 9))
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((float(y), float(th)))
+
+    for discs in sigma.values():
+        for d in discs:
+            if page not in d.pages:
+                continue
+            y, th = d.anchor
+            add(y, th)
+            for a in np.linspace(0.0, 2.0 * np.pi, n_ring, endpoint=False):
+                add(y + d.radius * np.cos(a), th + d.r_theta * np.sin(a))
+    return np.asarray(out, dtype=float).reshape(-1, 2)
+
+
 def assign_pages(disc: SigmaDisc, page: tuple[int, int, int]) -> tuple:
     """Conservative connection rule.
 

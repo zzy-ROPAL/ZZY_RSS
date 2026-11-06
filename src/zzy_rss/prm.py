@@ -79,8 +79,14 @@ def classify(
 
 def build_prm(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, verbose: bool = True,
+    sigma: dict | None = None,
 ) -> dict:
-    """Sample Y+ uniformly per page, connect within pages, label components."""
+    """Sample Y+ uniformly per page, connect within pages, label components.
+
+    `sigma` (Stage 2 output) seeds the exact door anchors touching each page as
+    roadmap samples, so a door is never missed merely because no uniform sample
+    landed near it -- see doors.door_anchor_vertices.
+    """
     pp = cfg.planner
     pm = cfg.pagemap
     rng = np.random.default_rng(pp.rng_seed)
@@ -90,6 +96,12 @@ def build_prm(
         name = page_name(signs)
         ys = rng.uniform(pm.y_min, pm.y_max, pp.n_samples)
         ths = rng.uniform(pm.theta_min, pm.theta_max, pp.n_samples)
+        if sigma:
+            from .doors import door_anchor_vertices
+            anc = door_anchor_vertices(cfg, sigma, name)
+            if len(anc):
+                ys = np.concatenate([anc[:, 0], ys])
+                ths = np.concatenate([anc[:, 1], ths])
 
         valid_pts, invalid_pts, invalid_tags = [], [], []
         for y, th in zip(ys, ths):
