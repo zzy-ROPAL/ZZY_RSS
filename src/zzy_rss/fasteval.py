@@ -55,15 +55,6 @@ class Precomputed:
     """Everything about a weld placement that no obstacle can change."""
 
     def __init__(self, cfg: Config):
-        from .pagemap import geometry_is_page_dependent
-        if geometry_is_page_dependent(cfg):
-            raise ValueError(
-                "fasteval caches ONE set of capsule sample points per cell, "
-                "which is only valid when no capsule moves between pages. "
-                "use_off_axis_upper_arm / use_off_axis_elbow move the hubs by "
-                "210 mm / 180 mm between pages, so the cache would be wrong. "
-                "Use build_all_pages_shared (it falls back to per-page "
-                "collision) or build_all_pages(shared=False).")
         self.cfg = cfg
         self.arm = SrsArm(cfg.arm)
         self.weld = WeldLine(cfg.weld)

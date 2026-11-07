@@ -250,33 +250,6 @@ def q_for_branch(q_ref: np.ndarray, signs_ref: tuple, signs: tuple) -> np.ndarra
     return q
 
 
-def geometry_is_page_dependent(cfg: Config) -> bool:
-    """Does any collision capsule MOVE when a sign is flipped?
-
-    The mirrors leave the arm's SKELETON alone -- shoulder, elbow, wrist and
-    tool are the same points on all eight pages, which is what makes one
-    collision check serve all of them. Measured: the upper-arm, forearm and
-    tool capsules move 0.0 mm across the eight pages.
-
-    An OFF-AXIS capsule is different. The hubs hang off frames 2 and 3, which
-    DO rotate between pages, so flipping s2 moves the upper-arm hub by 210 mm
-    and flipping s4 moves the elbow hub by 180 mm. With either enabled,
-    collision is no longer a property of the cell alone and the shared build
-    must check each page separately.
-
-    This is the general statement, and it is worth being precise about: page
-    independence of collision is a property of the COLLISION MODEL, not of the
-    kinematics. It holds for geometry that is rotationally symmetric about each
-    link's own joint-to-joint axis -- capsules on the S-E-W-tool skeleton. It
-    will NOT hold for real STL meshes (todo 4), which are not symmetric about
-    those axes. The IK sharing survives either way, since the mirror
-    identities are exact; only the collision sharing is lost.
-    """
-    p = cfg.arm
-    return bool(getattr(p, "use_off_axis_upper_arm", False)
-                or getattr(p, "use_off_axis_elbow", False))
-
-
 def build_all_pages_shared(
     cfg: Config,
     arm: SrsArm,
@@ -310,13 +283,6 @@ def build_all_pages_shared(
     shape = (pm_p.n_y, pm_p.n_theta)
 
     ref = SIGN_BRANCHES[0]
-    # One collision check per cell is only valid when no capsule moves between
-    # pages. With off-axis geometry it does, so fall back to one check per page
-    # -- still sharing the IK, which the mirror identities make exact.
-    page_dep = geometry_is_page_dependent(cfg)
-    if page_dep and verbose:
-        print("[stage1] off-axis geometry is on: collision is page-DEPENDENT, "
-              "checking each page separately (the IK is still shared)")
     fields = {}
     for signs in SIGN_BRANCHES:
         fields[signs] = dict(
@@ -340,9 +306,8 @@ def build_all_pages_shared(
             if not res.ok:
                 continue    # no-IK is page-independent; tags already say so
 
-            # One posture -> one collision report, shared by all eight pages
-            # (only when no capsule moves between pages; see page_dep above).
-            report = None if page_dep else scene.check(arm.frames(res.q))
+            # One posture -> one collision report, shared by all eight pages.
+            report = scene.check(arm.frames(res.q))
 
             for signs in SIGN_BRANCHES:
                 q = res.q if signs == ref else q_for_branch(res.q, ref, signs)
@@ -355,9 +320,8 @@ def build_all_pages_shared(
                 if margin < 0.0:
                     f["tag"][i, j] = INVALID_JOINT_LIMIT
                     continue
-                rep = report if report is not None else scene.check(arm.frames(q))
-                f["clearance"][i, j] = rep.clearance
-                if rep.in_collision:
+                f["clearance"][i, j] = report.clearance
+                if report.in_collision:
                     f["tag"][i, j] = INVALID_COLLISION
                     continue
                 f["tag"][i, j] = VALID
