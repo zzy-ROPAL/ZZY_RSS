@@ -310,10 +310,15 @@ def find_inf_proof_region(
         alg2_total += rounds
 
         if not tc_ok:
-            poly = reconstruct_wall(cfg, wall)
+            poly = reconstruct_wall(cfg, wall, wall_pts=wall_pts,
+                                    seed_pts=seed_pts, rest_pts=rest_pts)
             tc_ok = poly.closed and bool(poly.loops)
         if not tc_ok:
-            poly = reconstruct_wall(cfg, wall, grid_res=361)
+            # Retry finer: a denser net for the TDC (half the spacing), a finer
+            # grid for the legacy contour tracer.
+            poly = reconstruct_wall(cfg, wall, grid_res=361, wall_pts=wall_pts,
+                                    seed_pts=seed_pts, rest_pts=rest_pts,
+                                    refine=1)
             tc_ok = poly.closed and bool(poly.loops)
             if not tc_ok:
                 if verbose:

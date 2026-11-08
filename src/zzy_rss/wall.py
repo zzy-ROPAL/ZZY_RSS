@@ -10,18 +10,19 @@ Mapping of IJRR objects onto one page of Y+:
   P_goal / P_rest                    seed-connected vs not, PAGE-RESTRICTED
   learned manifold f(q) = 0          wall f(y, theta) = 0, RBF-SVM
   P_obs                              invalid Y+ samples on this page
-  polytope (the actual proof)         closed polyline per region
-  facet                              polyline segment
+  polytope (the actual proof)         closed polyline (d=2) or triangle mesh (d=3)
+  facet                              segment (d=2) or triangle (d=3)
   CPD (Eq. 3)                        Y+ penetration depth, dispatched by tag
 
 Two IJRR structural choices are preserved deliberately:
 
   * Both training classes are VALID points (IJRR 4.1). This learns a surface
     that lives INSIDE the invalid region, not a valid/invalid boundary.
-  * Reconstruction is what VALIDATES closedness (IJRR 4.3). At d = 2 the wall
-    is 1-D so the tangential complex degenerates to contour tracing, which is
-    where IJRR's >90% triangulation bottleneck disappears -- but the closedness
-    check must survive, or Definition 1 (I) is lost.
+  * Reconstruction is what VALIDATES closedness (IJRR 4.3). It is the
+    tangential Delaunay complex of an (epsilon, eta)-net of points ON the wall
+    (tangential.py), built without any grid and in any dimension: a closed
+    polyline at d = 2, a closed oriented triangle mesh at d = 3. The old grid
+    contour tracer survives only as WallParams.reconstruction = "contour".
 """
 
 from __future__ import annotations
@@ -95,6 +96,25 @@ class WallModel:
         w = np.exp(-self._gamma * np.sum(diff ** 2, axis=1)) * self._dual
         g = (-2.0 * self._gamma) * (w[:, None] * diff).sum(axis=0)
         return g * self.scale
+
+    def field_scaled(self, x: np.ndarray, chunk: int = 2048) -> tuple:
+        """(f, grad f) for many points given in SCALED coordinates.
+
+        This is the wall as an implicit hypersurface in the SVM's own input
+        space, which is where the tangential complex is built: one distance
+        means the same thing along every axis there. Batched, any dimension.
+        """
+        x = np.atleast_2d(np.asarray(x, dtype=float))
+        f = np.empty(len(x))
+        g = np.empty_like(x)
+        for s in range(0, len(x), chunk):
+            xs = x[s:s + chunk]
+            d2 = np.sum((xs[:, None, :] - self._sv[None, :, :]) ** 2, axis=2)
+            e = np.exp(-self._gamma * d2) * self._dual          # (n, m)
+            f[s:s + chunk] = e.sum(axis=1) + self._b
+            g[s:s + chunk] = (-2.0 * self._gamma) * (
+                xs * e.sum(axis=1)[:, None] - e @ self._sv)
+        return f, g
 
 
 def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallModel:
@@ -569,16 +589,127 @@ def sample_wall(
 
 @dataclass
 class Polytope:
-    """The actual proof object: closed polyline(s) with their segments."""
+    """The actual proof object.
+
+    d = 2: closed polyline(s); `loops` holds each as an ordered (n_i, 2) array
+    with its first vertex repeated, and its segments are the facets.
+    d = 3 (tdc only): `vertices` + `simplices` form a closed, coherently
+    oriented triangle mesh; the triangles are the facets and `loops` is empty.
+    Coordinates are UNSCALED page coordinates in both cases.
+    """
 
     loops: list = field(default_factory=list)   # list of (n_i, 2) arrays
     closed: bool = False
     n_segments: int = 0
     note: str = ""
+    vertices: np.ndarray | None = None          # (n, d), tdc only
+    simplices: np.ndarray | None = None         # (m, d) facet vertex indices
+    method: str = "contour"
+    stats: dict = field(default_factory=dict)
+
+    @property
+    def dim(self) -> int:
+        if self.vertices is not None:
+            return int(self.vertices.shape[1])
+        return 2
 
 
-def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281) -> Polytope:
-    """Trace the wall's zero level set into ordered closed polylines.
+def reconstruct_wall(cfg: Config, wall: WallModel, grid_res: int = 281,
+                     wall_pts: np.ndarray | None = None,
+                     seed_pts: np.ndarray | None = None,
+                     rest_pts: np.ndarray | None = None,
+                     refine: int = 0) -> Polytope:
+    """IJRR 4.3: turn the learned wall into a closed polytope, or fail.
+
+    Dispatches on WallParams.reconstruction. "tdc" (default) builds the
+    tangential Delaunay complex from points on the wall and never touches a
+    grid; `grid_res` is ignored there and `refine` halves the net spacing
+    that many times instead. "contour" is the legacy grid tracer.
+    """
+    if getattr(cfg.wall, "reconstruction", "contour") == "tdc":
+        return reconstruct_wall_tdc(cfg, wall, wall_pts=wall_pts,
+                                    seed_pts=seed_pts, rest_pts=rest_pts,
+                                    refine=refine)
+    return reconstruct_wall_contour(cfg, wall, grid_res=grid_res)
+
+
+def reconstruct_wall_tdc(cfg: Config, wall: WallModel,
+                         wall_pts: np.ndarray | None = None,
+                         seed_pts: np.ndarray | None = None,
+                         rest_pts: np.ndarray | None = None,
+                         refine: int = 0, rng=None) -> Polytope:
+    """The tangential Delaunay complex of the wall (IJRR 4.3), no grid.
+
+    Samples: Algorithm 2's wall points, the projections of the training data,
+    and the projections of uniform random points in the reconstruction window
+    -- the window reaches through the virtual band, where Algorithm 2 has no
+    invalid samples to project. From those seeds an (epsilon, eta)-net of the
+    wall is grown along its tangent space (IJRR Definition 2), and the TDC of
+    the net is the polytope.
+
+    The window is the page widened by recon_margin * virtual_band on every
+    side that has a virtual ring. With a periodic theta the window would need
+    a periodic distance; the project fixes a bounded theta range instead, so
+    a periodic page is refused here (closed=False -> INCONCLUSIVE) rather than
+    reconstructed on a rectangle that is not the page.
+
+    The closure test is the TDC's: every vertex in exactly two edges (d = 2),
+    every edge in exactly two triangles with single-cycle vertex links and a
+    coherent orientation (d = 3). On top of it, every training point further
+    than tdc_side_tol * eta from the wall must lie on the side of the
+    polytope that the sign of the SVM gives it; a missed piece of wall that
+    separates the two classes fails here instead of reaching Algorithm 3.
+    """
+    from .tangential import reconstruct
+
+    wp = cfg.wall
+    pm = cfg.pagemap
+    scale = np.asarray(wall.scale, dtype=float)
+    d = len(scale)
+    if getattr(pm, "theta_periodic", False):
+        return Polytope(closed=False, method="tdc",
+                        note="tdc: periodic theta is not supported; use a "
+                             "bounded theta range (findings 39)")
+    rng = rng or np.random.default_rng(cfg.planner.rng_seed)
+    m = wp.recon_margin * wp.virtual_band
+    lo = np.array([pm.y_min - m, pm.theta_min - m])[:d]
+    hi = np.array([pm.y_max + m, pm.theta_max + m])[:d]
+
+    seeds = [rng.uniform(lo, hi, size=(int(wp.tdc_seed_points), d))]
+    for extra in (wall_pts, seed_pts, rest_pts):
+        if extra is not None and len(extra):
+            seeds.append(np.asarray(extra, dtype=float).reshape(-1, d))
+    seeds = np.vstack(seeds) * scale
+    side = [np.asarray(p, dtype=float).reshape(-1, d)
+            for p in (seed_pts, rest_pts) if p is not None and len(p)]
+    side = np.vstack(side) * scale if side else None
+
+    eta = float(wp.net_d_min * wp.tdc_eta_factor) * (0.5 ** int(refine))
+    rec = reconstruct(
+        wall.field_scaled, seeds, eta, lo * scale, hi * scale,
+        side_points=side, step=wp.tdc_step, accept=wp.tdc_accept,
+        k_neighbors=wp.tdc_k_neighbors, fix_rounds=wp.tdc_fix_rounds,
+        weight_frac=wp.tdc_weight_frac, side_tol=wp.tdc_side_tol,
+        max_points=wp.tdc_max_points, rng=rng,
+    )
+    verts = rec.points / scale
+    stats = dict(rec.stats, eta=eta)
+    if d == 2:
+        loops = [verts[c] for c in rec.loops] if rec.closed else []
+        n_seg = sum(len(v) - 1 for v in loops)
+    else:
+        loops = []
+        n_seg = int(len(rec.simplices)) if rec.closed else 0
+    return Polytope(
+        loops=loops, closed=bool(rec.closed and n_seg > 0), n_segments=n_seg,
+        note=("tdc: " + rec.note) if rec.note else "",
+        vertices=verts, simplices=rec.simplices, method="tdc", stats=stats,
+    )
+
+
+def reconstruct_wall_contour(cfg: Config, wall: WallModel,
+                             grid_res: int = 281) -> Polytope:
+    """LEGACY (grid). Trace the wall's zero level set into closed polylines.
 
     At d = 2 the manifold is 1-D, so IJRR's tangential Delaunay complex
     degenerates to curve reconstruction; contour tracing gives the ordered
@@ -872,6 +1003,16 @@ def check_polytope(
     poly: Polytope, discs: list, valid_seeds: np.ndarray, verbose: bool = True,
 ) -> CheckReport:
     """IJRR Algorithm 3 over every facet of the polytope."""
+    if poly.dim != 2:
+        # DIMENSION GUARD. Facets are triangles at d = 3 and check_facet only
+        # knows segments of the (y, theta) page. Refuse -- an unchecked facet
+        # must never count as passed.
+        if verbose:
+            print(f"[stage3] alg3 refused: facet check for d={poly.dim} "
+                  f"(triangles) is not implemented")
+        return CheckReport(ok=False, n_facets=int(poly.n_segments), n_passed=0,
+                           failures=[(-1, f"facet check for d={poly.dim} not "
+                                          f"implemented")])
     n_facets = 0
     n_passed = 0
     failures = []

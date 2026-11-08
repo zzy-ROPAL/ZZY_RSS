@@ -388,7 +388,39 @@ class WallParams:
     recon_margin: float = 3.0
     # A traced loop whose endpoints are further apart than this is NOT closed,
     # which fails Definition 1 (I) exactly as a failed triangulation does.
+    # (contour reconstruction only)
     closure_tol: float = 1.0e-6
+
+    # IJRR 4.3 reconstruction (findings 39).
+    #   "tdc"      the tangential Delaunay complex, built from points ON the
+    #              wall only -- no grid is evaluated. Dimension-generic: a
+    #              polyline at d = 2, a triangulated surface at d = 3.
+    #   "contour"  legacy: evaluate the SVM on a grid and trace the zero
+    #              level with matplotlib. Kept only to reproduce old numbers.
+    reconstruction: str = "tdc"
+    # Net spacing eta, as a multiple of net_d_min (so Algorithm 4's "shrink
+    # facets" branch, which halves net_d_min, halves eta too).
+    tdc_eta_factor: float = 1.0
+    # Tangent step when growing the net, and the minimum spacing a new point
+    # must keep, both in multiples of eta. Spacing ends up in [accept, ~2] eta.
+    tdc_step: float = 1.0
+    tdc_accept: float = 0.8
+    # Uniform random points in the reconstruction window, projected onto the
+    # wall to seed the net -- alongside Algorithm 2's wall points and the
+    # training data. The window includes the virtual band, where there are no
+    # invalid samples for Algorithm 2 to project, so these are what reach the
+    # stretch of wall that closes outside the page.
+    tdc_seed_points: int = 400
+    # Neighbours per star; 0 = automatic (10 for a curve, 24 for a surface).
+    tdc_k_neighbors: int = 0
+    # Inconsistency removal: rounds of random point weights, each weight at
+    # most tdc_weight_frac * the point's nearest-neighbour distance.
+    tdc_fix_rounds: int = 20
+    tdc_weight_frac: float = 0.3
+    # Training points closer than this (in eta) to the wall are not used for
+    # the sidedness check: a facet is a chord and may cut a sliver off them.
+    tdc_side_tol: float = 1.0
+    tdc_max_points: int = 20000
 
     # Penetration-depth mode. "ijrr_local_opt" is the paper's own method lifted
     # to Y+; "lipschitz" is the hardened variant (exact workspace PD plus a

@@ -30,6 +30,24 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### 🆕 2026-11-08(三):墙的重建换成**切向 Delaunay 复形**(§39)
+>
+> `reconstruct_wall` 默认 **`reconstruction="tdc"`**:IJRR §4.3 的 TDC,
+> **只用墙上的点**构造,**不求任何网格**,维数无关(d=2 闭折线,d=3 闭三角网)。
+> 旧的 `plt.contour` 网格追踪只剩 `reconstruction="contour"` 用来复现旧数字。
+>
+> | | 等值线(网格,旧) | **TDC(新默认)** |
+> |---|---|---|
+> | EXP 2(路图) | INFEASIBLE 146/146 γ=1.0 | **INFEASIBLE 144/144 γ=1.0** |
+> | EXP 3(路图) | INFEASIBLE 165/165 γ=2.7 | **INFEASIBLE 156/156 γ=2.7** |
+>
+> 测试:`python3 tests/test_tdc.py`(球 Euler 2、环面 0、开放流形被拒、漏掉的墙被两侧检查抓住)。
+> **d=3 还差**:三角形的面检查(现在**直接拒绝**)、Σ 圆盘 → 管、θ 接缝守卫。
+> 作者的代码(`InfPlanner.cpp`)用的是 **Coxeter**,不是 TDC,见 §39。
+>
+> ⚠️ **另一个发现,未修**:EXP 2 的 `run_proof` 现在 **113–126 s**(§38 记的是 ~2 s),
+> 99.9% 在 Alg 3 的 `_pd_ijrr`(722 次 SLSQP、38.5 万次 `classify`),与重建无关。
+
 > ### 🆕 2026-11-08:判定改成三值,门的可穿越性改成闭式(§37)
 >
 > 本分支(`claude/intelligent-clarke-kjvc3n`)新增:
@@ -219,6 +237,7 @@ export PYTHONPATH=src
 
 python3 tests/test_ik.py                                   # IK 验收(必须全过)
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
+python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
 python3 scripts/run_demo.py --res 61 --out out/demo        # 三个案例 + 视频 + 图
 python3 scripts/make_summary.py out/demo                   # 汇总 SUMMARY.md
 python3 scripts/visualize.py --tilt 30 --no-obstacle       # 3D 场景/分支/纤维图
@@ -285,7 +304,8 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | IJRR Alg 2 采墙 | 无效点投影到墙;落在有效区则喂回重训 | `src/zzy_rss/wall.py` |
 | Σ 感知训练 | 把门圆盘喂进训练集,阻止墙穿门而过 | `src/zzy_rss/wall.py` |
 | **页边锚点** | y=0/y=1 边线上的精确有效构型喂进训练集(**不是路图**) | `edge_anchor_samples()` in `wall.py` |
-| IJRR §4.3 重建 | `d=2` 退化为闭合折线;同时校验闭合性 | `src/zzy_rss/wall.py` |
+| IJRR §4.3 重建 | **切向 Delaunay 复形**:(ε,η)-网沿切空间生长 → 加权 TDC(精确法向)→ 权重去不一致 → 闭合 + 定向 + **两侧检查**;无网格,维数无关 | `src/zzy_rss/tangential.py`,`reconstruct_wall_tdc()` in `wall.py` |
+| 旧重建(网格) | `plt.contour`,只为复现旧数字(`reconstruction="contour"`) | `reconstruct_wall_contour()` in `wall.py` |
 | IJRR Alg 3 查面 | **Σ 守卫在最前** → 最小包围球 → `Y⁺` 穿透深度 → 二分递归 | `src/zzy_rss/wall.py` |
 | IJRR Alg 4 外循环 | 失败路由:重建失败 / 面心有效 / 面过长 | `src/zzy_rss/flood.py` |
 | 区域标号 | **θ 周期**:页是圆柱,跨 ±π 接缝合并 | `src/zzy_rss/flood.py` |
@@ -454,6 +474,17 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
     `geometry_is_page_dependent()` 让共享构建**直接报错**;
     `certify_fiber` 的零运动检查让闭式判据退回 `exact=False` ⇒ 圆盘留着 ⇒ 保守跟门。
     **IK 完全不受影响**——形状不进 IK,八页骨架位移恒为 9.02e-14 mm。
+
+33. **TDC 重建必须带两侧检查。**(§39)网是从种子**长出来的**,够不到的零集分量
+    不在复形里,复形照样是完美的闭合曲线,**闭合检查发现不了**。
+    离墙 > η 的训练点在复形内/外必须与 f 的符号一致,否则 `closed=False`。
+    关掉它,一块没重建出来的墙就会以"闭合"的身份进入 Alg 3。
+
+34. **TDC 不处理周期 θ,d=3 的面检查不存在 —— 两处都是拒绝,不是近似。**(§39)
+    `theta_periodic=True` ⇒ `reconstruct_wall_tdc` 返回 `closed=False`;
+    d=3 多胞形 ⇒ `check_polytope` 返回 `ok=False`、0 面通过。
+    **没查过的面永远不能算通过。** 不变量 12 里"θ 平铺网格"的说法只对旧的
+    `contour` 重建成立。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
@@ -664,6 +695,8 @@ PRM 的边按 `edge_resolution=0.01` 查过。**路径这件事上 PRM 严格优
 7. ~~E4 强制变号场景~~ 并入待办 2:§34 把"两者所在区域重合"量化了,
    并排除了**逐列割**与横杆族;一般障碍见 §35,焊缝**方向**是另一个旋钮
 8. `d=3` 场景([IROS] 2D 曲面),此时三角化与 IJRR 的真实开销结构才回归。
+   **重建已就绪**(§39,TDC 在球/环面上已验证);还缺:三角形面检查、Σ 管、
+   `WeldSurface(u,v)`、θ 接缝守卫(有界 θ,切口放在有效集的空隙处并检查)。
    **这才是上 C++ / Gudhi / FCL 的触发条件**,不是现在这个 2-D 演示
    (`docs/seven_questions.md` Q1/Q2:证明本身已经 0.64 s)
 9. 性能:按 `docs/seven_questions.md` Q1 的顺序做——
