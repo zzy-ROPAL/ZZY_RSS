@@ -434,6 +434,13 @@ class WallParams:
 
     pd_mode: str = "ijrr_local_opt"
     pd_seed_attempts: int = 3
+    # How the ijrr pd mode searches for a valid point closer than its seed
+    # (findings 40). "march": walk from the facet centre toward the seed and
+    # bisect at the first valid sample. "slsqp": the legacy solve, whose
+    # constraint (classify, a +/-1 step) has no gradient -- it never
+    # converged and cost 99.9% of run_proof.
+    pd_search: str = "march"
+    pd_bisect_iters: int = 12
     lipschitz_fd_step: float = 1.0e-5
     lipschitz_safety: float = 1.5
     lipschitz_fallback: float = 50.0

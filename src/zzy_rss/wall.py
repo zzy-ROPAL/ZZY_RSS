@@ -856,33 +856,88 @@ def _pd_ijrr(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     point: np.ndarray, valid_seeds: np.ndarray,
 ) -> tuple[float, str]:
-    """Strict IJRR Eq. 3, lifted to Y+."""
+    """Strict IJRR Eq. 3, lifted to Y+: distance to the nearest VALID point.
+
+    Seeded from the pd_seed_attempts nearest valid samples, as before. What
+    changed is how the closer valid point is searched for (findings 40).
+
+      [pd:march]  (default) walk from the point toward each seed at
+                  edge_resolution, take the FIRST valid sample, and bisect
+                  the last step down to pd_bisect_iters halvings. Every
+                  answer is a real valid point, never further than its seed,
+                  so the bound is never looser than the nearest-sample
+                  fallback -- and usually much tighter.
+      [pd:slsqp]  legacy. SLSQP with classify() as an inequality constraint.
+                  classify() is a +/-1 step whose gradient is zero almost
+                  everywhere, so SLSQP has nothing to follow: on EXP 2 all
+                  722 of 722 solves hit maxiter=40 after 443-494 classify
+                  calls each, and EVERY pd came from the fallback below.
+                  That was 99.9% of run_proof (215 s of 215 s).
+
+    Both are an UPPER bound on the true depth (a valid point closer than any
+    found one may exist), which is the IJRR method's known weakness; the
+    "lipschitz" pd_mode is the hardened alternative.
+    """
     if len(valid_seeds) == 0:
         return 0.0, "no valid seed available"
     scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
     d = np.linalg.norm((valid_seeds - point) * scale, axis=1)
     order = np.argsort(d)
+    best = float(d[order[0]])
+    how = "IJRR (fallback: nearest sample)"
 
+    if getattr(cfg.wall, "pd_search", "march") == "slsqp":
+        for k in order[: cfg.wall.pd_seed_attempts]:
+            seed = valid_seeds[k]
+
+            def obj(z):
+                return float(np.sum(((z - point) * scale) ** 2))
+
+            def con(z):
+                ok, _ = classify(cfg, arm, weld, scene, float(z[0]), float(z[1]), signs)
+                return 1.0 if ok else -1.0
+
+            res = minimize(obj, seed.copy(), constraints=[{"type": "ineq", "fun": con}],
+                           method="SLSQP", options={"maxiter": 40, "ftol": 1e-9})
+            if res.success:
+                cand = np.asarray(res.x)
+                ok, _ = classify(cfg, arm, weld, scene, float(cand[0]), float(cand[1]), signs)
+                if ok:
+                    return float(np.linalg.norm((cand - point) * scale)), "IJRR local opt"
+        return best, "IJRR local opt (fallback: nearest sample)"
+
+    def valid(z):
+        return classify(cfg, arm, weld, scene, float(z[0]), float(z[1]), signs)[0]
+
+    step = float(cfg.planner.edge_resolution)
     for k in order[: cfg.wall.pd_seed_attempts]:
         seed = valid_seeds[k]
-
-        def obj(z):
-            return float(np.sum(((z - point) * scale) ** 2))
-
-        def con(z):
-            ok, _ = classify(cfg, arm, weld, scene, float(z[0]), float(z[1]), signs)
-            if ok:
-                return 1.0
-            return -1.0
-
-        res = minimize(obj, seed.copy(), constraints=[{"type": "ineq", "fun": con}],
-                       method="SLSQP", options={"maxiter": 40, "ftol": 1e-9})
-        if res.success:
-            cand = np.asarray(res.x)
-            ok, _ = classify(cfg, arm, weld, scene, float(cand[0]), float(cand[1]), signs)
-            if ok:
-                return float(np.linalg.norm((cand - point) * scale)), "IJRR local opt"
-    return float(d[order[0]]), "IJRR local opt (fallback: nearest sample)"
+        length = float(d[k])
+        if length <= 0.0:
+            return 0.0, "point is a valid seed"
+        # Only a valid point closer than the best so far can tighten the bound.
+        n = int(np.ceil(min(length, best) / step))
+        lo_t = 0.0                       # last parameter known invalid
+        hit = None
+        for i in range(1, n + 1):
+            t = min(1.0, i * step / length)
+            if valid(point + t * (seed - point)):
+                hit = t
+                break
+            lo_t = t
+        if hit is None:
+            continue
+        hi_t = hit
+        for _ in range(int(cfg.wall.pd_bisect_iters)):
+            mid = 0.5 * (lo_t + hi_t)
+            if valid(point + mid * (seed - point)):
+                hi_t = mid
+            else:
+                lo_t = mid
+        cand = hi_t * length
+        if cand < best:
+            best, how = cand, "IJRR march to first valid"
+    return best, how
 
 
 def _pd_lipschitz(

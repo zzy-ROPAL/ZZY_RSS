@@ -2122,3 +2122,46 @@ EXP 2 的 `run_proof` 本次实测 **113–126 s**(两种重建都一样),§38 �
 3. **θ 接缝守卫**:定了有界 θ 区间、切口放在有效集的空隙处;
    `theta_periodic=True` 时 TDC **直接拒绝**(不在矩形上假装是圆柱)。
    切口附近有效样本的检查还没写。
+
+## 40. §39 的"Alg 3 慢 100 倍"不是回退:**`_pd_ijrr` 的 SLSQP 从来没收敛过**
+
+### 原因(实测,EXP 2 无网格)
+
+`check_polytope` 的 215 s **全部**在 `_pd_ijrr` 的 SLSQP 里。抽查 30 个面心:
+**90/90 次求解全部 `Iteration limit reached`**,每次 443–494 次 `classify`、~0.1 s,
+**然后每个 pd 都来自"最近种子距离"的回退值**。
+
+约束是 `classify()` 的 ±1 阶跃函数,**梯度几乎处处为零**,SLSQP 没有任何东西可跟。
+优化器跑满 40 次迭代,返回失败,代码退回最近样本距离——**这套求解从头到尾只是一个
+很贵的 `min(distance)`**。
+
+**为什么以前的耗时表里看不到它**:`run_three.py` / `run_demo.py` 都显式设
+`pd_mode="lipschitz"`,所以 `seven_questions.md` / `timing_breakdown.md` 里出现的
+是 `_pd_lipschitz`。而 `params.py` 的**库默认值**是 `"ijrr_local_opt"`,
+直接调用 `run_proof` 的(测试辅助 `_scene`、§39 的回归脚本)走的就是这条。
+
+### 修法:直接算优化器想找的东西
+
+`pd_search="march"`(新默认):从面心朝每个种子以 `edge_resolution` 步进,
+**第一个有效样本**处把最后一步二分 12 次。得到的是**真实的有效点**,
+不比种子远 ⇒ 界**不会比旧回退值更松**,通常紧得多(更保守的方向)。
+旧 SLSQP 保留为 `pd_search="slsqp"`,只为复现。
+
+### 实测(1200 样本路图,TDC 重建)
+
+| | IJRR + SLSQP(旧) | **IJRR + march(新默认)** | Lipschitz |
+|---|---|---|---|
+| EXP 2 `run_proof` | 126 s,INFEASIBLE 144/144 | **7.8 s**,INFEASIBLE 144/144 | 1.0 s,INFEASIBLE 144/144 |
+| EXP 3 `run_proof` | 53 s,INFEASIBLE 156/156 | **2.5 s**,INFEASIBLE 156/156 | **445 s,INCONCLUSIVE** 604/649,γ 顶到 400 |
+
+**判定与面数完全不变**,EXP 2 快 16×、EXP 3 快 21×。
+
+**Lipschitz 不能当无网格的默认值**:它的 pd 更小(更严),EXP 3 的面过不去,
+Alg 4 回灌把 γ 推到上限,墙涨到 649 面仍不闭合。这和待办 3c 是同一个问题
+(无网格的墙更难),只是换了个地方暴露。
+
+### 仍然成立的弱点
+
+IJRR 模式的 pd 是真实穿透深度的**上界**:只沿朝 3 个**起始类**种子的射线找,
+射线之间的有效点、目标类那一侧的有效点都看不到。march 把它收紧了,但没有消除。
+这是 IJRR Eq. 3 局部优化本身的性质,不是这次引入的。
