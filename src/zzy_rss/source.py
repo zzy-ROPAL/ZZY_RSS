@@ -387,14 +387,16 @@ def grid_sources(cfg: Config, pages: dict) -> dict:
 
 
 def roadmap_sources(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
-                    pages: dict, sigma: dict, n_samples: int | None = None,
+                    pages: dict, sigma: dict | None = None,
+                    n_samples: int | None = None,
                     start_yt: tuple | None = None, start_page: str | None = None,
                     verbose: bool = False) -> dict:
     """One RoadmapSource per page, with every door anchor injected as a node."""
     out = {}
     rng = np.random.default_rng(cfg.planner.rng_seed)
     for name, pm in pages.items():
-        anchors = [d.anchor for d in sigma.get(name, []) if d.vanishing]
+        anchors = [d.anchor for d in (sigma or {}).get(name, [])
+                   if d.vanishing]
         src = RoadmapSource(
             cfg, arm, weld, scene, pm.signs, name, n_samples=n_samples,
             anchors=anchors, rng=rng,
@@ -406,3 +408,57 @@ def roadmap_sources(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
                   f"component(s), {src.n_injected} injected, "
                   f"spacing {src.tol():.5f}")
     return out
+
+
+def bootstrap_roadmap(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+                      page_names=None, n_samples: int | None = None,
+                      start_yt: tuple | None = None,
+                      start_page: str | None = None,
+                      with_kin: bool = False, verbose: bool = False) -> tuple:
+    """Build sources AND Sigma with no PageMap anywhere. Returns (sources, sigma).
+
+    Two passes, because the two depend on each other: doors are found from
+    roadmap edges, and door anchors are injected as roadmap vertices so that
+    `regions_under` is a lookup rather than a guess.
+
+      pass 1   sample each page, no anchors        -> a roadmap to look for
+                                                      sign changes along
+      pass 2   rebuild with every anchor injected  -> anchors are real
+                                                      vertices in real
+                                                      components
+
+    Pass 1's roadmap is used only to FIND doors; pass 2's is what the proof
+    runs on. The extra sampling is the price of not having a grid to scan.
+    """
+    from .arm import SIGN_BRANCHES
+    from .doors import build_sigma_roadmap
+    from .pagemap import page_name
+
+    names = list(page_names) if page_names is not None else \
+        [page_name(s_) for s_ in SIGN_BRANCHES]
+    signs_of = {page_name(s_): s_ for s_ in SIGN_BRANCHES}
+
+    rng = np.random.default_rng(cfg.planner.rng_seed)
+    scout = {}
+    for name in names:
+        scout[name] = RoadmapSource(
+            cfg, arm, weld, scene, signs_of[name], name, n_samples=n_samples,
+            anchors=None, rng=rng,
+            start_yt=start_yt if name == start_page else None)
+    sigma = build_sigma_roadmap(cfg, arm, weld, scout, with_kin=with_kin,
+                                verbose=verbose)
+
+    rng = np.random.default_rng(cfg.planner.rng_seed)
+    sources = {}
+    for name in names:
+        src = RoadmapSource(
+            cfg, arm, weld, scene, signs_of[name], name, n_samples=n_samples,
+            anchors=[d.anchor for d in sigma.get(name, []) if d.vanishing],
+            rng=rng, start_yt=start_yt if name == start_page else None)
+        sources[name] = src
+        if verbose:
+            print(f"[roadmap] page {name}: {len(src.valid):5d} valid / "
+                  f"{len(src.invalid):5d} invalid, {len(src.regions())} "
+                  f"component(s), {src.n_injected} injected, "
+                  f"spacing {src.tol():.5f}")
+    return sources, sigma

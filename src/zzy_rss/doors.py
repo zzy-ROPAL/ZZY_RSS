@@ -153,6 +153,8 @@ def _arm_angle_of_elbow(
 
 def find_interior_doors_analytic(
     cfg: Config, arm: SrsArm, weld: WeldLine, pm: PageMap, sign_index: int,
+    radius: float | None = None, r_th: float | None = None,
+    name: str | None = None,
 ) -> list[SigmaDisc]:
     """Exact interior doors from the geometric condition.
 
@@ -174,8 +176,12 @@ def find_interior_doors_analytic(
     """
     p = arm.p
     e_z = np.array([0.0, 0.0, 1.0])
-    radius = _disc_radius(cfg, pm)
-    r_th = _disc_radius_theta(cfg, pm)
+    # pm is used ONLY for the cover radius and the page name -- the door
+    # LOCATIONS are a quadratic. Passing them explicitly makes this finder
+    # grid-free (findings 38b).
+    radius = _disc_radius(cfg, pm) if radius is None else radius
+    r_th = _disc_radius_theta(cfg, pm) if r_th is None else r_th
+    name = pm.name if name is None else name
     p0 = np.asarray(cfg.weld.p0, dtype=float)
     p1 = np.asarray(cfg.weld.p1, dtype=float)
     rot = weld.rot
@@ -222,7 +228,7 @@ def find_interior_doors_analytic(
                 vanishing=frozenset({sign_index}),
                 exact_y=y,
                 exact_theta=theta,
-                detail=f"q{joint}=0 door (analytic) on page {pm.name}",
+                detail=f"q{joint}=0 door (analytic) on page {name}",
             )
         )
     return _merge_discs(found, radius)
@@ -277,7 +283,10 @@ def find_interior_doors(
     return _merge_discs(discs, _disc_radius(cfg, pm))
 
 
-def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[SigmaDisc]:
+def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None,
+                    radius: float | None = None, r_th: float | None = None,
+                    name: str | None = None, theta_range: tuple | None = None,
+                    grid_backstop: bool = True) -> list[SigmaDisc]:
     """q4 folds: where the IK discriminant vanishes, not where a sign crosses.
 
     |W(y) - S| = d_se + d_ew is full extension and |d_se - d_ew| is the fully
@@ -288,8 +297,11 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
     angle loses meaning, and the WHOLE theta-line at that y degenerates to one
     configuration. The disc cover therefore spans the full theta range there.
     """
-    radius = _disc_radius(cfg, pm)
-    r_th = _disc_radius_theta(cfg, pm)
+    radius = _disc_radius(cfg, pm) if radius is None else radius
+    r_th = _disc_radius_theta(cfg, pm) if r_th is None else r_th
+    name = pm.name if name is None else name
+    th_lo, th_hi = (theta_range if theta_range is not None
+                    else (float(pm.theta_grid[0]), float(pm.theta_grid[-1])))
     found: list[SigmaDisc] = []
 
     if arm is not None and weld is not None:
@@ -308,10 +320,9 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
             c = float(np.dot(delta, delta)) - r_eq ** 2
             for y in _quadratic_roots_on_unit(a, b, c):
                 # theta degenerates: cover the whole theta line at this y.
-                for theta in np.linspace(pm.theta_grid[0], pm.theta_grid[-1],
+                for theta in np.linspace(th_lo, th_hi,
                                          max(3, int(np.ceil(
-                                             (pm.theta_grid[-1] - pm.theta_grid[0])
-                                             / radius)))):
+                                             (th_hi - th_lo) / radius)))):
                     found.append(
                         SigmaDisc(
                             kind=DOOR_FOLD,
@@ -320,11 +331,15 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
                             radius=radius,
                 radius_theta=r_th,
                             vanishing=frozenset({1}),
-                            detail=f"q4 fold ({what}, analytic) on page {pm.name}",
+                            detail=f"q4 fold ({what}, analytic) on page {name}",
                         )
                     )
 
-    # Numerical backstop: cells the grid flags as collapsed.
+    # Numerical backstop: cells the grid flags as collapsed. The roadmap
+    # build supplies its own (degenerate_discs_on_vertices) and switches this
+    # off, because there is no grid to scan.
+    if not grid_backstop or pm is None:
+        return _merge_discs(found, radius)
     margin = cfg.sigma.fold_cos_margin
     near = (np.abs(pm.q4) < margin) | pm.near_full
     for i, j in np.argwhere(near):
@@ -336,7 +351,7 @@ def find_fold_doors(cfg: Config, pm: PageMap, arm=None, weld=None) -> list[Sigma
                 radius=radius,
                 radius_theta=r_th,
                 vanishing=frozenset({1}),
-                detail=f"q4 fold (grid) on page {pm.name}",
+                detail=f"q4 fold (grid) on page {name}",
             )
         )
     return _merge_discs(found, radius)
@@ -972,3 +987,211 @@ def door_passable(
     return {"passable": bool(fib["ok"]), "certified_blocked": not fib["ok"],
             "unknown": False, "exact": False, "reason": fib["reason"],
             "certificate": fib}
+
+
+# --------------------------------------------------------------------------
+# Grid-free Stage 2 -- findings 38b
+#
+# The analytic finders never needed the grid for anything but the disc radius
+# and the page name: door LOCATIONS come from a quadratic. What did need it
+# was the numerical cross-check behind them, and the Sigma_coord / Sigma_kin
+# scans.
+#
+# Dropping the cross-check is NOT the conservative direction. Fewer doors
+# means fewer escape routes followed, so a door that exists and is missed can
+# turn an honest INCONCLUSIVE into a false INFEASIBLE. It has to be replaced,
+# not deleted.
+#
+# The replacement is better suited to the job than the grid version was. A
+# grid scan looked for local minima of |q_j| below a tolerance, which depends
+# on the tolerance and misses a crossing that dips between two cells. A
+# roadmap has EDGES, and an interior door is exactly a SIGN CHANGE of q_j
+# across one -- so the detector becomes a sign test plus a bisection, with no
+# tolerance in it at all. Fold doors keep the magnitude test, because at q4=0
+# the branch ENDS rather than crossing (which is why they needed their own
+# finder in the first place).
+#
+# What this costs: completeness is now probabilistic in the sampling, where
+# the grid's was resolution-limited. Neither is exact. The analytic solve
+# remains the primary finder in both.
+# --------------------------------------------------------------------------
+
+
+def _radius_from_spacing(cfg: Config, spacing: float) -> float:
+    return max(cfg.sigma.disc_radius_floor, cfg.sigma.disc_radius_scale * spacing)
+
+
+def _q_at(cfg: Config, arm: SrsArm, weld: WeldLine, y: float, theta: float,
+          signs: tuple, joint: int):
+    """One joint value at a page point, or None where the branch has no IK."""
+    pos, rot = weld.pose(y)
+    res = arm.ik_branch(pos, rot, theta, signs,
+                        coord_axis_tol=cfg.pagemap.coord_axis_tol,
+                        coord_radius_tol=cfg.pagemap.coord_radius_tol)
+    return (float(res.q[joint]), res) if res.ok else (None, res)
+
+
+def interior_doors_on_edges(
+    cfg: Config, arm: SrsArm, weld: WeldLine, verts: np.ndarray, tree,
+    signs: tuple, name: str, sign_index: int, spacing: float,
+    k_neighbors: int = 8, n_bisect: int = 40,
+) -> list[SigmaDisc]:
+    """Backstop for q2/q6 doors: a SIGN CHANGE of q_j across a roadmap edge.
+
+    No tolerance. Either the two endpoints disagree in sign or they do not,
+    and when they disagree the zero is bracketed and bisection locates it to
+    machine precision along that edge.
+    """
+    joint = JOINT_OF_SIGN[sign_index]
+    radius = _radius_from_spacing(cfg, spacing)
+    found: list[SigmaDisc] = []
+    if len(verts) < 2:
+        return found
+    kk = min(k_neighbors + 1, len(verts))
+    _d, nbr = tree.query(verts, k=kk)
+    seen = set()
+    for i in range(len(verts)):
+        qi, _ = _q_at(cfg, arm, weld, float(verts[i][0]), float(verts[i][1]),
+                      signs, joint)
+        if qi is None:
+            continue
+        for j in np.atleast_1d(nbr[i])[1:]:
+            j = int(j)
+            key = (min(i, j), max(i, j))
+            if key in seen:
+                continue
+            seen.add(key)
+            qj, _ = _q_at(cfg, arm, weld, float(verts[j][0]), float(verts[j][1]),
+                          signs, joint)
+            if qj is None or np.sign(qi) == np.sign(qj):
+                continue
+            a, b = verts[i].copy(), verts[j].copy()
+            qa = qi
+            for _ in range(n_bisect):
+                m = 0.5 * (a + b)
+                qm, _ = _q_at(cfg, arm, weld, float(m[0]), float(m[1]),
+                              signs, joint)
+                if qm is None:
+                    break
+                if np.sign(qm) == np.sign(qa):
+                    a, qa = m, qm
+                else:
+                    b = m
+            m = 0.5 * (a + b)
+            found.append(SigmaDisc(
+                kind=DOOR_INTERIOR, y=float(m[0]), theta=float(m[1]),
+                radius=radius, radius_theta=radius,
+                vanishing=frozenset({sign_index}),
+                detail=f"q{joint + 1} sign change on a roadmap edge, page {name}",
+            ))
+    return _merge_discs(found, radius)
+
+
+def degenerate_discs_on_vertices(
+    cfg: Config, arm: SrsArm, weld: WeldLine, verts: np.ndarray, signs: tuple,
+    name: str, spacing: float, with_kin: bool = False,
+) -> list[SigmaDisc]:
+    """Fold backstop + Sigma_coord + Sigma_kin, evaluated at roadmap vertices.
+
+    Folds keep a magnitude test because at q4 = 0 the branch ends rather than
+    crossing, so there is no sign to watch.
+    """
+    radius = _radius_from_spacing(cfg, spacing)
+    margin = cfg.sigma.fold_cos_margin
+    found: list[SigmaDisc] = []
+    for v in verts:
+        y, th = float(v[0]), float(v[1])
+        q4, res = _q_at(cfg, arm, weld, y, th, signs, 3)
+        if res is None or not res.ok:
+            continue
+        if q4 is not None and (abs(q4) < margin or res.near_full_extension):
+            found.append(SigmaDisc(
+                kind=DOOR_FOLD, y=y, theta=th, radius=radius,
+                radius_theta=radius, vanishing=frozenset({1}),
+                detail=f"q4 fold at a roadmap vertex, page {name}"))
+        if res.near_axis_align:
+            found.append(SigmaDisc(
+                kind=SIGMA_COORD, y=y, theta=th, radius=radius,
+                radius_theta=radius,
+                detail=f"arm-angle reference degenerate, page {name}"))
+        if with_kin:
+            m = arm.kin_singularity_measure(res.q)
+            if np.isfinite(m) and abs(m) < cfg.sigma.kin_det_tol:
+                found.append(SigmaDisc(
+                    kind=SIGMA_KIN, y=y, theta=th, radius=radius,
+                    radius_theta=radius,
+                    detail=f"det(J J^T) ~ 0, page {name}"))
+    return _merge_discs(found, radius)
+
+
+def _analytic_free(cfg, arm, weld, signs, name, sign_index, spacing):
+    r = _radius_from_spacing(cfg, spacing)
+    return find_interior_doors_analytic(cfg, arm, weld, None, sign_index,
+                                        radius=r, r_th=r, name=name)
+
+
+def _fold_analytic_free(cfg, arm, weld, signs, name, spacing):
+    r = _radius_from_spacing(cfg, spacing)
+    return find_fold_doors(cfg, None, arm, weld, radius=r, r_th=r, name=name,
+                           theta_range=(cfg.pagemap.theta_min,
+                                        cfg.pagemap.theta_max),
+                           grid_backstop=False)
+
+
+def build_sigma_roadmap(
+    cfg: Config, arm: SrsArm, weld: WeldLine, sources: dict,
+    with_kin: bool = False, verbose: bool = True,
+) -> dict:
+    """Stage 2 with no PageMap anywhere. Same union as build_sigma.
+
+    `sources` is {page name: RoadmapSource}; its vertices and KD-tree stand in
+    for the grid's cells and their neighbours.
+    """
+    if cfg.sigma_policy.sigma_kin_invalidates:
+        raise ValueError(
+            "sigma_kin_invalidates=True is unsound for the headline claim: it "
+            "would prove infeasibility of a narrower problem than 'no plan "
+            "exists'. Refusing to run.")
+
+    sigma = {}
+    for name, src in sources.items():
+        signs = src.signs
+        spacing = src.tol()
+        radius = _radius_from_spacing(cfg, spacing)
+        discs: list[SigmaDisc] = []
+        # Primary: the analytic solve. It never read the grid except for the
+        # radius, so it transplants unchanged.
+        for sign_index in (0, 2):
+            discs += _analytic_free(cfg, arm, weld, signs, name, sign_index,
+                                    spacing)
+        discs += _fold_analytic_free(cfg, arm, weld, signs, name, spacing)
+        # Backstops, now on the roadmap.
+        if cfg.sigma.use_numeric_crosscheck:
+            for sign_index in (0, 2):
+                discs += interior_doors_on_edges(
+                    cfg, arm, weld, src.valid, src._tree, signs, name,
+                    sign_index, spacing,
+                    k_neighbors=cfg.planner.k_neighbors)
+        discs += degenerate_discs_on_vertices(
+            cfg, arm, weld, src.valid, signs, name, spacing, with_kin=with_kin)
+
+        discs = _merge_discs(discs, radius)
+        discs = [
+            SigmaDisc(
+                kind=d.kind, y=d.y, theta=d.theta, radius=d.radius,
+                radius_theta=d.r_theta, vanishing=d.vanishing,
+                pages=assign_pages(d, signs), detail=d.detail,
+                exact_y=d.exact_y, exact_theta=d.exact_theta,
+            )
+            for d in discs
+        ]
+        sigma[name] = discs
+        if verbose:
+            by_kind: dict = {}
+            for d in discs:
+                by_kind[d.kind] = by_kind.get(d.kind, 0) + 1
+            summary = ", ".join(f"{k}:{v}" for k, v in sorted(by_kind.items())) \
+                or "none"
+            print(f"[stage2*] page {name}  Sigma discs: {len(discs):3d}  "
+                  f"({summary})   [roadmap, spacing {spacing:.5f}]")
+    return sigma

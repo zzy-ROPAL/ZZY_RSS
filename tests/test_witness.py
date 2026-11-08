@@ -423,6 +423,54 @@ def test_roadmap_two_class_distance_converges() -> list:
     return rows
 
 
+def test_roadmap_finds_the_same_doors_as_the_grid() -> list:
+    """Grid-free door discovery must not MISS a door (findings 38b).
+
+    This is the one direction that matters. A door that exists and is not
+    found is never followed, the flood terminates early, and the verdict can
+    be a false INFEASIBLE. Finding extra doors only costs work.
+
+    So: every analytic door the grid reports must have a roadmap counterpart
+    at the same place, and the counts must agree.
+    """
+    from zzy_rss.doors import build_sigma
+    from zzy_rss.source import bootstrap_roadmap
+
+    rows = []
+    for label, kw in (
+        ("EXP 2", dict(tilt=0.0, x=0.28, z=0.46, half_y=0.26,
+                       obstacles=_zgap())),
+        ("EXP 3", dict(tilt=15.0, x=0.32, z=0.40, half_y=0.26,
+                       obstacles=_zgap_y())),
+    ):
+        cfg, arm, weld, scene = _scene(**kw)
+        pms = {n: p for n, p in build_all_pages_shared(
+            cfg, arm, weld, scene, with_kin=False, verbose=False).items()
+            if n in PAGES}
+        grid = build_sigma(cfg, arm, weld, pms, verbose=False)
+        _srcs, road = bootstrap_roadmap(cfg, arm, weld, scene,
+                                        n_samples=1500, verbose=False)
+        n_g = n_r = 0
+        for page in PAGES:
+            gd = [d for d in grid.get(page, []) if d.vanishing]
+            rd = [d for d in road.get(page, []) if d.vanishing]
+            n_g += len(gd)
+            n_r += len(rd)
+            for d in gd:
+                near = min((abs(d.anchor[0] - e.anchor[0])
+                            for e in rd if e.vanishing == d.vanishing),
+                           default=float("inf"))
+                assert near < 0.05, (
+                    f"{label} page {page}: the grid finds a door at "
+                    f"y={d.anchor[0]:.4f} ({sorted(d.vanishing)}) that the "
+                    f"roadmap misses (nearest {near:.4f}). A missed door can "
+                    f"become a false INFEASIBLE.")
+        assert n_r >= n_g, (
+            f"{label}: roadmap found {n_r} doors, grid found {n_g}")
+        rows.append((label, n_g, n_r))
+    return rows
+
+
 if __name__ == "__main__":
     rows = test_closed_form_matches_brute_force()
     print(f"[witness] closed form     : matches a 4001-step fiber walk on "
@@ -453,6 +501,10 @@ if __name__ == "__main__":
     for n, g, a in rows:
         print(f"              n={n:<6} goal_only {g:.5f} (gamma {1/g**2:>5.0f})  "
               f"all_valid {a:.5f} (gamma {1/a**2:>5.0f})")
+    doors = test_roadmap_finds_the_same_doors_as_the_grid()
+    print("[witness] door discovery  : roadmap misses none of the grid's --")
+    for label, g, r in doors:
+        print(f"              {label}: grid {g} doors, roadmap {r}")
     gap = test_exact_clearance_is_not_optimistic()
     print(f"[witness] exact clearance : never above the sampled value "
           f"(worst optimism {gap * 1e3:.3f} mm)")

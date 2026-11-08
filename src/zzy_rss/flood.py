@@ -571,7 +571,8 @@ def build_witness(
 
 def run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
-    pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
+    pages: dict | None, sigma: dict, n_train_max: int = 900,
+    n_invalid_max: int = 160,
     verbose: bool = True, alg4_iters: int = 4, seeds: list | None = None,
     use_second_wall: bool = True, use_witness: bool = True,
     start_yt: tuple | None = None, sources: dict | None = None,
@@ -593,6 +594,9 @@ def run_proof(
     # all (findings 38). Pass `sources` to choose; the default stays the grid
     # so existing callers are untouched.
     if sources is None:
+        if pages is None:
+            raise ValueError("run_proof needs either `pages` (grid) or "
+                             "`sources` (e.g. a roadmap)")
         sources = grid_sources(cfg, pages)
     regions_by_page = {n: src.regions() for n, src in sources.items()}
     on_roadmap = any(getattr(s_, "kind", "grid") == "roadmap"
@@ -606,7 +610,7 @@ def run_proof(
     # it can actually cross. That is the same claim EXP 2's single wall makes,
     # and it does not ask the method to wall regions the robot can never be in.
     if seeds is not None:
-        queue = [(n, k) for n, k in seeds if n in pages]
+        queue = [(n, k) for n, k in seeds if n in sources]
         if verbose:
             print(f"\n[stage4] seeding from the start posture's region(s) "
                   f"only: {queue}")
@@ -653,7 +657,7 @@ def run_proof(
             continue
         visited.add((name, k))
         src = sources[name]
-        pm = pages.get(name)
+        pm = pages.get(name) if pages else None
         reg = next(r for r in regions_by_page[name] if r.index == k)
         visited_list.append(asdict(reg))
 
