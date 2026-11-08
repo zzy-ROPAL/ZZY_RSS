@@ -229,6 +229,36 @@ def test_fold_doors_are_characterised() -> int:
     return n
 
 
+def test_spelling_offset_is_limit_checked() -> None:
+    """A carried 2*pi offset must gate limits, not just shift the numbers.
+
+    After a crossing the robot holds the traversed endpoint, which can differ
+    from the partner page's IK representative by a whole turn on one joint.
+    Planning the continuation in that spelling is what makes the legs meet in
+    Q -- but only if the shifted values are the ones limit-checked. A turn
+    added to a joint already near its limit must make the plan fail.
+    """
+    cfg, arm, weld, scene = _scene(0.0, 0.28, 0.46, 0.26, ())
+    pm = build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
+                                verbose=False)["++-"]
+    ij = np.argwhere(pm.valid_mask)
+    ij = ij[np.argsort(ij[:, 0])]
+    start = (float(pm.y_grid[ij[0, 0]]), float(pm.theta_grid[ij[0, 1]]))
+
+    base = plan_in_page(cfg, arm, weld, scene, (1, 1, -1), start,
+                        goal_y=cfg.flood.goal_y)
+    assert base is not None, "baseline plan must exist"
+
+    # q1's limit is +/-178.85 deg, so a whole extra turn cannot be inside it.
+    off = np.zeros(7)
+    off[0] = 2.0 * np.pi
+    shifted = plan_in_page(cfg, arm, weld, scene, (1, 1, -1), start,
+                           goal_y=cfg.flood.goal_y, q_offset=off)
+    assert shifted is None, (
+        "a 2*pi offset on q1 was accepted; the carried spelling is not being "
+        "limit-checked, which is exactly the mirror_q trap of invariant 21")
+
+
 def test_verifier_rejects_tampered_paths() -> int:
     """Each check must actually fire. A verifier only fed good input is useless."""
     cfg, arm, weld, scene = _scene(0.0, 0.28, 0.46, 0.26, ())
@@ -360,6 +390,9 @@ if __name__ == "__main__":
     n = test_fold_doors_are_characterised()
     print(f"[witness] fiber pairs     : all {n} sign indices characterised "
           f"(q4 fold doors included)")
+    test_spelling_offset_is_limit_checked()
+    print("[witness] carried spelling: a 2*pi offset is limit-checked, not just "
+          "shifted")
     fired = test_verifier_rejects_tampered_paths()
     print(f"[witness] verifier        : rejects all {fired} tampered paths "
           f"(limits, constraint, junction, step, goal)")

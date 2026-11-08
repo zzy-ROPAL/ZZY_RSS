@@ -217,8 +217,39 @@ def _motion_radius(arm: SrsArm) -> float:
 PAGE_SCALE = np.array([1.0, 1.0 / np.pi])
 
 
+def _classify_off(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+                  y: float, theta: float, signs: tuple,
+                  off: np.ndarray | None) -> bool:
+    """Validity of one page point in the SPELLING the robot is actually using.
+
+    After a door crossing the robot stands at the traversed endpoint, which can
+    differ from the partner page's IK representative by 2*pi on one joint --
+    the s2 mirror is (q1 + pi, q3 + pi) while traversing to delta = +pi lands
+    on (q1 + pi, q3 - pi). Same posture, different joint VALUES.
+
+    Limits must then be checked on the values the robot holds, not on the
+    representative. That is invariant 21 applied to the continuation of the
+    path rather than to the crossing itself: a wrapped value can sit inside
+    the limits while the joint cannot reach it.
+    """
+    if off is None:
+        ok, _ = classify(cfg, arm, weld, scene, y, theta, signs)
+        return ok
+    pos, rot = weld.pose(y)
+    res = arm.ik_branch(pos, rot, theta, signs,
+                        coord_axis_tol=cfg.pagemap.coord_axis_tol,
+                        coord_radius_tol=cfg.pagemap.coord_radius_tol)
+    if not res.ok:
+        return False
+    q = res.q + off
+    if not arm.within_limits(q):
+        return False
+    return not scene.check(arm.frames(q)).in_collision
+
+
 def _edge_ok(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
-             a: np.ndarray, b: np.ndarray, signs: tuple) -> bool:
+             a: np.ndarray, b: np.ndarray, signs: tuple,
+             off: np.ndarray | None = None) -> bool:
     """Straight-line local plan in page coordinates, resolution-checked.
 
     This is what makes a PRM leg better evidence than a grid path: a grid path
@@ -230,8 +261,8 @@ def _edge_ok(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     n = max(2, int(np.ceil(dist / step)))
     for t in np.linspace(0.0, 1.0, n + 1):
         p = a + t * (b - a)
-        ok, _ = classify(cfg, arm, weld, scene, float(p[0]), float(p[1]), signs)
-        if not ok:
+        if not _classify_off(cfg, arm, weld, scene, float(p[0]), float(p[1]),
+                             signs, off):
             return False
     return True
 
@@ -240,7 +271,7 @@ def plan_in_page(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     start_yt: tuple, target_yt: tuple | None = None,
     goal_y: float | None = None, rng: np.random.Generator | None = None,
-    extra_nodes: list | None = None,
+    extra_nodes: list | None = None, q_offset: np.ndarray | None = None,
 ) -> Leg | None:
     """PRM + Dijkstra inside one page, from start_yt to a target.
 
@@ -256,15 +287,15 @@ def plan_in_page(
     pm = cfg.pagemap
 
     start = np.asarray(start_yt, dtype=float)
-    ok, _ = classify(cfg, arm, weld, scene, float(start[0]), float(start[1]), signs)
-    if not ok:
+    if not _classify_off(cfg, arm, weld, scene, float(start[0]), float(start[1]),
+                         signs, q_offset):
         return None
 
     nodes = [start]
     if target_yt is not None:
         tgt = np.asarray(target_yt, dtype=float)
-        ok_t, _ = classify(cfg, arm, weld, scene, float(tgt[0]), float(tgt[1]), signs)
-        if not ok_t:
+        if not _classify_off(cfg, arm, weld, scene, float(tgt[0]), float(tgt[1]),
+                             signs, q_offset):
             return None
         nodes.append(tgt)
         target_index = 1
@@ -272,15 +303,15 @@ def plan_in_page(
         target_index = None
     for extra in (extra_nodes or []):
         e = np.asarray(extra, dtype=float)
-        ok_e, _ = classify(cfg, arm, weld, scene, float(e[0]), float(e[1]), signs)
-        if ok_e:
+        if _classify_off(cfg, arm, weld, scene, float(e[0]), float(e[1]),
+                         signs, q_offset):
             nodes.append(e)
 
     ys = rng.uniform(pm.y_min, pm.y_max, wp.prm_samples)
     ths = rng.uniform(pm.theta_min, pm.theta_max, wp.prm_samples)
     for y, th in zip(ys, ths):
-        ok_s, _ = classify(cfg, arm, weld, scene, float(y), float(th), signs)
-        if ok_s:
+        if _classify_off(cfg, arm, weld, scene, float(y), float(th), signs,
+                         q_offset):
             nodes.append(np.array([y, th]))
     pts = np.asarray(nodes, dtype=float).reshape(-1, 2)
     n = pts.shape[0]
@@ -317,7 +348,8 @@ def plan_in_page(
                 continue
             key = (min(u, v), max(u, v))
             if key not in checked:
-                checked[key] = _edge_ok(cfg, arm, weld, scene, pts[u], pts[v], signs)
+                checked[key] = _edge_ok(cfg, arm, weld, scene, pts[u], pts[v],
+                                        signs, q_offset)
             if not checked[key]:
                 continue
             dist[v] = dist[u] + w
@@ -332,7 +364,7 @@ def plan_in_page(
         chain.append(int(prev[chain[-1]]))
     chain.reverse()
     waypoints = pts[chain]
-    q, yy = _densify_page(cfg, arm, weld, signs, waypoints)
+    q, yy = _densify_page(cfg, arm, weld, signs, waypoints, q_offset)
     if q is None:
         return None
     return Leg(kind=LEG_PAGE, page=signs, q=q, y=yy, waypoints=waypoints,
@@ -340,7 +372,7 @@ def plan_in_page(
 
 
 def _densify_page(cfg: Config, arm: SrsArm, weld: WeldLine, signs: tuple,
-                  waypoints: np.ndarray):
+                  waypoints: np.ndarray, q_offset: np.ndarray | None = None):
     """Sample each waypoint segment and solve IK at every sample."""
     wp = cfg.witness
     qs, ys = [], []
@@ -358,7 +390,8 @@ def _densify_page(cfg: Config, arm: SrsArm, weld: WeldLine, signs: tuple,
                 res = arm.ik_branch(*weld.pose(float(p[0])), float(p[1]), signs)
                 if not res.ok:
                     return None, None
-                seg.append((res.q, float(p[0])))
+                seg.append((res.q if q_offset is None else res.q + q_offset,
+                            float(p[0])))
             qq = np.asarray([s[0] for s in seg])
             if len(qq) < 2 or float(np.abs(np.diff(qq, axis=0)).max()) <= wp.step_max:
                 break
@@ -370,7 +403,7 @@ def _densify_page(cfg: Config, arm: SrsArm, weld: WeldLine, signs: tuple,
                         float(waypoints[-1][1]), signs)
     if not res.ok:
         return None, None
-    qs.append(res.q)
+    qs.append(res.q if q_offset is None else res.q + q_offset)
     ys.append(float(waypoints[-1][0]))
     return np.asarray(qs, dtype=float), np.asarray(ys, dtype=float)
 
@@ -378,6 +411,7 @@ def _densify_page(cfg: Config, arm: SrsArm, weld: WeldLine, signs: tuple,
 def door_leg(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     disc: SigmaDisc, page: tuple, partner: tuple,
+    q_offset: np.ndarray | None = None,
 ) -> tuple:
     """The delta-sweep across a door, or None with the reason it is impossible.
 
@@ -399,9 +433,12 @@ def door_leg(
     n_steps = max(cfg.witness.door_samples,
                   int(np.ceil(np.pi / cfg.witness.step_max)) + 1)
     deltas = np.linspace(0.0, cert.direction * np.pi, n_steps)
-    q = np.repeat(res.q[None, :], len(deltas), axis=0)
-    q[:, i] = res.q[i] + deltas
-    q[:, k] = res.q[k] - deltas
+    # Enter the fiber in the spelling the robot is already holding, so this
+    # leg joins the previous one in Q rather than merely in page coordinates.
+    q0 = res.q if q_offset is None else res.q + q_offset
+    q = np.repeat(q0[None, :], len(deltas), axis=0)
+    q[:, i] = q0[i] + deltas
+    q[:, k] = q0[k] - deltas
     leg = Leg(kind=LEG_DOOR, page=page, q=q,
               y=np.full(len(deltas), float(anchor_y)),
               anchor=(float(anchor_y), float(anchor_theta)),

@@ -488,10 +488,26 @@ def second_wall(
         max_iters=alg4_iters, verbose=verbose,
     )
     ok = bool(rep.ok and poly.closed and poly.loops)
-    outside = None
+    outside = False
     if ok:
-        outside = point_in_wall(cfg, poly, (target.y, target.theta))
-        outside = (outside is False)
+        # Test the WHOLE disc, not its centre.
+        #
+        # For wall1 the centre would be enough: the Sigma guard is the first
+        # check in Algorithm 3, so a VERIFIED wall cannot have a facet touching
+        # a live disc, hence the disc lies wholly on one side and any point of
+        # it speaks for all of it.
+        #
+        # wall2 has no such protection, because `others` deliberately drops the
+        # target from the guard -- without that, every facet is rejected for
+        # hugging the disc it is trying to exclude. So this wall MAY pass
+        # through the disc, leaving part of the door inside and part outside.
+        # A door is only excluded when ALL of it is excluded: one reachable
+        # patch is a usable escape hatch, and skipping on a centre that
+        # happened to fall outside would be a false infeasibility proof.
+        probes = np.vstack([np.array([[target.y, target.theta]]),
+                            disc_ring(target, n=32)])
+        verdicts = [point_in_wall(cfg, poly, p) for p in probes]
+        outside = bool(verdicts) and all(v is False for v in verdicts)
     return poly, rep, wmodel, bool(ok and outside)
 
 
@@ -511,27 +527,54 @@ def build_witness(
     so a missed narrow passage looks exactly like this.
     """
     legs = []
+    # The START POSTURE on a partner page is NOT that page's IK representative
+    # -- it is wherever the crossing actually left the robot. The two differ by
+    # 2*pi on one joint: the s2 mirror is (q1 + pi, q3 + pi), while traversing
+    # to delta = +pi lands on (q1 + pi, q3 - pi). Same posture, different joint
+    # values, and the robot is holding the second one.
+    #
+    # So each page leg after a crossing is planned in that spelling: the offset
+    # is carried into IK, and limits are checked on the carried values. Without
+    # it the legs would not meet in Q and verification would (correctly, but
+    # needlessly) reject a route that is actually executable. This is invariant
+    # 21 applied to the continuation rather than to the crossing.
+    offset = None
     for signs, entry_yt, disc, partner in route:
         if disc is None:
             leg = plan_in_page(cfg, arm, weld, scene, signs, entry_yt,
-                               goal_y=goal_y)
+                               goal_y=goal_y, q_offset=offset)
             if leg is None:
                 return None, (f"no in-page path on {page_name(signs)} from "
                               f"y={entry_yt[0]:.4f} to the goal")
             legs.append(leg)
             break
         leg = plan_in_page(cfg, arm, weld, scene, signs, entry_yt,
-                           target_yt=disc.anchor)
+                           target_yt=disc.anchor, q_offset=offset)
         if leg is None:
             return None, (f"no in-page path on {page_name(signs)} from "
                           f"y={entry_yt[0]:.4f} to the door at "
                           f"y={disc.anchor[0]:.4f}")
         legs.append(leg)
-        dleg, cert = door_leg(cfg, arm, weld, scene, disc, signs, partner)
+        dleg, cert = door_leg(cfg, arm, weld, scene, disc, signs, partner,
+                              q_offset=offset)
         if dleg is None:
             return None, (f"door at y={disc.anchor[0]:.4f} on "
                           f"{page_name(signs)} is not crossable: {cert.reason}")
         legs.append(dleg)
+        # Where the crossing left us, minus what the partner page would call
+        # this point. Rounded to whole turns: anything else would mean the two
+        # are not the same posture, and the path is broken rather than wrapped.
+        rep = arm.ik_branch(*weld.pose(disc.anchor[0]), disc.anchor[1], partner)
+        if not rep.ok:
+            return None, (f"partner page {page_name(partner)} has no IK at the "
+                          f"door anchor y={disc.anchor[0]:.4f}")
+        diff = dleg.q[-1] - rep.q
+        turns = np.round(diff / (2.0 * np.pi))
+        residual = float(np.abs(diff - 2.0 * np.pi * turns).max())
+        if residual > 1e-9:
+            return None, (f"the crossing endpoint is not the partner page's "
+                          f"posture (residual {residual:.3e} rad)")
+        offset = 2.0 * np.pi * turns
     return WitnessPath(legs=legs), ""
 
 
@@ -768,6 +811,11 @@ def run_proof(
             ex, follow, verified, why = "4-unknown", True, False, ""
 
             # Exit 1 -- the wall we already built may have done the job.
+            # The centre speaks for the whole disc here: the Sigma guard runs
+            # first in Algorithm 3, so a VERIFIED wall has no facet touching a
+            # LIVE disc, and `discs` holds only live ones. The disc therefore
+            # lies wholly on one side. (wall2 cannot rely on this -- see
+            # second_wall, which must probe the entire ring.)
             side = point_in_wall(cfg, poly, (d.y, d.theta)) if rep.ok else None
             if side is False:
                 ex, follow, why = "1-wall1", False, (
