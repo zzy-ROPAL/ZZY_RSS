@@ -428,6 +428,79 @@ class FloodParams:
     anchor: str = "seed"   # "seed" | "goal"
 
 
+@dataclass(frozen=True)
+class CrossingParams:
+    """Exact certification of a door's self-motion fiber.
+
+    The old test asked "does ANY delta on the fiber work?" and answered yes
+    whenever one sampled point was admissible. That is not the question. To
+    change pages the robot must travel from the page's own IK spelling
+    (delta = 0) to the partner page's spelling (delta = +/- pi) WITHOUT
+    leaving the admissible set, so the question is whether ONE CONNECTED
+    admissible interval contains both. Invariant 21 is the same defect seen
+    from the other end: checking only the endpoint accepts a motion the joint
+    cannot actually perform.
+
+    The interval is available in closed form. Along the fiber the robot does
+    not move at all (gimbal null motion), so collision is CONSTANT -- one
+    query decides it -- and each joint is either constant or LINEAR in delta,
+    so joint limits give intervals whose intersection is the answer. No
+    sampling anywhere.
+    """
+
+    exact: bool = True
+    # The closed form is valid only where the fiber is a true null motion.
+    # Verified rather than assumed: if any link point moves more than this
+    # between two fiber samples, fall back to the sampled sweep and say so.
+    null_motion_tol_m: float = 1.0e-6
+    # Require a connected admissible interval spanning 0 -> +/-pi (item #0).
+    # Switching this off restores the old "any valid point" semantics.
+    require_connected: bool = True
+
+
+@dataclass(frozen=True)
+class WitnessParams:
+    """Constructive certificate for FEASIBLE: a verified end-to-end path.
+
+    The wall is a non-constructive certificate for INFEASIBLE. Feasibility is
+    an existential statement, so its witness is the motion itself -- IJRR
+    Figure 2 reports a plan from the PLANNER, never from the proof side. Our
+    flood fill reports feasibility from region labels instead, which composes
+    unverified local guesses into a global claim; a route through a door the
+    robot cannot reach, or cannot cross, then yields "feasible" for a task
+    that is not. The path cannot be fooled that way: it is ONE object, and a
+    broken leg means there is nothing to verify.
+
+    Verification is deliberately cheap and independent of how the path was
+    found: N x FK + N x limits + N x collision, plus junction and step bounds.
+    No SVM, no topology, no resolution.
+    """
+
+    enable: bool = True
+    # Densification. step_max also bounds the gap a collision sample must
+    # cover, so it is what makes a discrete sample stand in for a curve.
+    step_max: float = 0.02          # rad, max joint step between samples
+    door_samples: int = 129         # samples along a door leg
+    page_step: float = 0.01         # page-metric step along an in-page leg
+    # Tolerances.
+    tol_pos: float = 1.0e-6         # m, tool position error off the weld
+    tol_rot: float = 1.0e-6         # rad, tool orientation error
+    tol_join: float = 1.0e-9        # rad, junction gap between legs in Q
+    # Scene.check().clearance SAMPLES each capsule axis, so it is an UPPER
+    # bound on the true clearance. scene.py argues that bias is safe
+    # "everywhere it is used" -- true for wall verification, where it can only
+    # make a facet check fail. For a swept path segment the sign FLIPS: an
+    # optimistic clearance would certify a segment that actually collides.
+    # With 49 samples on a 0.33 m link the error reaches ~3.4 mm. A witness
+    # path is a one-off, so it pays for the exact routine instead.
+    exact_collision: bool = True
+    # Roadmap used to produce in-page legs. Separate from PlannerParams so
+    # path planning can be dense without changing the proof-side sampling.
+    prm_samples: int = 1500
+    prm_k: int = 12
+    rng_seed: int = 20261108
+
+
 # --------------------------------------------------------------------------
 # Top-level bundle
 # --------------------------------------------------------------------------
@@ -444,6 +517,8 @@ class Config:
     wall: WallParams = field(default_factory=WallParams)
     planner: PlannerParams = field(default_factory=PlannerParams)
     flood: FloodParams = field(default_factory=FloodParams)
+    crossing: CrossingParams = field(default_factory=CrossingParams)
+    witness: WitnessParams = field(default_factory=WitnessParams)
 
 
 DEFAULT = Config()

@@ -25,7 +25,7 @@ from .arm import SrsArm
 from .params import Config
 from .pagemap import PageMap, page_name
 from .scene import Scene
-from .doors import door_fiber_validity
+from .doors import SigmaDisc, door_fiber_validity, door_passable
 from .wall import (
     LABEL_TOPOLOGICAL, PageLabeller, assign_label,
     sigma_disc_samples,
@@ -33,6 +33,15 @@ from .wall import (
     train_wall, virtual_boundary_samples,
 )
 from .weld import WeldLine
+from .witness import LEG_DOOR, WitnessPath, door_leg, plan_in_page, verify_witness
+
+# Three-way verdict. The pair of proof systems -- a wall for INFEASIBLE, a
+# path for FEASIBLE -- are each SOUND when they succeed and SILENT when they
+# fail, so there must be somewhere to put the silence. Collapsing it into
+# either verdict is how "failed to find a path" becomes "no path exists".
+FEASIBLE = "FEASIBLE"
+INFEASIBLE = "INFEASIBLE"
+INCONCLUSIVE = "INCONCLUSIVE"
 
 
 @dataclass
@@ -62,6 +71,31 @@ class CertificateEntry:
 
 
 @dataclass
+class DoorDecision:
+    """How one door was resolved, and by which of the four exits.
+
+    The exit matters even when two of them take the same action. Exits 3 and 4
+    both follow the door; only exit 3 may contribute to a FEASIBLE verdict,
+    because only exit 3 produced a proof that the robot can get there and
+    through. Following on exit 4 is safe for the infeasibility side -- it
+    over-estimates reachability, so a sealed queue proves something stronger
+    than required -- but a route through it can never be called feasible.
+    """
+
+    page: str
+    region: int
+    y: float
+    theta: float
+    kind: str
+    exit: str                 # "1-wall1" | "2-wall2" | "3-witness" | "4-unknown"
+                              # | "0-uncrossable"
+    followed: bool
+    crossing_verified: bool
+    reason: str = ""
+    to: str = ""
+
+
+@dataclass
 class ProofResult:
     proven: bool
     reason: str
@@ -69,6 +103,13 @@ class ProofResult:
     certificate: list = field(default_factory=list)
     doors_followed: list = field(default_factory=list)
     goal_reached_via: str = ""
+    # Three-way verdict. `proven` is kept as INFEASIBLE for callers that
+    # predate this, but it can no longer be read as "not proven => feasible".
+    verdict: str = INCONCLUSIVE
+    witness_path: dict | None = None
+    witness_report: dict | None = None
+    door_decisions: list = field(default_factory=list)
+    second_walls: list = field(default_factory=list)
 
 
 def label_regions(cfg: Config, pm: PageMap) -> tuple[np.ndarray, list]:
@@ -215,19 +256,26 @@ def live_discs(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     certificate. A proof that relies on a discharged disc is conditional on
     it; a proof that never needs one is not.
     """
-    if not cfg.sigma_policy.enable_fiber_certification:
+    if not (cfg.crossing.exact or cfg.sigma_policy.enable_fiber_certification):
         return list(discs), []
     live, discharged = [], []
     for d in discs:
         if not d.vanishing:
             live.append(d)
             continue
-        fib = door_fiber_validity(cfg, arm, weld, scene, d, signs)
-        (live if fib["ok"] else discharged).append(d)
+        verdict = door_passable(cfg, arm, weld, scene, d, signs)
+        # ONLY a positive proof discharges. "unknown" -- no IK here, or a
+        # fiber that moves the robot so the closed form does not apply --
+        # leaves the disc live. The old code discharged on ok=False, which
+        # covered "not characterised" too, so the wall was free to route
+        # through a door nobody had evaluated.
+        (discharged if verdict["certified_blocked"] else live).append(d)
         if verbose:
             ay, _ = d.anchor
-            print(f"[stage5-fiber] door y={ay:.4f}: "
-                  f"{'OPEN, wall must avoid it' if fib['ok'] else 'BLOCKED, disc discharged'}")
+            state = ("BLOCKED, disc discharged" if verdict["certified_blocked"]
+                     else ("UNDECIDED, disc stays live" if verdict["unknown"]
+                           else "CROSSABLE, wall must avoid it"))
+            print(f"[stage5-fiber] door y={ay:.4f}: {state} -- {verdict['reason']}")
     return live, discharged
 
 
@@ -345,10 +393,144 @@ def find_inf_proof_region(
     return poly, rep, wall, max_iters, alg2_total
 
 
+def point_in_wall(cfg: Config, poly: Polytope, point) -> bool | None:
+    """Is (y, theta) inside the verified wall? None when undecidable.
+
+    Even-odd ray casting along +y at fixed theta. Valid only on a PLANAR page.
+    With theta_periodic the page is a cylinder, where a wrapping loop has no
+    interior in the plane and a chord joining two points that are the SAME
+    page point destroys the parity count -- so this refuses to answer rather
+    than answer wrongly. Invariant 5 measures the current placements as
+    exactly planar (no valid cell touches theta = +/-pi), which is a
+    PRECONDITION to re-test whenever the scene changes.
+    """
+    if getattr(cfg.pagemap, "theta_periodic", True):
+        return None
+    if not poly.closed or not poly.loops:
+        return None
+    y, th = float(point[0]), float(point[1])
+    inside = False
+    for loop in poly.loops:
+        v = np.asarray(loop, dtype=float)
+        if len(v) < 3:
+            continue
+        count = 0
+        for a, b in zip(v[:-1], v[1:]):
+            if (a[1] > th) == (b[1] > th):
+                continue
+            t = (th - a[1]) / (b[1] - a[1])
+            if a[0] + t * (b[0] - a[0]) > y:
+                count += 1
+        if count % 2 == 1:
+            inside = not inside
+    return inside
+
+
+def disc_ring(disc: SigmaDisc, n: int = 24, scale: float = 1.0) -> np.ndarray:
+    """Points on a door's ELLIPTICAL boundary.
+
+    Elliptical, not circular: y and theta differ by ~6x in units, and a
+    circular ring of radius `disc.radius` would be a third of the page wide
+    (invariant 6). This is the rest class for the second wall, so getting it
+    wrong makes the wall detour around a region that is not there.
+    """
+    c = np.array([disc.y, disc.theta], dtype=float)
+    out = [c + scale * np.array([disc.radius * np.cos(a),
+                                 disc.r_theta * np.sin(a)])
+           for a in np.linspace(0.0, 2.0 * np.pi, n, endpoint=False)]
+    return np.asarray(out, dtype=float)
+
+
+def second_wall(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
+    seed_pts: np.ndarray, inv_pts: np.ndarray, target: SigmaDisc,
+    others: list, alg4_iters: int = 4, verbose: bool = False,
+) -> tuple:
+    """Exit 2: a wall whose only job is to separate the start from ONE door.
+
+    Definition 1 says nothing about the second point being the goal; the proof
+    of Proposition 1 works for any pair. Substituting the door gives
+
+        closed  /\\  in C_obs  /\\  start inside  /\\  door outside
+            =>  start and door lie in disconnected components of C_free
+            =>  no path from the start to this door exists
+
+    which is the strict proof a failed path search can never supply.
+
+    Three things learned the hard way:
+
+    1. `others` must EXCLUDE the target. The Sigma guard rejects any facet
+       touching a disc, so leaving the target's own disc in rejects every
+       facet of the wall that is trying to hug it. The target's RING goes into
+       the rest class; its DISC stops being a guard.
+    2. The rest class holds the door and the virtual ring ONLY -- not the goal
+       component. One wall threading between the start and two targets at once
+       is invariant 15 in reverse: gamma climbs and facet centres land in
+       valid cells.
+    3. Failing is safe and expected. A door genuinely reachable from the start
+       has NO separating wall, so this must fail there; the caller then falls
+       through to exits 3 and 4. It can never manufacture a proof.
+    """
+    ring = virtual_boundary_samples(cfg, 80)
+    rest_pts = np.vstack([disc_ring(target, n=32), ring])
+    poly, rep, wmodel, iters, rounds = find_inf_proof_region(
+        cfg, arm, weld, scene, signs, seed_pts, rest_pts, inv_pts, others,
+        max_iters=alg4_iters, verbose=verbose,
+    )
+    ok = bool(rep.ok and poly.closed and poly.loops)
+    outside = None
+    if ok:
+        outside = point_in_wall(cfg, poly, (target.y, target.theta))
+        outside = (outside is False)
+    return poly, rep, wmodel, bool(ok and outside)
+
+
+def build_witness(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+    route: list, goal_y: float, verbose: bool = False,
+) -> tuple:
+    """Splice the legs of a route into one end-to-end path.
+
+    `route` is forward order: [(signs, entry_yt, disc, partner_signs), ...]
+    with disc None on the final hop. Each hop contributes an in-page leg to
+    the door anchor and then a delta-sweep across the door; the final hop
+    contributes an in-page leg to the goal.
+
+    Returns (WitnessPath, "") or (None, why). A failure here is INCONCLUSIVE,
+    never a proof that no path exists -- PRM is probabilistically complete,
+    so a missed narrow passage looks exactly like this.
+    """
+    legs = []
+    for signs, entry_yt, disc, partner in route:
+        if disc is None:
+            leg = plan_in_page(cfg, arm, weld, scene, signs, entry_yt,
+                               goal_y=goal_y)
+            if leg is None:
+                return None, (f"no in-page path on {page_name(signs)} from "
+                              f"y={entry_yt[0]:.4f} to the goal")
+            legs.append(leg)
+            break
+        leg = plan_in_page(cfg, arm, weld, scene, signs, entry_yt,
+                           target_yt=disc.anchor)
+        if leg is None:
+            return None, (f"no in-page path on {page_name(signs)} from "
+                          f"y={entry_yt[0]:.4f} to the door at "
+                          f"y={disc.anchor[0]:.4f}")
+        legs.append(leg)
+        dleg, cert = door_leg(cfg, arm, weld, scene, disc, signs, partner)
+        if dleg is None:
+            return None, (f"door at y={disc.anchor[0]:.4f} on "
+                          f"{page_name(signs)} is not crossable: {cert.reason}")
+        legs.append(dleg)
+    return WitnessPath(legs=legs), ""
+
+
 def run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
     verbose: bool = True, alg4_iters: int = 4, seeds: list | None = None,
+    use_second_wall: bool = True, use_witness: bool = True,
+    start_yt: tuple | None = None,
 ) -> ProofResult:
     """IJRR Algorithm 4 wrapped in the page/door flood fill.
 
@@ -395,6 +577,27 @@ def run_proof(
 
     visited = set()
     certificate, visited_list, doors_followed = [], [], []
+    decisions, second_walls = [], []
+    # How each region was entered, so a route can be rebuilt when the goal is
+    # reached: (prev_page, prev_region, disc, partner_signs, entry_yt,
+    # crossing_verified). The seed regions have no parent.
+    parent: dict = {}
+    entry_point: dict = {}
+    for n_, k_ in queue:
+        pm_ = pages[n_]
+        pts_ = region_points(pm_, labels[n_], k_)
+        if start_yt is not None:
+            entry_point[(n_, k_)] = tuple(start_yt)
+        elif len(pts_):
+            entry_point[(n_, k_)] = tuple(pts_[int(np.argmin(pts_[:, 0]))])
+    q_start_cfg = None
+    if queue:
+        n0, k0 = queue[0]
+        yt0 = entry_point.get((n0, k0))
+        if yt0 is not None:
+            r0 = arm.ik_branch(*weld.pose(float(yt0[0])), float(yt0[1]),
+                               pages[n0].signs)
+            q_start_cfg = r0.q if r0.ok else None
 
     while queue:
         name, k = queue.pop(0)
@@ -412,14 +615,78 @@ def run_proof(
                   f"y in [{reg.y_min:.3f}, {reg.y_max:.3f}]")
 
         if reg.reaches_goal:
+            # The goal is reachable ACCORDING TO THE REGION LABELS. That is a
+            # chain of local guesses, not a path: every door on the route here
+            # may have been followed on exit 4, i.e. without any proof that
+            # the robot can reach it or cross it. Composing those guesses into
+            # "feasible" is the one place this algorithm could return a wrong
+            # answer, so the claim now has to be cashed in for an actual
+            # motion. If the splice cannot be built, the honest answer is
+            # INCONCLUSIVE -- never "infeasible", and never "feasible".
             if verbose:
-                print(f"[stage4] GOAL REACHED in region ({name}, {k}) -> no proof; "
-                      f"the planner returns a path")
+                print(f"[stage4] goal set reached in region ({name}, {k}); "
+                      f"building a witness path")
+            route, chain, node = [], [], (name, k)
+            while node is not None and len(chain) <= len(visited) + 1:
+                chain.append(node)
+                p = parent.get(node)
+                node = (p[0], p[1]) if p is not None else None
+            chain.reverse()
+            for idx, (pn, pk) in enumerate(chain):
+                signs_i = pages[pn].signs
+                entry_i = entry_point.get((pn, pk))
+                if entry_i is None:
+                    route = []
+                    break
+                if idx + 1 < len(chain):
+                    nxt = chain[idx + 1]
+                    _, _, disc_i, partner_i, _, _ = parent[nxt]
+                    route.append((signs_i, entry_i, disc_i, partner_i))
+                else:
+                    route.append((signs_i, entry_i, None, None))
+
+            if not use_witness or not cfg.witness.enable:
+                return ProofResult(
+                    False, "goal set reached (region labels); witness path "
+                           "disabled, so feasibility is NOT certified",
+                    regions_visited=visited_list, certificate=certificate,
+                    doors_followed=doors_followed, goal_reached_via=f"{name}/{k}",
+                    verdict=INCONCLUSIVE, door_decisions=decisions,
+                    second_walls=second_walls)
+
+            path, why = (build_witness(cfg, arm, weld, scene, route,
+                                       cfg.flood.goal_y, verbose)
+                         if route else (None, "could not rebuild the route"))
+            if path is None:
+                if verbose:
+                    print(f"[stage4] INCONCLUSIVE: {why}")
+                return ProofResult(
+                    False, f"goal set reached by region labels, but no verified "
+                           f"path exists for that route: {why}",
+                    regions_visited=visited_list, certificate=certificate,
+                    doors_followed=doors_followed, goal_reached_via=f"{name}/{k}",
+                    verdict=INCONCLUSIVE, door_decisions=decisions,
+                    second_walls=second_walls)
+            wrep = verify_witness(cfg, arm, weld, scene, path,
+                                  q_start=q_start_cfg, goal_y=cfg.flood.goal_y)
+            if verbose:
+                print(f"[witness] {wrep.reason}")
+            if not wrep.ok:
+                return ProofResult(
+                    False, "goal set reached by region labels, but the path "
+                           "failed verification",
+                    regions_visited=visited_list, certificate=certificate,
+                    doors_followed=doors_followed, goal_reached_via=f"{name}/{k}",
+                    verdict=INCONCLUSIVE, witness_path=path.as_dict(),
+                    witness_report=wrep.as_dict(), door_decisions=decisions,
+                    second_walls=second_walls)
             return ProofResult(
-                False, "goal set reached: the problem is feasible",
+                False, "FEASIBLE: a verified end-to-end witness path exists",
                 regions_visited=visited_list, certificate=certificate,
                 doors_followed=doors_followed, goal_reached_via=f"{name}/{k}",
-            )
+                verdict=FEASIBLE, witness_path=path.as_dict(),
+                witness_report=wrep.as_dict(), door_decisions=decisions,
+                second_walls=second_walls)
 
         seed_pts = thin(pts, n_train_max, rng)
         rest = other_valid_points(pm, lab, k, regions_by_page[name],
@@ -470,26 +737,105 @@ def run_proof(
             note=poly.note or (rep.failures[0][1] if rep.failures else ""),
         )))
 
-        # --- follow every door inside this region ---------------------------
+        # --- resolve every door in this region: the four exits ---------------
+        #
+        # Exit 1  d outside wall1              -> PROVEN unreachable, free
+        # Exit 2  wall2 verifies, d outside it -> PROVEN unreachable, ~seconds
+        # Exit 3  path to d AND crossing leg   -> PROVEN reachable, follow
+        # Exit 4  none of the above            -> UNKNOWN, follow anyway
+        #
+        # Exits 1 and 2 reach the same conclusion by the same theorem and
+        # differ only in which wall; exit 3 reaches the opposite one. They are
+        # four independent proof ATTEMPTS, not a decision tree: falling
+        # through them means nothing was proved, which is exit 4, not a
+        # verdict. Both exits 3 and 4 follow the door -- only the tag differs,
+        # and the tag is what decides whether a goal reached beyond it may be
+        # called FEASIBLE.
         tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                              pm.theta_grid[1] - pm.theta_grid[0]))
-        for d in discs_in_region(discs, pts, tol):
-            # Door reachability is a FIBER property. The IK representative can
-            # be invalid while other fiber points are valid, so never decide a
-            # door from the representative alone. With fiber certification off
-            # (the default) doors are simply assumed open, which is the
-            # conservative direction for an infeasibility proof.
-            if cfg.sigma_policy.enable_fiber_certification:
-                fib = door_fiber_validity(cfg, arm, weld, scene, d, pm.signs)
-                if not fib["ok"]:
-                    if verbose:
-                        print(f"[stage5-fiber] door at (y={d.y:.4f}, "
-                              f"th={d.theta:+.4f}) on {name}: {fib['reason']}")
-                    continue
+        here = discs_in_region(discs, pts, tol)
+        for d in here:
+            ex, follow, verified, why = "4-unknown", True, False, ""
+
+            # Exit 1 -- the wall we already built may have done the job.
+            side = point_in_wall(cfg, poly, (d.y, d.theta)) if rep.ok else None
+            if side is False:
+                ex, follow, why = "1-wall1", False, (
+                    "outside the verified wall for this region: Definition 1 "
+                    "with X = this door proves the start cannot reach it")
+
+            # Exit 3 runs BEFORE exit 2 although it is numbered after it. The
+            # two conclusions are mutually exclusive, and exit 3 is far
+            # cheaper: if a witness path proves the door reachable then NO
+            # separating wall exists, so exit 2 on such a door is not merely
+            # wasted, it is the EXPENSIVE waste -- a wall that cannot exist
+            # burns its whole Algorithm 4 budget before saying so (measured on
+            # EXP 3's own door: 153.9 s to reach 0/0 facets at gamma 399.9).
+            #
+            # Within exit 3 the crossing leg goes first for the same reason:
+            # it is closed form and costs microseconds, while the PRM costs
+            # seconds, and a door that cannot be crossed makes the path to it
+            # pointless.
+            if follow and use_witness and cfg.witness.enable:
+                target = [o for o in d.pages if o != name and o in pages]
+                partner = pages[target[0]].signs if target else None
+                if partner is None:
+                    why = "no partner page on this door"
+                else:
+                    dleg, cert = door_leg(cfg, arm, weld, scene, d, pm.signs,
+                                          partner)
+                    if dleg is None:
+                        why = f"not crossable -- {cert.reason}"
+                    else:
+                        entry = entry_point.get((name, k))
+                        pleg = (plan_in_page(cfg, arm, weld, scene, pm.signs,
+                                             entry, target_yt=d.anchor)
+                                if entry is not None else None)
+                        if pleg is not None:
+                            ex, verified, why = "3-witness", True, (
+                                f"reachable (PRM path, {len(pleg.waypoints)} "
+                                f"waypoints) and crossable "
+                                f"({np.degrees(cert.margin):.2f} deg of slack)")
+                        else:
+                            why = ("crossable, but no in-page path to it was "
+                                   "found -- INCONCLUSIVE, not unreachable")
+
+            # Exit 2 -- pay for a wall whose only job is this door. Reached
+            # only when exit 3 produced nothing, so the door may genuinely be
+            # unreachable. Budgeted well below wall1's: failing is expected
+            # and costs only time, because exit 4 follows the door anyway.
+            if follow and not verified and use_second_wall:
+                others = [o for o in discs if o is not d]
+                p2, r2, w2, ok2 = second_wall(
+                    cfg, arm, weld, scene, pm.signs, seed_pts, inv, d, others,
+                    alg4_iters=max(1, alg4_iters // 3), verbose=False)
+                second_walls.append({
+                    "page": name, "region": k, "door_y": float(d.y),
+                    "door_theta": float(d.theta),
+                    "n_facets": r2.n_facets, "n_passed": r2.n_passed,
+                    "closed": bool(p2.closed), "gamma": float(w2.gamma),
+                    "separates": bool(ok2),
+                    "note": (r2.failures[0][1] if r2.failures else p2.note),
+                })
+                if ok2:
+                    ex, follow, why = "2-wall2", False, (
+                        "a second wall, closed and entirely in C_obs, has the "
+                        "start inside and this door outside")
+                elif verbose:
+                    print(f"[exit2] door y={d.y:.4f}: no separating wall "
+                          f"({r2.n_passed}/{r2.n_facets} facets, "
+                          f"closed={p2.closed}) -> no conclusion")
+
+            if not follow:
+                decisions.append(asdict(DoorDecision(
+                    page=name, region=k, y=float(d.y), theta=float(d.theta),
+                    kind=d.kind, exit=ex, followed=False,
+                    crossing_verified=False, reason=why)))
                 if verbose:
-                    print(f"[stage5-fiber] door at (y={d.y:.4f}, th={d.theta:+.4f}) "
-                          f"on {name}: OPEN ({fib['valid_fraction'] * 100:.1f}% of "
-                          f"fiber valid)")
+                    print(f"[exit{ex[0]}] door y={d.y:.4f} th={d.theta:+.4f}: "
+                          f"SKIPPED -- {why}")
+                continue
+
             for other in d.pages:
                 if other == name or other not in pages:
                     continue
@@ -503,34 +849,70 @@ def run_proof(
                     doors_followed.append({
                         "from": f"{name}/{k}", "to": f"{other}/{kk}",
                         "y": d.y, "theta": d.theta, "kind": d.kind,
+                        "exit": ex, "crossing_verified": verified,
                     })
+                    decisions.append(asdict(DoorDecision(
+                        page=name, region=k, y=float(d.y), theta=float(d.theta),
+                        kind=d.kind, exit=ex, followed=True,
+                        crossing_verified=verified, reason=why,
+                        to=f"{other}/{kk}")))
                     if (other, kk) not in visited:
                         queue.append((other, kk))
+                        parent[(other, kk)] = (name, k, d, opm.signs,
+                                               d.anchor, verified)
+                        entry_point[(other, kk)] = tuple(d.anchor)
                         if verbose:
-                            print(f"[stage4] door ({d.kind}) at (y={d.y:.4f}, "
-                                  f"th={d.theta:+.4f}): {name}/{k} -> {other}/{kk}")
+                            print(f"[exit{ex[0]}] door ({d.kind}) at "
+                                  f"(y={d.y:.4f}, th={d.theta:+.4f}): "
+                                  f"{name}/{k} -> {other}/{kk} "
+                                  f"[crossing_verified={verified}]")
 
     all_ok = bool(certificate) and all(c["ok"] for c in certificate)
+    # Note what is NOT required here. Doors followed on exit 4 carry no proof
+    # that the robot can reach or cross them, and that is fine for this side
+    # of the verdict: following a door it cannot use makes the proof cover
+    # regions the robot can never occupy, which is a STRONGER claim than the
+    # task needs (invariant 2). The unverified crossings can only cost work,
+    # never soundness -- they bite solely on the FEASIBLE side, which is why
+    # the goal branch above refuses to report feasibility without a path.
+    n_unverified = sum(1 for d in decisions
+                       if d["followed"] and not d["crossing_verified"])
     return ProofResult(
         proven=all_ok,
         reason=("queue empty, goal never reached, every wall verified"
+                + (f" ({n_unverified} door(s) followed without a crossing "
+                   f"proof -- conservative, so the certificate still holds)"
+                   if n_unverified else "")
                 if all_ok else
                 "queue empty and goal never reached, but some wall failed "
                 "verification -- INCONCLUSIVE, not a proof"),
         regions_visited=visited_list, certificate=certificate,
         doors_followed=doors_followed,
+        verdict=INFEASIBLE if all_ok else INCONCLUSIVE,
+        door_decisions=decisions, second_walls=second_walls,
     )
 
 
 def write_certificate(result: ProofResult, sigma: dict, path) -> None:
     """Serialise the certificate so a standalone verifier can re-check it."""
     payload = {
+        # `verdict` is the authoritative field. `proven` is kept for callers
+        # written before the three-way verdict existed, but it must not be
+        # read as "not proven => feasible": that is the whole point of the
+        # INCONCLUSIVE state.
+        "verdict": result.verdict,
         "proven": result.proven,
         "reason": result.reason,
         "regions_visited": result.regions_visited,
         "walls": result.certificate,
+        "second_walls": result.second_walls,
         "doors_followed": result.doors_followed,
+        "door_decisions": result.door_decisions,
         "goal_reached_via": result.goal_reached_via,
+        # Present only on a FEASIBLE verdict. A verifier re-checks this with
+        # FK + limits + collision alone -- no SVM, no topology, no resolution.
+        "witness_path": result.witness_path,
+        "witness_report": result.witness_report,
         "sigma_cover": {
             name: [
                 {"kind": d.kind, "y": d.y, "theta": d.theta, "radius": d.radius,

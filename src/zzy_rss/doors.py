@@ -633,3 +633,313 @@ def door_fiber_validity(
         "intervals": intervals,
         "blockers": blockers,
     }
+
+
+# --------------------------------------------------------------------------
+# Exact fiber certification -- item #0
+#
+# The old question was "does ANY delta on the fiber work?", answered yes as
+# soon as one sampled point was admissible. That is the wrong question. To
+# change pages the robot must TRAVEL from this page's IK spelling (delta = 0)
+# to the partner page's spelling (delta = +/- pi) without ever leaving the
+# admissible set. Admissible points on both sides of a gap prove nothing --
+# that is invariant 21 seen from the other end, where checking only the
+# endpoint accepts a motion the joint cannot perform (mirror_q wraps q7 from
+# -316.62 deg to +43.38 deg, inside the limits, but the joint cannot turn
+# there).
+#
+# The answer is available in CLOSED FORM, with no sampling at all:
+#
+#   * the robot does not move along the fiber (gimbal null motion), so
+#     COLLISION IS CONSTANT  ->  one query decides it;
+#   * every joint is constant or LINEAR in delta, and joint limits are box
+#     constraints, so each gives an interval and the admissible set is their
+#     INTERSECTION.
+#
+# Measured against the sampled sweep this reproduces the interval exactly:
+# v5b's [0.0199927, 3.1216] is [offset, pi - offset] with offset = the URDF's
+# 0.02 rad safety margin, and EXP 3's q2 door misses delta = pi by the same
+# 1.15 deg. 721 samples were recovering two linear inequalities.
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class FiberCertificate:
+    """Exact admissible delta-interval on a door's self-motion fiber."""
+
+    pair: tuple | None = None      # counter-rotating joint indices (i, k)
+    lo: float = 0.0                # admissible delta interval [lo, hi]
+    hi: float = 0.0
+    empty: bool = True
+    at_zero: bool = False          # is this page's own spelling admissible
+    crossable: bool = False        # ONE interval holding both 0 and +/-pi
+    direction: int = 0             # +1 traverse to +pi, -1 to -pi, 0 neither
+    margin: float = 0.0            # rad of slack at the pi end; <0 = deficit
+    exact: bool = False            # closed form applied (null motion held)
+    drift_m: float = 0.0           # measured null-motion drift
+    blocker: str = ""
+    reason: str = ""
+
+    def as_dict(self) -> dict:
+        return {
+            "pair": list(self.pair) if self.pair else None,
+            "interval": [self.lo, self.hi] if not self.empty else [],
+            "empty": self.empty,
+            "at_zero": self.at_zero,
+            "crossable": self.crossable,
+            "direction": self.direction,
+            "margin_rad": self.margin,
+            "margin_deg": float(np.degrees(self.margin)),
+            "exact": self.exact,
+            "drift_mm": self.drift_m * 1e3,
+            "blocker": self.blocker,
+            "reason": self.reason,
+        }
+
+
+def fiber_pair(disc: SigmaDisc) -> tuple | None:
+    """The two collinear joints that counter-rotate along this door's fiber.
+
+    A vanishing sign index names the joint that goes to zero (s2 -> q2,
+    s4 -> q4, s6 -> q6, i.e. joint indices 1, 3, 5). At that zero the joint
+    axes on either SIDE of it become collinear, so rotating them against each
+    other moves nothing:
+
+        q2 = 0  ->  (q1, q3)   axes 0 and 2
+        q4 = 0  ->  (q3, q5)   axes 2 and 4     <- was missing before
+        q6 = 0  ->  (q5, q7)   axes 4 and 6
+
+    The q4 case used to fall through to "fiber not characterised", which
+    returned ok=False -- and live_discs reads ok=False as CERTIFIED CLOSED,
+    so a fold door nobody had evaluated let the wall pass straight through it.
+    """
+    if not disc.vanishing:
+        return None
+    idx = min(disc.vanishing)
+    j = JOINT_OF_SIGN.get(idx)
+    if j is None or j - 1 < 0 or j + 1 > 6:
+        return None
+    return (j - 1, j + 1)
+
+
+def _capsule_geometry(arm: SrsArm, scene: Scene, q: np.ndarray) -> np.ndarray:
+    """Flattened capsule endpoints, so the null-motion test sees ALL geometry.
+
+    The skeleton alone is not enough. Along a q2 door's fiber frame 2 rotates
+    (R02 = rot_z(q1 + delta)), and while that leaves every skeleton point
+    fixed -- rot_z does not move the z axis, and R03 = rot_z(q1 + q3) is
+    constant -- it DOES carry an off-axis upper-arm hub around with it. With
+    that geometry switched on, collision is no longer constant along the
+    fiber and the closed form does not apply. Measuring the capsules rather
+    than assuming the null motion is what catches that.
+    """
+    caps = scene.capsules(arm.frames(q))
+    return np.concatenate([np.concatenate([c[0], c[1]]) for c in caps])
+
+
+def _null_motion_drift(cfg: Config, arm: SrsArm, scene: Scene,
+                       q0: np.ndarray, pair: tuple) -> float:
+    """Largest capsule-endpoint displacement over a few probe deltas."""
+    i, k = pair
+    base = _capsule_geometry(arm, scene, q0)
+    worst = 0.0
+    for d in (0.37, 1.1, -0.8, np.pi):
+        q = q0.copy()
+        q[i] += d
+        q[k] -= d
+        g = _capsule_geometry(arm, scene, q)
+        worst = max(worst, float(np.abs(g - base).max()))
+    return worst
+
+
+def certify_fiber(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+    disc: SigmaDisc, page: tuple[int, int, int],
+) -> FiberCertificate:
+    """Closed-form admissible delta-interval, and whether the door is crossable.
+
+    Returns exact=False when the fiber is not a null motion; the caller must
+    then fall back to the sampled sweep and may NOT treat the result as a
+    certificate.
+    """
+    pair = fiber_pair(disc)
+    if pair is None:
+        return FiberCertificate(reason="not a sign door; no self-motion fiber")
+
+    anchor_y, anchor_theta = disc.anchor
+    pos, rot = weld.pose(anchor_y)
+    res = arm.ik_branch(pos, rot, anchor_theta, page)
+    if not res.ok:
+        return FiberCertificate(pair=pair, reason="no IK at the door anchor")
+
+    q0 = res.q
+    i, k = pair
+
+    # (1) Is this actually a null motion? Verify, never assume.
+    drift = _null_motion_drift(cfg, arm, scene, q0, pair)
+    if drift > cfg.crossing.null_motion_tol_m:
+        return FiberCertificate(
+            pair=pair, exact=False, drift_m=drift,
+            reason=(f"fiber moves the robot ({drift * 1e3:.3f} mm): collision is "
+                    f"not constant, closed form does not apply"))
+
+    # (2) Collision is constant along the fiber -- ONE query decides it.
+    rep = scene.check(arm.frames(q0))
+    if rep.in_collision:
+        return FiberCertificate(
+            pair=pair, exact=True, drift_m=drift, empty=True,
+            blocker=f"collision:{rep.witness}",
+            reason="whole fiber in collision -> door CERTIFIED BLOCKED")
+
+    # (3) Joint limits. Constant joints decide the fiber outright; the two
+    #     moving joints are linear in delta, so each gives an interval.
+    lo, hi = -np.inf, np.inf
+    for j in range(len(q0)):
+        if j == i or j == k:
+            continue
+        if not (arm.q_min[j] <= q0[j] <= arm.q_max[j]):
+            return FiberCertificate(
+                pair=pair, exact=True, drift_m=drift, empty=True,
+                blocker=f"joint-limit:q{j + 1}",
+                reason=(f"q{j + 1} is constant along the fiber and out of "
+                        f"limits -> door CERTIFIED BLOCKED"))
+    lo = max(lo, float(arm.q_min[i] - q0[i]), float(q0[k] - arm.q_max[k]))
+    hi = min(hi, float(arm.q_max[i] - q0[i]), float(q0[k] - arm.q_min[k]))
+
+    if lo > hi:
+        return FiberCertificate(
+            pair=pair, exact=True, drift_m=drift, empty=True,
+            blocker="joint-limit", lo=lo, hi=hi,
+            reason="no admissible delta -> door CERTIFIED BLOCKED")
+
+    # (4) Crossing needs ONE connected interval holding this page's spelling
+    #     (delta = 0) and the partner's (delta = +/- pi). Both directions
+    #     reach the mirror; they differ by 2*pi on one joint, which is a
+    #     different JOINT VALUE even though it is the same posture, so each
+    #     is limit-checked on the values actually traversed.
+    at_zero = bool(lo <= 0.0 <= hi)
+    slack_pos = float(hi - np.pi)
+    slack_neg = float(-np.pi - lo)
+    margin = max(slack_pos, slack_neg)
+    direction = 0
+    if at_zero and slack_pos >= 0.0:
+        direction = +1
+    elif at_zero and slack_neg >= 0.0:
+        direction = -1
+
+    if not cfg.crossing.require_connected:
+        # Old semantics: any admissible point counts. Kept only so the
+        # regression can measure the difference.
+        return FiberCertificate(
+            pair=pair, lo=lo, hi=hi, empty=False, at_zero=at_zero,
+            crossable=True, direction=direction, margin=margin, exact=True,
+            drift_m=drift, reason="fiber has admissible points (legacy test)")
+
+    if not at_zero:
+        return FiberCertificate(
+            pair=pair, lo=lo, hi=hi, empty=False, at_zero=False,
+            margin=margin, exact=True, drift_m=drift, blocker="joint-limit",
+            reason=(f"this page's own spelling (delta=0) is outside the "
+                    f"admissible interval [{lo:.6f}, {hi:.6f}] -> NOT crossable"))
+
+    if direction == 0:
+        return FiberCertificate(
+            pair=pair, lo=lo, hi=hi, empty=False, at_zero=True,
+            margin=margin, exact=True, drift_m=drift, blocker="joint-limit",
+            reason=(f"admissible interval [{lo:.6f}, {hi:.6f}] reaches neither "
+                    f"+pi nor -pi; short by {abs(margin):.6f} rad "
+                    f"({abs(np.degrees(margin)):.2f} deg) -> NOT crossable"))
+
+    return FiberCertificate(
+        pair=pair, lo=lo, hi=hi, empty=False, at_zero=True, crossable=True,
+        direction=direction, margin=margin, exact=True, drift_m=drift,
+        reason=(f"connected admissible interval [{lo:.6f}, {hi:.6f}] holds "
+                f"delta=0 and delta={direction:+d}*pi with "
+                f"{np.degrees(margin):.2f} deg to spare -> CROSSABLE"))
+
+
+def partner_spelling_check(
+    arm: SrsArm, weld: WeldLine, disc: SigmaDisc,
+    page: tuple[int, int, int], partner: tuple[int, int, int],
+    cert: FiberCertificate,
+) -> dict:
+    """Does the traversed endpoint agree with the partner page's own IK?
+
+    They are the same POSTURE but need not be the same joint VALUES: the s2
+    mirror is (q1 + pi, -q2, q3 + pi) while traversing to delta = +pi gives
+    (q1 + pi, q3 - pi), which differs by 2*pi in q3. Both are legitimate
+    spellings of one configuration; the traversed one is the one the robot
+    actually performs, so limits are checked on THAT. This reports the
+    agreement as a diagnostic, never as the limit test.
+    """
+    out = {"checked": False}
+    if cert.pair is None or not cert.crossable:
+        return out
+    anchor_y, anchor_theta = disc.anchor
+    pos, rot = weld.pose(anchor_y)
+    here = arm.ik_branch(pos, rot, anchor_theta, page)
+    there = arm.ik_branch(pos, rot, anchor_theta, partner)
+    if not (here.ok and there.ok):
+        return {"checked": True, "partner_ik": False}
+    i, k = cert.pair
+    q_end = here.q.copy()
+    q_end[i] += cert.direction * np.pi
+    q_end[k] -= cert.direction * np.pi
+    diff = q_end - there.q
+    wraps = np.round(diff / (2.0 * np.pi))
+    residual = float(np.abs(diff - 2.0 * np.pi * wraps).max())
+    return {
+        "checked": True,
+        "partner_ik": True,
+        "matches_mod_2pi": bool(residual < 1e-9),
+        "residual": residual,
+        "wrapped_joints": [int(j) for j in np.nonzero(wraps)[0]],
+        "q_end_deg": [round(float(v), 4) for v in np.degrees(q_end)],
+        "partner_rep_deg": [round(float(v), 4) for v in np.degrees(there.q)],
+        "traversed_within_limits": bool(arm.within_limits(q_end)),
+    }
+
+
+def door_passable(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+    disc: SigmaDisc, page: tuple[int, int, int],
+) -> dict:
+    """Can the robot actually use this door to change pages?
+
+    Three-valued, and the distinction is load-bearing:
+
+      passable           -- it MIGHT be usable; follow it (conservative)
+      certified_blocked  -- PROVED unusable; the disc may be discharged
+      unknown            -- no decision; treat exactly like passable
+
+    The old code collapsed the last two. `door_fiber_validity` returned
+    ok=False both for "fiber wholly invalid" and for "no IK at door" / "fiber
+    not characterised", and `live_discs` read ok=False as CERTIFIED CLOSED and
+    discharged the disc -- letting the wall route straight through a door
+    nobody had evaluated. Only a positive proof discharges anything here.
+    """
+    if cfg.crossing.exact:
+        cert = certify_fiber(cfg, arm, weld, scene, disc, page)
+        if cert.exact and not cert.crossable and (cert.empty or not cert.at_zero
+                                                  or cert.direction == 0):
+            return {"passable": False, "certified_blocked": True,
+                    "unknown": False, "exact": True, "reason": cert.reason,
+                    "certificate": cert.as_dict()}
+        if cert.crossable:
+            return {"passable": True, "certified_blocked": False,
+                    "unknown": False, "exact": True, "reason": cert.reason,
+                    "certificate": cert.as_dict()}
+        # Not exact: the fiber moves the robot, or there is no IK here.
+        return {"passable": True, "certified_blocked": False, "unknown": True,
+                "exact": False, "reason": cert.reason or "undecided",
+                "certificate": cert.as_dict()}
+
+    fib = door_fiber_validity(cfg, arm, weld, scene, disc, page)
+    characterised = fib["reason"].startswith("fiber has valid") or \
+        fib["reason"].startswith("fiber wholly invalid")
+    if not characterised:
+        return {"passable": True, "certified_blocked": False, "unknown": True,
+                "exact": False, "reason": fib["reason"], "certificate": fib}
+    return {"passable": bool(fib["ok"]), "certified_blocked": not fib["ok"],
+            "unknown": False, "exact": False, "reason": fib["reason"],
+            "certificate": fib}

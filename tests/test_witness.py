@@ -1,0 +1,332 @@
+"""Exact door crossability (item #0) and witness-path verification (item #2).
+
+Two things are pinned here:
+
+  * the CLOSED FORM must agree with a brute-force walk of the fiber. The
+    closed form is only worth having if it is exactly the thing the sweep was
+    approximating, so the test walks the fiber joint by joint and compares.
+
+  * the VERIFIER must reject tampered paths. A verifier that only ever sees
+    good input proves nothing, so each check is fed a path that violates it.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import sys
+from pathlib import Path
+
+import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from zzy_rss.arm import SrsArm  # noqa: E402
+from zzy_rss.doors import (  # noqa: E402
+    build_sigma, certify_fiber, door_passable, fiber_pair,
+)
+from zzy_rss.pagemap import build_all_pages_shared  # noqa: E402
+from zzy_rss.params import (  # noqa: E402
+    BoxObstacle, Config, CrossingParams, PageMapParams, SceneParams, WeldParams,
+)
+from zzy_rss.scene import Scene  # noqa: E402
+from zzy_rss.weld import WeldLine  # noqa: E402
+from zzy_rss.witness import (  # noqa: E402
+    LEG_PAGE, Leg, WitnessPath, exact_clearance, plan_in_page, verify_witness,
+)
+
+PAGES = ("+++", "++-", "+-+", "+--", "-++", "-+-", "--+", "---")
+
+
+def _weld(tilt_deg: float, x: float, z: float, half_y: float) -> WeldParams:
+    a = np.radians(tilt_deg)
+    return WeldParams(p0=(x, -half_y, z), p1=(x, half_y, z),
+                      approach=(float(np.sin(a)), 0.0, -float(np.cos(a))),
+                      reference=(float(np.cos(a)), 0.0, float(np.sin(a))))
+
+
+def _scene(tilt, x, z, half_y, obstacles, res=61, **kw):
+    base = Config()
+    cfg = dataclasses.replace(
+        base, weld=_weld(tilt, x, z, half_y),
+        pagemap=PageMapParams(n_y=res, n_theta=res),
+        scene=SceneParams(gap_open=True, obstacles=tuple(obstacles)), **kw)
+    return cfg, SrsArm(cfg.arm), WeldLine(cfg.weld), Scene(cfg.arm, cfg.scene)
+
+
+def _doors(cfg, arm, weld, scene, page):
+    pms = {n: p for n, p in build_all_pages_shared(
+        cfg, arm, weld, scene, with_kin=False, verbose=False).items() if n in PAGES}
+    sig = build_sigma(cfg, arm, weld, pms, verbose=False)
+    return [d for d in sig.get(page, []) if d.vanishing]
+
+
+def _walk_fiber(arm, weld, disc, signs, n=4001):
+    """Brute force: the largest |delta| reachable from 0 without leaving limits."""
+    pair = fiber_pair(disc)
+    res = arm.ik_branch(*weld.pose(disc.anchor[0]), disc.anchor[1], signs)
+    if pair is None or not res.ok:
+        return None
+    i, k = pair
+    out = {}
+    for sgn in (+1, -1):
+        last = None
+        for t in np.linspace(0.0, sgn * np.pi, n):
+            q = res.q.copy()
+            q[i] += t
+            q[k] -= t
+            if not arm.within_limits(q):
+                break
+            last = float(t)
+        out[sgn] = last
+    return out
+
+
+# --------------------------------------------------------------------------
+
+
+def test_closed_form_matches_brute_force() -> list:
+    """The exact interval must agree with a joint-by-joint walk of the fiber."""
+    cases = [
+        ("EXP 3 q2 door", dict(tilt=15.0, x=0.32, z=0.40, half_y=0.26,
+                               obstacles=_zgap_y()), "++-"),
+        ("EXP 4 q6 door", dict(tilt=45.0, x=0.40, z=0.22, half_y=0.34,
+                               obstacles=(BoxObstacle(
+                                   center=(0.095, 0.29, 0.377),
+                                   half_extent=(0.07, 0.07, 0.07),
+                                   label="e4"),)), "-++"),
+    ]
+    out = []
+    for label, kw, page in cases:
+        cfg, arm, weld, scene = _scene(**kw)
+        signs = tuple(1 if c == "+" else -1 for c in page)
+        for d in _doors(cfg, arm, weld, scene, page):
+            cert = certify_fiber(cfg, arm, weld, scene, d, signs)
+            if not cert.exact or cert.empty:
+                continue
+            walk = _walk_fiber(arm, weld, d, signs)
+            if walk is None or walk[+1] is None or walk[-1] is None:
+                continue
+            # The walk stops one sample before the true boundary, so it must
+            # land just inside the closed-form interval, never outside it.
+            step = np.pi / 4000.0
+            assert walk[+1] <= cert.hi + 1e-9, (
+                f"{label}: walk reached {walk[+1]:.6f} > closed-form hi {cert.hi:.6f}")
+            assert walk[-1] >= cert.lo - 1e-9, (
+                f"{label}: walk reached {walk[-1]:.6f} < closed-form lo {cert.lo:.6f}")
+            assert cert.hi - walk[+1] <= step + 1e-9, (
+                f"{label}: closed-form hi {cert.hi:.6f} overshoots the walk "
+                f"{walk[+1]:.6f} by more than one sample")
+            assert walk[-1] - cert.lo <= step + 1e-9, (
+                f"{label}: closed-form lo {cert.lo:.6f} overshoots the walk "
+                f"{walk[-1]:.6f} by more than one sample")
+            out.append((label, d.anchor[0], cert.lo, cert.hi, cert.crossable))
+    assert out, "no doors exercised"
+    return out
+
+
+def test_known_doors_are_not_crossable() -> list:
+    """EXP 3's q2 door and EXP 4's q6 door both fail the connected-interval test.
+
+    EXP 3 misses by the URDF's 0.02 rad safety offset. EXP 4 was documented as
+    "physically crossable, margin +14.46 deg" -- an ENDPOINT check on the
+    2*pi-wrapped mirror representative, which is exactly what invariant 21
+    says is invalid: the traversal takes q7 to -316.62 deg, and mirror_q wraps
+    that to +43.38 deg, inside the limits, but the joint cannot turn there.
+    """
+    out = []
+    cfg, arm, weld, scene = _scene(15.0, 0.32, 0.40, 0.26, _zgap_y())
+    for d in _doors(cfg, arm, weld, scene, "++-"):
+        cert = certify_fiber(cfg, arm, weld, scene, d, (1, 1, -1))
+        assert not cert.crossable, f"EXP 3 door y={d.anchor[0]:.4f} became crossable"
+        out.append(("EXP 3", d.anchor[0], float(np.degrees(cert.margin))))
+
+    cfg, arm, weld, scene = _scene(
+        45.0, 0.40, 0.22, 0.34,
+        (BoxObstacle(center=(0.095, 0.29, 0.377),
+                     half_extent=(0.07, 0.07, 0.07), label="e4"),))
+    for d in _doors(cfg, arm, weld, scene, "-++"):
+        cert = certify_fiber(cfg, arm, weld, scene, d, (-1, 1, 1))
+        assert not cert.crossable, f"EXP 4 door y={d.anchor[0]:.4f} became crossable"
+        out.append(("EXP 4", d.anchor[0], float(np.degrees(cert.margin))))
+    return out
+
+
+def test_null_motion_is_verified_not_assumed() -> float:
+    """The closed form is only claimed where the fiber really moves nothing."""
+    cfg, arm, weld, scene = _scene(15.0, 0.32, 0.40, 0.26, _zgap_y())
+    worst = 0.0
+    for d in _doors(cfg, arm, weld, scene, "++-"):
+        cert = certify_fiber(cfg, arm, weld, scene, d, (1, 1, -1))
+        assert cert.exact, f"null motion not verified at y={d.anchor[0]:.4f}"
+        worst = max(worst, cert.drift_m)
+    assert worst <= cfg.crossing.null_motion_tol_m
+    return worst
+
+
+def test_unknown_never_discharges() -> None:
+    """A door we could not evaluate must stay LIVE, not be certified blocked.
+
+    The old code returned ok=False for "no IK at door" and "fiber not
+    characterised" alike, and live_discs read ok=False as CERTIFIED CLOSED --
+    so the wall was free to route through a door nobody had looked at.
+    """
+    cfg, arm, weld, scene = _scene(15.0, 0.32, 0.40, 0.26, _zgap_y())
+    doors = _doors(cfg, arm, weld, scene, "++-")
+    assert doors
+    d = doors[0]
+    # A disc anchored far off the weld has no IK: the correct answer is
+    # "unknown", never "certified blocked".
+    bogus = dataclasses.replace(d, exact_y=5.0, exact_theta=0.0, y=5.0)
+    verdict = door_passable(cfg, arm, weld, scene, bogus, (1, 1, -1))
+    assert not verdict["certified_blocked"], (
+        "a door with no IK was reported CERTIFIED BLOCKED; that is the bug "
+        "that let walls cross unevaluated doors")
+    assert verdict["unknown"] and verdict["passable"]
+
+
+def test_fold_doors_are_characterised() -> int:
+    """q4 fold doors used to fall through to 'fiber not characterised'."""
+    n = 0
+    for idx, joints in ((0, (0, 2)), (1, (2, 4)), (2, (4, 6))):
+        disc = _fake_disc(idx)
+        assert fiber_pair(disc) == joints, (
+            f"sign index {idx} should counter-rotate joints {joints}")
+        n += 1
+    return n
+
+
+def test_verifier_rejects_tampered_paths() -> int:
+    """Each check must actually fire. A verifier only fed good input is useless."""
+    cfg, arm, weld, scene = _scene(0.0, 0.28, 0.46, 0.26, ())
+    cfg = dataclasses.replace(cfg, crossing=CrossingParams())
+    signs = (1, 1, -1)
+    pm = build_all_pages_shared(cfg, arm, weld, scene, with_kin=False,
+                                verbose=False)["++-"]
+    ij = np.argwhere(pm.valid_mask)
+    ij = ij[np.argsort(ij[:, 0])]          # lowest y first, like the real start
+    start = (float(pm.y_grid[ij[0, 0]]), float(pm.theta_grid[ij[0, 1]]))
+    leg = plan_in_page(cfg, arm, weld, scene, signs, start,
+                       goal_y=cfg.flood.goal_y)
+    assert leg is not None, "no baseline path to tamper with"
+    good = WitnessPath(legs=[leg])
+    assert verify_witness(cfg, arm, weld, scene, good).ok, "baseline must verify"
+
+    fired = 0
+
+    # (a) joint-limit violation
+    bad = Leg(kind=LEG_PAGE, page=signs, q=leg.q.copy(), y=leg.y.copy(),
+              waypoints=leg.waypoints)
+    bad.q[len(bad.q) // 2, 0] = 4.0
+    r = verify_witness(cfg, arm, weld, scene, WitnessPath(legs=[bad]))
+    assert not r.ok and any("joint limit" in f[1] for f in r.failures)
+    fired += 1
+
+    # (b) off the constraint manifold
+    bad = Leg(kind=LEG_PAGE, page=signs, q=leg.q.copy(), y=leg.y.copy(),
+              waypoints=leg.waypoints)
+    bad.q[len(bad.q) // 2, 3] += 0.05
+    r = verify_witness(cfg, arm, weld, scene, WitnessPath(legs=[bad]))
+    assert not r.ok and any("constraint" in f[1] for f in r.failures)
+    fired += 1
+
+    # (c) a jump: two legs that do not meet in Q. This is the 2*pi-wrap trap
+    #     -- the endpoint can be in limits while the joint cannot get there.
+    half = len(leg.q) // 2
+    l1 = Leg(kind=LEG_PAGE, page=signs, q=leg.q[:half].copy(),
+             y=leg.y[:half].copy())
+    l2 = Leg(kind=LEG_PAGE, page=signs, q=leg.q[half + 8:].copy(),
+             y=leg.y[half + 8:].copy())
+    r = verify_witness(cfg, arm, weld, scene, WitnessPath(legs=[l1, l2]))
+    assert not r.ok and any("do not meet in Q" in f[1] for f in r.failures)
+    fired += 1
+
+    # (d) a step larger than step_max inside one leg
+    keep = np.arange(0, len(leg.q), 12)
+    bad = Leg(kind=LEG_PAGE, page=signs, q=leg.q[keep].copy(),
+              y=leg.y[keep].copy())
+    r = verify_witness(cfg, arm, weld, scene, WitnessPath(legs=[bad]))
+    assert not r.ok and any("step" in f[1] for f in r.failures)
+    fired += 1
+
+    # (e) ends short of the goal
+    bad = Leg(kind=LEG_PAGE, page=signs, q=leg.q[:half].copy(),
+              y=leg.y[:half].copy())
+    r = verify_witness(cfg, arm, weld, scene, WitnessPath(legs=[bad]),
+                       goal_y=cfg.flood.goal_y)
+    assert not r.ok and any("short of goal" in f[1] for f in r.failures)
+    fired += 1
+    return fired
+
+
+def test_exact_clearance_is_not_optimistic() -> float:
+    """Scene.check samples the capsule axis, so its clearance is an UPPER bound.
+
+    Harmless for wall verification; wrong-signed for a swept path segment,
+    where an optimistic clearance would certify a segment that collides.
+    """
+    cfg, arm, weld, scene = _scene(0.0, 0.28, 0.46, 0.26, _zgap())
+    rng = np.random.default_rng(11)
+    worst = 0.0
+    for _ in range(60):
+        y = float(rng.uniform(0.0, 1.0))
+        th = float(rng.uniform(-1.0, 1.0))
+        res = arm.ik_branch(*weld.pose(y), th, (1, 1, -1))
+        if not res.ok:
+            continue
+        frames = arm.frames(res.q)
+        sampled = scene.check(frames).clearance
+        exact, _ = exact_clearance(scene, frames)
+        # 1e-9 m, not machine epsilon: segment_box_distance converges by
+        # ternary refinement, so its residual is the floor here, not float64.
+        assert exact <= sampled + 1e-9, (
+            f"exact clearance {exact:.9f} exceeded the sampled {sampled:.9f}; "
+            f"the sampled value is supposed to be an UPPER bound")
+        worst = max(worst, sampled - exact)
+    return worst
+
+
+# -- fixtures ---------------------------------------------------------------
+
+
+def _zgap():
+    return (BoxObstacle(center=(0.14, 0.0, 0.38), half_extent=(0.06,) * 3,
+                        label="low"),
+            BoxObstacle(center=(0.14, 0.0, 0.66), half_extent=(0.06,) * 3,
+                        label="high"))
+
+
+def _zgap_y():
+    return tuple(dataclasses.replace(b, center=(b.center[0], b.center[1] + 0.10,
+                                                b.center[2]))
+                 for b in _zgap())
+
+
+def _fake_disc(idx):
+    from zzy_rss.doors import DOOR_INTERIOR, SigmaDisc
+    return SigmaDisc(kind=DOOR_INTERIOR, y=0.5, theta=0.0, radius=0.02,
+                     radius_theta=0.02, vanishing=frozenset({idx}))
+
+
+if __name__ == "__main__":
+    rows = test_closed_form_matches_brute_force()
+    print(f"[witness] closed form     : matches a 4001-step fiber walk on "
+          f"{len(rows)} door(s), to within one sample")
+    margins = test_known_doors_are_not_crossable()
+    print("[witness] known doors     : none crossable --")
+    for label, y, deg in margins:
+        print(f"              {label} door y={y:.4f}: short of +/-pi by "
+              f"{abs(deg):.4f} deg")
+    drift = test_null_motion_is_verified_not_assumed()
+    print(f"[witness] null motion     : verified, worst drift {drift * 1e3:.2e} mm")
+    test_unknown_never_discharges()
+    print("[witness] unknown doors   : stay live (never 'certified blocked')")
+    n = test_fold_doors_are_characterised()
+    print(f"[witness] fiber pairs     : all {n} sign indices characterised "
+          f"(q4 fold doors included)")
+    fired = test_verifier_rejects_tampered_paths()
+    print(f"[witness] verifier        : rejects all {fired} tampered paths "
+          f"(limits, constraint, junction, step, goal)")
+    gap = test_exact_clearance_is_not_optimistic()
+    print(f"[witness] exact clearance : never above the sampled value "
+          f"(worst optimism {gap * 1e3:.3f} mm)")
+    print("[witness] ALL TESTS PASSED")
