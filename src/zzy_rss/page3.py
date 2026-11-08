@@ -78,32 +78,97 @@ class Page3:
     """One sign branch of the patch task, as a PRM in (u, v, theta)."""
 
     def __init__(self, cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
-                 signs: tuple, p3: Page3Params, start_theta: float,
-                 n_samples: int | None = None):
+                 signs: tuple, p3: Page3Params, start_theta: float | None,
+                 n_samples: int | None = None, inject: np.ndarray | None = None):
+        """`start_theta` None builds a page with no start posture (a partner
+        page of the flood). `inject` are extra states (near-door points)
+        made vertices when valid; `inject_index[i]` is the vertex of the i-th
+        one, or -1 if it is invalid on this page."""
         self.cfg, self.arm, self.surf, self.scene = cfg, arm, surf, scene
         self.signs, self.p3 = signs, p3
         self.scale = np.asarray(p3.scale, dtype=float)
         self.lo = np.array([0.0, 0.0, p3.theta_min])
         self.hi = np.array([1.0, 1.0, p3.theta_max])
-        self.start = np.array([p3.start_u, p3.start_v, start_theta], dtype=float)
-        if not self.valid_fn(self.start):
-            raise ValueError(f"start pose {self.start} is not valid on page {signs}")
+        head = []
+        self.start = None
+        if start_theta is not None:
+            self.start = np.array([p3.start_u, p3.start_v, start_theta], dtype=float)
+            if not self.valid_fn(self.start):
+                raise ValueError(f"start pose {self.start} is not valid on page {signs}")
+            head.append(self.start)
+        # Injected states next, so their indices are stable and never thinned.
+        inject = np.zeros((0, 3)) if inject is None else np.asarray(inject, dtype=float)
+        self.inject_index = np.full(len(inject), -1, dtype=int)
+        for i, x in enumerate(inject):
+            if self.valid_fn(x):
+                self.inject_index[i] = len(head)
+                head.append(x)
         rng = np.random.default_rng(p3.rng_seed)
         n = int(n_samples or p3.n_samples)
         pts = rng.uniform(self.lo, self.hi, size=(n, 3))
         ok = np.array([self.valid_fn(x) for x in pts])
-        # The start goes first so its index is 0 and it is never thinned.
-        self.valid = np.vstack([self.start[None, :], pts[ok]])
+        self.valid = np.vstack([np.asarray(head).reshape(-1, 3), pts[ok]])
         self.invalid = pts[~ok]
+        # Lazy PRM (findings 43): edges a witness found invalid between the
+        # edge checker's samples are blacklisted and the graph rebuilt.
+        self.blacklist: set = set()
+        self._edge_cache: dict = {}
         self._build_graph()
+        self._focus = int(self.comp[0]) if self.start is not None else None
+
+    def rebuild(self) -> None:
+        """Recompute the forest and components without the blacklisted edges
+        (cached edge checks make this cheap). Component ids change."""
+        self._build_graph()
+        self._focus = int(self.comp[0]) if self.start is not None else None
 
     def valid_fn(self, pt) -> bool:
         return classify3(self.cfg, self.arm, self.surf, self.scene, pt, self.signs)
 
+    def _state(self, pt) -> tuple:
+        """(valid, q) of one state -- classify3, keeping the joint vector."""
+        cfg = self.cfg
+        pos, rot = self.surf.pose(float(pt[0]), float(pt[1]))
+        res = self.arm.ik_branch(pos, rot, float(pt[2]), self.signs,
+                                 coord_axis_tol=cfg.pagemap.coord_axis_tol,
+                                 coord_radius_tol=cfg.pagemap.coord_radius_tol)
+        if not res.ok or not self.arm.within_limits(res.q):
+            return False, None
+        return (not self.scene.check(self.arm.frames(res.q)).in_collision), res.q
+
     def _edge(self, a: np.ndarray, b: np.ndarray) -> bool:
+        """A straight page edge, checked to the WITNESS standard (findings 43).
+
+        Samples every edge_resolution in page coordinates, then bisects any
+        gap whose JOINT step exceeds witness.step_max. Near a door the joints
+        move fast per unit of page distance, and a fixed page step can stride
+        over a thin out-of-limits sliver: on EXP 4's patch, seven lazy-PRM
+        rounds kept finding new such edges. A gap that does not shrink under
+        bisection is a jump, not a path, and fails the edge."""
         step = self.cfg.planner.edge_resolution
+        jmax = float(self.cfg.witness.step_max)
         m = max(2, int(np.ceil(float(np.linalg.norm((b - a) * self.scale)) / step)))
-        return all(self.valid_fn(a + t * (b - a)) for t in np.linspace(0.0, 1.0, m + 1))
+        ts = np.linspace(0.0, 1.0, m + 1)
+        qs = []
+        for t in ts:
+            ok, q = self._state(a + t * (b - a))
+            if not ok:
+                return False
+            qs.append(q)
+        stack = [(ts[i], qs[i], ts[i + 1], qs[i + 1], 0) for i in range(m)]
+        while stack:
+            t0, q0, t1, q1, depth = stack.pop()
+            if float(np.abs(q1 - q0).max()) <= jmax:
+                continue
+            if depth >= 14:
+                return False
+            tm = 0.5 * (t0 + t1)
+            ok, qm = self._state(a + tm * (b - a))
+            if not ok:
+                return False
+            stack.append((t0, q0, tm, qm, depth + 1))
+            stack.append((tm, qm, t1, q1, depth + 1))
+        return True
 
     def _build_graph(self) -> None:
         """k-NN candidates, shortest first, validated only when they would
@@ -119,9 +184,11 @@ class Page3:
         uf = UnionFind(n)
         self.adj = [[] for _ in range(n)]
         for _w, i, j in cand:
-            if uf.find(i) == uf.find(j):
+            if uf.find(i) == uf.find(j) or (i, j) in self.blacklist:
                 continue
-            if self._edge(self.valid[i], self.valid[j]):
+            if (i, j) not in self._edge_cache:
+                self._edge_cache[(i, j)] = self._edge(self.valid[i], self.valid[j])
+            if self._edge_cache[(i, j)]:
                 uf.union(i, j)
                 self.adj[i].append(j)
                 self.adj[j].append(i)
@@ -133,7 +200,29 @@ class Page3:
 
     @property
     def start_comp(self) -> int:
-        return int(self.comp[0])
+        """The component a wall is currently being built for: the start's on
+        the start page, whichever region the flood is on otherwise."""
+        return self._focus
+
+    def set_focus(self, comp: int) -> None:
+        self._focus = int(comp)
+
+    def path(self, a: int, targets: np.ndarray) -> list | None:
+        """Vertex indices from vertex a to the first vertex with targets[j]
+        True, along the validated forest (BFS)."""
+        prev = {a: None}
+        queue = [a]
+        for i in queue:
+            if targets[i]:
+                out = [i]
+                while prev[out[-1]] is not None:
+                    out.append(prev[out[-1]])
+                return out[::-1]
+            for j in self.adj[i]:
+                if j not in prev:
+                    prev[j] = i
+                    queue.append(j)
+        return None
 
     def goal_mask(self) -> np.ndarray:
         return self.valid[:, 0] >= 1.0 - self.p3.goal_tol
@@ -194,20 +283,7 @@ class Page3:
 
     def path_to_goal(self) -> list | None:
         """Vertex indices from the start to a goal vertex, along the forest."""
-        goal = self.goal_mask()
-        prev = {0: None}
-        queue = [0]
-        for i in queue:
-            if goal[i]:
-                out = [i]
-                while prev[out[-1]] is not None:
-                    out.append(prev[out[-1]])
-                return out[::-1]
-            for j in self.adj[i]:
-                if j not in prev:
-                    prev[j] = i
-                    queue.append(j)
-        return None
+        return self.path(0, self.goal_mask())
 
 
 def choose_start_theta(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
@@ -263,38 +339,53 @@ def theta_cut_check(page: Page3) -> dict:
 # --------------------------------------------------------------------------
 
 
-def witness_path3(page: Page3, idx: list) -> WitnessPath | None:
-    """Densify a roadmap path and solve IK at every sample. Refined until the
-    JOINT step respects step_max -- the bound the verifier rests on."""
-    arm, surf, wp = page.arm, page.surf, page.cfg.witness
-    way = page.valid[idx]
+def densify3(arm: SrsArm, surf: WeldSurface, wp, scale: np.ndarray, way: np.ndarray,
+             signs_of) -> tuple:
+    """IK at samples along a polyline of page states, refined until the JOINT
+    step respects step_max -- the bound the verifier rests on.
+
+    `signs_of(a_index, t)` gives the sign branch for the sample at parameter t
+    of segment a_index: constant for a page leg; switching mid-segment for a
+    straight-through door crossing. Returns (q, uv) or (None, None)."""
     qs, uv = [], []
-    for a, b in zip(way[:-1], way[1:]):
-        n = max(2, int(np.ceil(float(np.linalg.norm((b - a) * page.scale)) / wp.page_step)))
-        for _ in range(8):
+    for si, (a, b) in enumerate(zip(way[:-1], way[1:])):
+        n = max(2, int(np.ceil(float(np.linalg.norm((b - a) * scale)) / wp.page_step)))
+        seg = None
+        for _ in range(10):
             seg = []
             for t in np.linspace(0.0, 1.0, n + 1):
                 p = a + t * (b - a)
                 r = arm.ik_branch(*surf.pose(float(p[0]), float(p[1])), float(p[2]),
-                                  page.signs)
+                                  signs_of(si, t))
                 if not r.ok:
-                    return None
+                    return None, None
                 seg.append((r.q, p[:2].copy()))
-            qq = np.asarray([s[0] for s in seg])
+            qq = np.asarray([x[0] for x in seg])
             if float(np.abs(np.diff(qq, axis=0)).max()) <= wp.step_max:
                 break
             n *= 2
         for q_i, uv_i in seg[:-1]:
             qs.append(q_i)
             uv.append(uv_i)
-    r = arm.ik_branch(*surf.pose(float(way[-1][0]), float(way[-1][1])), float(way[-1][2]),
-                      page.signs)
+    last = way[-1]
+    r = arm.ik_branch(*surf.pose(float(last[0]), float(last[1])), float(last[2]),
+                      signs_of(len(way) - 2, 1.0))
     if not r.ok:
-        return None
+        return None, None
     qs.append(r.q)
-    uv.append(way[-1][:2].copy())
-    return WitnessPath(legs=[Leg(kind=LEG_PAGE, page=page.signs, q=np.asarray(qs),
-                                 y=np.asarray(uv), waypoints=way)])
+    uv.append(last[:2].copy())
+    return np.asarray(qs), np.asarray(uv)
+
+
+def witness_path3(page: Page3, idx: list) -> WitnessPath | None:
+    """Densify a roadmap path on one page into a verifiable leg."""
+    way = page.valid[idx]
+    q, uv = densify3(page.arm, page.surf, page.cfg.witness, page.scale, way,
+                     lambda _i, _t: page.signs)
+    if q is None:
+        return None
+    return WitnessPath(legs=[Leg(kind=LEG_PAGE, page=page.signs, q=q, y=uv,
+                                 waypoints=way)])
 
 
 # --------------------------------------------------------------------------
@@ -509,6 +600,79 @@ def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
     return poly, rep, checked_wall, log
 
 
+def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
+                verbose: bool = True) -> dict:
+    """Build and check the wall around the page's FOCUS component.
+
+    The training set is the d = 3 recipe of findings 42: the focus
+    component (seed) vs the goal components (rest), eta-separated; face
+    anchors; goal-face samples; the outside ring; the live door tubes (a
+    curve near the region goes in the seed class, others in the rest).
+
+    ok means a usable certificate for THIS region: closed, every triangle in
+    C_obs, every entry state inside, and the whole goal slab outside (the
+    wall's u-range ends before it). `live_inside[i]` says whether live
+    curve i lies inside -- the guard keeps every tube wholly on one side, so
+    one point decides.
+    """
+    p3 = page.p3
+    st: dict = {}
+    rng = np.random.default_rng(p3.rng_seed + 3)
+    region = page.seed_points()
+    seed = region
+    if len(seed) > p3.n_train_max:
+        seed = seed[rng.choice(len(seed), p3.n_train_max, replace=False)]
+    seed = np.vstack([entries, seed])
+    rest0 = page.rest_points()
+    if len(rest0) > p3.n_train_max:
+        rest0 = rest0[rng.choice(len(rest0), p3.n_train_max, replace=False)]
+    if cfg.wall.eta_separation > 0.0:
+        seed, rest0, n_cut = eta_separate(seed, rest0, cfg.wall.eta_separation, page.scale)
+        st["eta_cut"] = int(n_cut)
+    a_seed, a_rest = face_anchors(page, rng)
+    st["face_anchors"] = [len(a_seed), len(a_rest)]
+    if len(a_seed):
+        seed = np.vstack([seed, a_seed])
+    gface = rng.uniform(page.lo, page.hi, size=(int(p3.goal_face_samples), 3))
+    gface[:, 0] = 1.0 - p3.goal_tol
+    rest = np.vstack([rest0, a_rest, gface,
+                      virtual_ring3(cfg, page, int(p3.ring_per_face), rng)])
+    s_extra, r_extra = tube_samples(live, region, page.scale, 0.03)
+    if len(s_extra):
+        seed = np.vstack([seed, s_extra])
+    if len(r_extra):
+        rest = np.vstack([rest, r_extra])
+    inv = page.invalid
+    if len(inv) > p3.n_invalid_max:
+        inv = inv[rng.choice(len(inv), p3.n_invalid_max, replace=False)]
+
+    oracle = robot_oracle3(cfg, page, live)
+    poly, rep, wall, log = find_wall3(cfg, page, seed, rest, inv, oracle, verbose)
+    st["alg4"] = log
+    info = dict(closed=poly.closed, facets=f"{rep.n_passed}/{rep.n_facets}",
+                gamma=round(float(wall.gamma), 2), ok=bool(rep.ok and poly.closed))
+    out = dict(ok=False, poly=poly, wall=info, stats=st, live_inside=[], reason="")
+    if not info["ok"]:
+        why = rep.failures[0][1] if rep.failures else (poly.note or "not closed")
+        out["reason"] = f"no verified wall ({info['facets']} facets; {why})"
+        return out
+    verts, simp = poly.vertices * page.scale, poly.simplices
+    if not np.all(inside(np.asarray(entries) * page.scale, verts, simp, 2)):
+        out["reason"] = "verified wall does not enclose every entry state"
+        return out
+    u_max = float(poly.vertices[:, 0].max())
+    st["wall_u_max"] = u_max
+    info["u_max"] = round(u_max, 4)
+    if u_max >= 1.0 - p3.goal_tol:
+        out["reason"] = (f"wall reaches u={u_max:.4f}: the goal slab is not provably "
+                         f"outside")
+        return out
+    out["live_inside"] = [bool(inside(c.pts[:1] * page.scale, verts, simp, 2)[0])
+                          for c in live]
+    out["ok"] = True
+    return out
+
+
 # --------------------------------------------------------------------------
 # the decision
 # --------------------------------------------------------------------------
@@ -585,57 +749,15 @@ def prove3(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
                   f"{d['u_range'][1]:.3f}]: {'LIVE' if d['live'] else 'discharged'} "
                   f"-- {d['reason']}")
 
-    rng = np.random.default_rng(p3.rng_seed + 3)
-    seed = page.seed_points()
-    if len(seed) > p3.n_train_max:
-        seed = seed[np.r_[0, 1 + rng.choice(len(seed) - 1, p3.n_train_max - 1, replace=False)]]
-    rest0 = page.rest_points()
-    if len(rest0) > p3.n_train_max:
-        rest0 = rest0[rng.choice(len(rest0), p3.n_train_max, replace=False)]
-    if cfg.wall.eta_separation > 0.0:
-        seed, rest0, n_cut = eta_separate(seed, rest0, cfg.wall.eta_separation, page.scale)
-        st["eta_cut"] = int(n_cut)
-    a_seed, a_rest = face_anchors(page, rng)
-    st["face_anchors"] = [len(a_seed), len(a_rest)]
-    if len(a_seed):
-        seed = np.vstack([seed, a_seed])
-    gface = rng.uniform(page.lo, page.hi, size=(int(p3.goal_face_samples), 3))
-    gface[:, 0] = 1.0 - p3.goal_tol
-    rest = np.vstack([rest0, a_rest, gface,
-                      virtual_ring3(cfg, page, int(p3.ring_per_face), rng)])
-    s_extra, r_extra = tube_samples(live, page.seed_points(), page.scale, 0.03)
-    if len(s_extra):
-        seed = np.vstack([seed, s_extra])
-    if len(r_extra):
-        rest = np.vstack([rest, r_extra])
-    inv = page.invalid
-    if len(inv) > p3.n_invalid_max:
-        inv = inv[rng.choice(len(inv), p3.n_invalid_max, replace=False)]
-
-    oracle = robot_oracle3(cfg, page, live)
-    poly, rep, wall, log = find_wall3(cfg, page, seed, rest, inv, oracle, verbose)
-    st["alg4"] = log
+    w = region_wall(cfg, page, live, page.start[None, :], verbose=verbose)
+    st.update(w["stats"])
     st["seconds"] = round(time.time() - t0, 1)
-    walls = [dict(closed=poly.closed, facets=f"{rep.n_passed}/{rep.n_facets}",
-                  gamma=round(float(wall.gamma), 2), ok=bool(rep.ok and poly.closed))]
-    if not (rep.ok and poly.closed):
-        why = rep.failures[0][1] if rep.failures else (poly.note or "not closed")
-        return Result3(INCONCLUSIVE, f"no verified wall ({walls[0]['facets']} facets; "
-                       f"{why})", st, doors, walls, poly=poly)
-
-    verts, simp = poly.vertices * page.scale, poly.simplices
-    if not inside(page.start[None, :] * page.scale, verts, simp, 2)[0]:
-        return Result3(INCONCLUSIVE, "verified wall does not enclose the start",
-                       st, doors, walls, poly=poly)
-    u_max = float(poly.vertices[:, 0].max())
-    st["wall_u_max"] = u_max
-    if u_max >= 1.0 - p3.goal_tol:
-        return Result3(INCONCLUSIVE, f"wall reaches u={u_max:.4f}: the goal slab is not "
-                       f"provably outside", st, doors, walls, poly=poly)
-    for c in live:
-        if inside(c.pts[:1] * page.scale, verts, simp, 2)[0]:
-            return Result3(INCONCLUSIVE, f"live q{c.joint} door curve is INSIDE the wall: "
-                           f"following it needs the 3-D cross-page flood",
-                           st, doors, walls, poly=poly)
+    if not w["ok"]:
+        return Result3(INCONCLUSIVE, w["reason"], st, doors, [w["wall"]], poly=w["poly"])
+    inside_live = [c for c, ins in zip(live, w["live_inside"]) if ins]
+    if inside_live:
+        return Result3(INCONCLUSIVE, f"live q{inside_live[0].joint} door curve is INSIDE "
+                       f"the wall: following it needs the cross-page flood "
+                       f"(flood3.run_flood3)", st, doors, [w["wall"]], poly=w["poly"])
     return Result3(INFEASIBLE, "closed wall, every triangle in C_obs, start inside, goal "
-                   "slab and every live door outside", st, doors, walls, poly=poly)
+                   "slab and every live door outside", st, doors, [w["wall"]], poly=w["poly"])

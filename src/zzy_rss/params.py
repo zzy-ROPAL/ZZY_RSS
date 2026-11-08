@@ -226,6 +226,19 @@ class Page3Params:
     tube_radius: tuple = (0.02, 0.02, 0.06)
     cert_stride: int = 4
     cert_lipschitz_safety: float = 2.0
+    # Cross-page flood (findings 43): crossing endpoints p +/- cross_eps d
+    # (scaled) are injected into every page at every cert_stride-th curve
+    # sample, eight directions across the curve. A straight-through crossing
+    # is the segment between such a pair.
+    cross_eps: float = 0.004
+    # Lazy PRM: when a spliced path fails verification, blacklist the roadmap
+    # edges that failed, rebuild, and run the flood again -- at most this
+    # many times. The edge checker samples every edge_resolution, which can
+    # step over a thin out-of-limits sliver near a singularity; the witness
+    # densifies to a JOINT step bound and does not.
+    lazy_rounds: int = 6
+    # Crossing pairs tried per door hop before phase 1 gives up on a route.
+    cross_tries: int = 400
 
 
 @dataclass(frozen=True)
@@ -623,6 +636,20 @@ class CrossingParams:
     # Require a connected admissible interval spanning 0 -> +/-pi (item #0).
     # Switching this off restores the old "any valid point" semantics.
     require_connected: bool = True
+    # What may DISCHARGE a door (findings 43). "posture" (default): only facts
+    # about the door POSTURE -- it is in collision, or a joint that does not
+    # move along the fiber is out of range. "fiber_interval" (legacy): also
+    # the delta-interval verdicts ("short of +/-pi", "delta = 0 not
+    # admissible").
+    #
+    # The legacy verdicts are UNSOUND. At a q2 door the q1/q3 axes coincide,
+    # so the IK's q1 there is atan2(0, 0) -- 0 on one page, -180 deg on the
+    # other -- and the interval is measured from that artifact. A robot
+    # arriving from direction d holds q1 = the elbow azimuth along d and can
+    # cross STRAIGHT THROUGH (q2: + -> -, q1 and q3 continuous, no fiber
+    # motion). On EXP 3's door, "short by 1.15 deg -> NOT crossable", 23 of 24
+    # straight-through crossings pass verify_witness.
+    discharge: str = "posture"
 
 
 @dataclass(frozen=True)
@@ -661,6 +688,12 @@ class WitnessParams:
     # With 49 samples on a 0.33 m link the error reaches ~3.4 mm. A witness
     # path is a one-off, so it pays for the exact routine instead.
     exact_collision: bool = True
+    # A straight-through door crossing switches spelling a hair either side
+    # of the door point, as a FRACTION of the crossing half-length (findings
+    # 43). The door point itself is never sampled: its IK spelling is an
+    # atan2(0, 0) artifact. Not much smaller: within ~1e-9 of the
+    # singularity the IK's orientation error (1.2e-6 rad) exceeds tol_rot.
+    cross_hair: float = 1.0e-3
     # Roadmap used to produce in-page legs. Separate from PlannerParams so
     # path planning can be dense without changing the proof-side sampling.
     prm_samples: int = 1500

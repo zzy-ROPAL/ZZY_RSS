@@ -30,6 +30,25 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### ⛔🆕 2026-11-08(五):**门的"不可穿越"是假象;EXP 3 的不可行证书撤回**(§43)
+>
+> q2/q6 门处相邻两关节**轴重合**,IK 在**精确门点**给的 q_i 是 atan2(0,0) 的舍入
+> (EXP 3:A 页 q1=0°,B 页 −180°)。§30/§37 的"差 1.15°、到不了 ±π"、不变量 17/21
+> 比较的就是这两个假象。机器人从任意方向**直穿**过门(q2 变号,q1/q3 连续):
+> **EXP 3 的门 23/24、EXP 4 的门 22/24 条直穿路径通过 `verify_witness`**。
+>
+> | | 以前 | **现在** |
+> |---|---|---|
+> | 门的卸载 | 区间判据也卸 | **只有姿态事实卸**(碰撞 / 不动关节越限):`discharge="posture"` |
+> | 2-D EXP 2 | INFEASIBLE 144/144 | **不变**(门是碰撞卸载的) |
+> | 2-D EXP 3 | INFEASIBLE 156/156 | **INCONCLUSIVE**(门活,墙 γ=400 建不出)—— **旧证书靠的是假象** |
+> | EXP 4 | "门不可物理穿越" | **撤回**:门可直穿;但起始边与门之间隔着 q3 越限薄条 |
+>
+> **3 维跨页泛洪已实现**(`flood3.py`):过门 = 直穿或纤维旋转(q_i+q_k 两侧相等),
+> 先连通后建墙,墙内活门同时跟**伙伴页与本页**,懒惰 PRM,路图边按见证步长校验。
+> 跨页**已验证路径**:直穿 4136 构型、纤维旋转 223.6° 3189 构型(`tests/test_flood3.py`)。
+> **还没有**"必须两面墙"的不可行场景:ZGAP 族里 **q2 门就是通道**,门活 ⇔ 通道开。
+
 > ### 🆕 2026-11-08(四):**第一个 d=3 实验跑通**(§42)
 >
 > 焊缝扫成**面片**(EXP 2 的线沿 z 扫 ±5 cm),页是 `(u, v, θ)`,全程无网格:
@@ -261,6 +280,9 @@ python3 tests/test_tdc.py                                  # 墙的 TDC 重建:�
 python3 tests/test_facets.py                               # Alg 3 的三角形面:球壳合成页 + 门的管守卫(§41)
 python3 tests/test_page3.py                                # d=3 面片:门曲线、卸载、FEASIBLE/INFEASIBLE、θ 切口(§42)
 python3 scripts/run_3d.py --obstacle zgap                 # 第一个 d=3 实验(--obstacle none 为可行对照)
+python3 tests/test_crossing.py                             # 门直穿:假象、23/24 验证、只认姿态事实(§43)
+python3 tests/test_flood3.py                               # 3 维跨页路径:直穿 + 纤维旋转、整圈不匹配被拒(§43)
+python3 scripts/run_3d.py --patch exp2 --flood             # 3 维跨页泛洪(--patch exp3/exp4,--tilt,--high-z,--start-page)
 python3 scripts/run_demo.py --res 61 --out out/demo        # 三个案例 + 视频 + 图
 python3 scripts/make_summary.py out/demo                   # 汇总 SUMMARY.md
 python3 scripts/visualize.py --tilt 30 --no-obstacle       # 3D 场景/分支/纤维图
@@ -331,6 +353,9 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | 旧重建(网格) | `plt.contour`,只为复现旧数字(`reconstruction="contour"`) | `reconstruct_wall_contour()` in `wall.py` |
 | IJRR Alg 3 查面 | **Σ 守卫在最前** → 最小包围球 → `Y⁺` 穿透深度 → 细分递归;**段与三角形共用**,机器人部分走 `FacetOracle` | `src/zzy_rss/facets.py`,`robot_facet_oracle()` in `wall.py` |
 | d=3 门的守卫 | 门是**曲线**,邻域是**椭圆管**;三角形–线段**精确**距离 + 包围球粗筛 | `triangle_hits_tube()` in `facets.py` |
+| **门的卸载规则** | 只认姿态事实(碰撞 / 不动关节越限) | `posture_blocked()` in `doors.py`,`certify_curve()` in `doors3.py` |
+| **3 维跨页泛洪** | 注入过门端点 → 阶段 1 连通(配对 q_i+q_k 相等)→ 阶段 2 逐区域建墙,活门跟伙伴页与本页;懒惰 PRM | `run_flood3()` in `flood3.py` |
+| **过门腿** | 直穿或纤维反转,从不采样门点 | `door_crossing_leg()` in `flood3.py` |
 | **焊接面片** | `p(u,v)` 平面片,姿态固定;每个 v 切片是一条 `WeldLine` | `WeldSurface` in `weld.py` |
 | **d=3 页** | 路图(无网格)、θ 切口检查、面锚点、目标面样本、Alg 4、单页判定 | `src/zzy_rss/page3.py` |
 | **d=3 门曲线** | q2/q6 门 = 球 ∩ 腕心平面 = 圆(闭式);折叠/Σ_coord 碰到面片就拒绝;沿曲线 Lipschitz 守卫的认证 | `src/zzy_rss/doors3.py` |
@@ -418,7 +443,7 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
     还要求给机器人到不了的区域建墙。EXP 3 用 `seeds=[(START_PAGE, kA)]`
     把命题收回到"起点是一个位姿",与 EXP 2 的单面墙一致。
 
-17. **门的两个代表元差 q₁ 整 180°,真机限位是 ±178.85°。**(§30)
+17. ~~**门的两个代表元差 q₁ 整 180°,真机限位是 ±178.85°。**(§30)~~ **已撤回(§43)**:那两个代表元是门点上 atan2(0,0) 的假象,机器人直穿过门不需要转 180°。下文仅作历史记录。
     沿门的纤维机器人**一动不动**(连杆位移 0.000 mm):`q2=0` 使 q1/q3 轴共线,
     `(q1+δ, q3−δ)` 是纯万向节零运动。本任务的门全在 θ=0(q₁=0),
     镜像恒为 |q₁|=180° > 178.85°。所以门只在**保守意义**上是开的:
@@ -444,7 +469,7 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
     于是报 `facet centre is VALID`。现在 `virtual_band_outer=2.0`、
     `virtual_ring=2.5`、`recon_margin=3.0`,三者必须严格递增。
 
-21. **q2 门永远不可物理穿越,q6 门可以。**(§33e)q2 门结构性地落在 θ=0
+21. ~~**q2 门永远不可物理穿越,q6 门可以。**(§33e)~~ **已撤回(§43)**:q2 门可直穿(EXP 3 的门 23/24 条直穿路径通过验证)。下文仅作历史记录。q2 门结构性地落在 θ=0
     ⇒ q1=0 ⇒ s2 镜像 |q1|=180° 超限 1.15°(§30)。q6 门落在 θ≈±0.354,
     镜像动的 q5≈35°、q7≈121°,离 ±180° 都很远 ⇒ 伙伴页代表元在限位内。
     **EXP 4 要用 q6 门**(待办 2)。
@@ -537,6 +562,24 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 
 40. **门曲线的卸载是 Lipschitz 守卫,不是证明。**(§42)每个样本是精确闭式;
     样本之间靠"同一机制的余量 > 2 × 相邻变化"。机制混杂或任一样本不精确 ⇒ 留着。
+
+41. **只有姿态事实能卸载一道门。**(§43)门姿态碰撞、或沿纤维不动的关节越限 ⇒ 卸载;
+    "区间到不了 ±π""δ=0 不可行"都是从门点 IK 的假象拆分量出来的 ⇒ **不卸载**。
+    `CrossingParams.discharge="posture"`;`"fiber_interval"` 只为复现旧数字。
+
+42. **过门路径从不采样精确门点。**(§43)门点的拼写是假象;过门腿是
+    `x → p⁺ →(精确门姿态,按到达拆分)→ 纤维反转 →(按离开拆分)→ p⁺' → x'`。
+    两侧 q_i+q_k 必须相等,差一整圈就拒绝(要绕关节一圈,限位不允许)。
+
+43. **墙内的活门要同时跟进伙伴页和本页。**(§43)门处可以转纤维从任意方向离开,
+    包括回到**本页另一个分量**。只跟伙伴页会漏区域 ⇒ 可能假 INFEASIBLE。
+
+44. **路图边按见证标准校验。**(§43)固定页步长会跨过奇异点附近的越限薄条,
+    造出不存在的连通(EXP 4:3515 → 254 顶点)。关节步长 > `step_max` 处二分;
+    拼接路径仍失败 ⇒ 懒惰 PRM 拉黑该边重来。
+
+45. **2 维"区域含门"的结论也可能是网格假象。**(§43,不变量 8 的又一例)
+    EXP 4 的起始边分量与门所在分量之间隔着 q3 越限薄条(连线关节跳 2π)。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
@@ -748,7 +791,7 @@ PRM 的边按 `edge_resolution=0.01` 查过。**路径这件事上 PRM 严格优
    并排除了**逐列割**与横杆族;一般障碍见 §35,焊缝**方向**是另一个旋钮
 8. `d=3` 场景([IROS] 2D 曲面),此时三角化与 IJRR 的真实开销结构才回归。
    **第一个 d=3 实验已跑通**(§42:平面片,单页,FEASIBLE 与 INFEASIBLE 都有)。
-   还缺:**3 维跨页泛洪**(活门在墙内现在是 INCONCLUSIVE)、门曲线认证的严格化、
+   **3 维跨页泛洪已实现**(§43);还缺一个"必须两面墙"的不可行场景(ZGAP 族里 q2 门就是通道)、门曲线认证的严格化、
    **弯曲面片**(门曲线要数值求根)、d=2 补上"目标线在墙外"的精确检查(不变量 38)。
    **这才是上 C++ / Gudhi / FCL 的触发条件**,不是现在这个 2-D 演示
    (`docs/seven_questions.md` Q1/Q2:证明本身已经 0.64 s)

@@ -282,6 +282,17 @@ def certify_curve(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
     curve.cert = dict(n_samples=len(idx), kinds=sorted(str(k) for k in kinds),
                       unit=unit, min_margin=float(conv(margins.min())),
                       max_jump=float(conv(jump)))
+    posture_kinds = {"collision"} | {k for k in kinds
+                                     if k and k.startswith("constant-")}
+    if (getattr(cfg.crossing, "discharge", "posture") == "posture"
+            and not kinds <= posture_kinds):
+        # Interval verdicts ("short-of-pi", "own-spelling-out",
+        # "no-admissible") are measured from the IK's spelling at the
+        # singular point and do not discharge (findings 43).
+        curve.certified_blocked, curve.unknown = False, True
+        curve.reason = (f"blocked at every sample by {sorted(str(k) for k in kinds)}, "
+                        f"but only posture blockers discharge (findings 43); stays live")
+        return curve
     if len(kinds) != 1 or None in kinds:
         curve.certified_blocked, curve.unknown = False, True
         curve.reason = (f"blocked at every sample, but by {sorted(str(k) for k in kinds)}"

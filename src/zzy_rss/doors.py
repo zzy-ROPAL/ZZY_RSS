@@ -944,6 +944,20 @@ def partner_spelling_check(
     }
 
 
+def posture_blocked(cert: FiberCertificate) -> bool:
+    """Is the door POSTURE itself unusable? (findings 43)
+
+    True only for blockers that hold for every joint spelling of the door
+    posture: it is in collision, or a joint that does not move along the
+    fiber is out of range. Not the moving pair's interval: that is measured
+    from the IK's spelling at the singular point, which is arbitrary.
+    """
+    if not cert.exact or not cert.empty:
+        return False
+    b = str(cert.blocker)
+    return b.startswith("collision") or b.startswith("joint-limit:q")
+
+
 def door_passable(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     disc: SigmaDisc, page: tuple[int, int, int],
@@ -964,6 +978,24 @@ def door_passable(
     """
     if cfg.crossing.exact:
         cert = certify_fiber(cfg, arm, weld, scene, disc, page)
+        if getattr(cfg.crossing, "discharge", "posture") == "posture":
+            # Only POSTURE facts discharge (findings 43): the door posture is
+            # in collision, or a joint that does not move along the fiber is
+            # out of range. Both hold for every spelling the robot could
+            # arrive in. Interval verdicts are measured from the IK's q1 at
+            # the singular point, which is an atan2(0, 0) artifact, and a
+            # straight-through crossing needs no fiber motion at all.
+            if posture_blocked(cert):
+                return {"passable": False, "certified_blocked": True,
+                        "unknown": False, "exact": True, "reason": cert.reason,
+                        "certificate": cert.as_dict()}
+            return {"passable": True, "certified_blocked": False,
+                    "unknown": not cert.crossable, "exact": cert.exact,
+                    "reason": (cert.reason if cert.crossable or not cert.exact else
+                               f"door posture is valid; {cert.reason} is measured "
+                               f"from the singular IK spelling and does not "
+                               f"discharge (findings 43)"),
+                    "certificate": cert.as_dict()}
         if cert.exact and not cert.crossable and (cert.empty or not cert.at_zero
                                                   or cert.direction == 0):
             return {"passable": False, "certified_blocked": True,
