@@ -471,6 +471,71 @@ def test_roadmap_finds_the_same_doors_as_the_grid() -> list:
     return rows
 
 
+def test_link_shape_changes_collision_not_ik() -> dict:
+    """What the eight-page sharing really assumes (findings 38e).
+
+    Link SHAPE never enters inverse kinematics. IK sees joint axes, link
+    LENGTHS, the target pose, the arm angle and the sign branch -- nothing
+    about what the links look like. So with meshes instead of capsules the IK
+    is bit-for-bit what it was: same existence, same eight joint vectors, same
+    shoulder/elbow/wrist/tool.
+
+    What changes is COLLISION. A sign flip rolls one link by pi about its OWN
+    joint-joint axis (s2 gives R02' = R02 * rot_z(pi), which leaves e_z and
+    therefore the elbow fixed, and R03' = R03 so everything downstream is
+    untouched). Geometry symmetric about that axis occupies the same space;
+    anything else does not.
+
+    Both guards must degrade SAFELY, never silently.
+    """
+    from zzy_rss.arm import SIGN_BRANCHES
+    from zzy_rss.pagemap import q_for_branch
+    from zzy_rss.source import classify_all_pages
+
+    out = {}
+    for key, off in (("capsule", False), ("off_axis", True)):
+        cfg, arm, weld, scene = _scene(0.0, 0.28, 0.46, 0.26, ())
+        cfg = dataclasses.replace(cfg, arm=dataclasses.replace(
+            cfg.arm, use_off_axis_upper_arm=off, use_off_axis_elbow=off))
+        arm, scene = SrsArm(cfg.arm), Scene(cfg.arm, cfg.scene)
+        ref = SIGN_BRANCHES[0]
+        r = arm.ik_branch(*weld.pose(0.45), 0.25, ref)
+        assert r.ok
+        f0, c0 = arm.frames(r.q), scene.capsules(arm.frames(r.q))
+        skel = geom = 0.0
+        for sg in SIGN_BRANCHES:
+            assert arm.ik_branch(*weld.pose(0.45), 0.25, sg).ok, (
+                "IK existence must not depend on the branch")
+            q = r.q if sg == ref else q_for_branch(r.q, ref, sg)
+            f = arm.frames(q)
+            skel = max(skel, max(float(np.linalg.norm(f[n] - f0[n]))
+                                 for n in ("shoulder", "elbow", "wrist", "tool")))
+            c = scene.capsules(f)
+            geom = max(geom, max(max(float(np.linalg.norm(c[i][0] - c0[i][0])),
+                                     float(np.linalg.norm(c[i][1] - c0[i][1])))
+                                 for i in range(len(c))))
+        refused = False
+        try:
+            classify_all_pages(cfg, arm, weld, scene, 0.45, 0.25)
+        except ValueError:
+            refused = True
+        out[key] = (skel, geom, refused)
+
+    (sk_c, g_c, ref_c), (sk_o, g_o, ref_o) = out["capsule"], out["off_axis"]
+    assert sk_c < 1e-12 and sk_o < 1e-12, (
+        f"the skeleton must be identical across branches whatever the link "
+        f"shape: {sk_c:.3e} / {sk_o:.3e} m")
+    assert g_c < 1e-12, "capsules must occupy the same space on all branches"
+    assert g_o > 0.1, (
+        "off-axis geometry must MOVE between branches, else this test is "
+        "not exercising the assumption")
+    assert not ref_c, "the shared build must work for capsules"
+    assert ref_o, (
+        "the shared build must REFUSE non-axis-symmetric geometry; silently "
+        "sharing one collision query across eight pages would be wrong")
+    return out
+
+
 if __name__ == "__main__":
     rows = test_closed_form_matches_brute_force()
     print(f"[witness] closed form     : matches a 4001-step fiber walk on "
@@ -501,6 +566,12 @@ if __name__ == "__main__":
     for n, g, a in rows:
         print(f"              n={n:<6} goal_only {g:.5f} (gamma {1/g**2:>5.0f})  "
               f"all_valid {a:.5f} (gamma {1/a**2:>5.0f})")
+    shp = test_link_shape_changes_collision_not_ik()
+    print("[witness] link shape      : IK is unaffected; only collision moves --")
+    for key, (sk, g, refused) in shp.items():
+        print(f"              {key:9s} skeleton {sk*1e3:.2e} mm | "
+              f"collision geometry {g*1e3:7.1f} mm | shared build "
+              f"{'REFUSED' if refused else 'ok'}")
     doors = test_roadmap_finds_the_same_doors_as_the_grid()
     print("[witness] door discovery  : roadmap misses none of the grid's --")
     for label, g, r in doors:
