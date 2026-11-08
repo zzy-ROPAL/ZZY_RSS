@@ -34,6 +34,7 @@ from scipy.optimize import minimize
 from sklearn.svm import SVC
 
 from .arm import INVALID_COLLISION, INVALID_JOINT_LIMIT, INVALID_NO_IK, SrsArm
+from .facets import FacetOracle, FacetResult, check_simplex  # noqa: F401
 from .params import Config
 from .prm import classify
 from .scene import Scene
@@ -782,15 +783,6 @@ def subsample_net(cfg: Config, verts: np.ndarray, scale: np.ndarray) -> np.ndarr
 # --------------------------------------------------------------------------
 
 
-@dataclass
-class FacetResult:
-    ok: bool
-    reason: str = ""
-    depth_used: float = 0.0
-    radius: float = 0.0
-    recursions: int = 0
-
-
 def segment_hits_disc(a: np.ndarray, b: np.ndarray, disc) -> bool:
     """Does segment [a, b] enter the disc? Elliptical: y and theta differ in units."""
     sc = np.array([1.0 / max(disc.radius, 1e-12), 1.0 / max(disc.r_theta, 1e-12)])
@@ -999,6 +991,32 @@ def _jac_norm_workspace(cfg, arm, weld, signs, point) -> float:
     return float(np.linalg.norm(j, 2)) * cfg.wall.lipschitz_safety
 
 
+def robot_facet_oracle(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
+    discs: list, valid_seeds: np.ndarray,
+) -> FacetOracle:
+    """The (y, theta) page of one sign branch, as Algorithm 3 sees it."""
+    def guard(verts: np.ndarray) -> str | None:
+        a, b = verts
+        for d in discs:
+            if segment_hits_disc(a, b, d):
+                return f"crosses Sigma disc ({d.kind})"
+        return None
+
+    def valid(c: np.ndarray) -> bool:
+        ok, _tag = classify(cfg, arm, weld, scene, float(c[0]), float(c[1]), signs)
+        return bool(ok)
+
+    return FacetOracle(
+        scale=np.array([cfg.wall.scale_y, cfg.wall.scale_theta]),
+        guard=guard,
+        virtual=lambda c: bool(in_virtual_invalid(cfg, c[None, :])[0]),
+        valid=valid,
+        depth=lambda c: y_plus_penetration(cfg, arm, weld, scene, signs, c,
+                                           valid_seeds),
+    )
+
+
 def check_facet(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     a: np.ndarray, b: np.ndarray, discs: list, valid_seeds: np.ndarray,
@@ -1008,39 +1026,12 @@ def check_facet(
 
     The Sigma guard is new and must precede the minimum-enclosing-ball test: a
     wall may not pass through a door, or a path hops pages inside the disc and
-    bypasses the wall entirely.
+    bypasses the wall entirely. The recursion itself is facets.check_simplex,
+    shared with the triangle facets of a d = 3 wall.
     """
-    scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
-
-    for d in discs:
-        if segment_hits_disc(a, b, d):
-            return FacetResult(False, f"crosses Sigma disc ({d.kind})", recursions=depth)
-
-    centre = 0.5 * (a + b)
-    radius = 0.5 * float(np.linalg.norm((b - a) * scale))
-
-    # Virtual invalid band counts as invalid with positive thickness.
-    if in_virtual_invalid(cfg, centre[None, :])[0]:
-        return FacetResult(True, "virtual boundary band", radius=radius, recursions=depth)
-
-    ok, _tag = classify(cfg, arm, weld, scene,
-                        float(centre[0]), float(centre[1]), signs)
-    if ok:
-        return FacetResult(False, "facet centre is VALID", radius=radius, recursions=depth)
-
-    pd, how = y_plus_penetration(cfg, arm, weld, scene, signs, centre, valid_seeds)
-    if pd >= radius:
-        return FacetResult(True, how, depth_used=pd, radius=radius, recursions=depth)
-
-    if depth >= cfg.wall.facet_max_depth:
-        return FacetResult(False, f"depth limit; pd={pd:.4g} < r={radius:.4g}",
-                           depth_used=pd, radius=radius, recursions=depth)
-
-    mid = centre
-    left = check_facet(cfg, arm, weld, scene, signs, a, mid, discs, valid_seeds, depth + 1)
-    if not left.ok:
-        return left
-    return check_facet(cfg, arm, weld, scene, signs, mid, b, discs, valid_seeds, depth + 1)
+    oracle = robot_facet_oracle(cfg, arm, weld, scene, signs, discs, valid_seeds)
+    return check_simplex(oracle, np.array([a, b], dtype=float),
+                         cfg.wall.facet_max_depth, depth)
 
 
 @dataclass
@@ -1056,18 +1047,25 @@ class CheckReport:
 def check_polytope(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     poly: Polytope, discs: list, valid_seeds: np.ndarray, verbose: bool = True,
+    oracle: FacetOracle | None = None,
 ) -> CheckReport:
-    """IJRR Algorithm 3 over every facet of the polytope."""
+    """IJRR Algorithm 3 over every facet of the polytope.
+
+    d = 2: the polyline segments, checked on the robot's (y, theta) page.
+    d >= 3: the triangles of poly.simplices, checked through `oracle`. The
+    page model is still 2-D, so there is no robot oracle for d = 3 yet; with
+    none given the check REFUSES -- an unchecked facet must never count as
+    passed (invariant 34) -- and in particular a d = 3 oracle must bring its
+    own Sigma guard (facets.tube_guard), since the disc guard is 2-D.
+    """
     if poly.dim != 2:
-        # DIMENSION GUARD. Facets are triangles at d = 3 and check_facet only
-        # knows segments of the (y, theta) page. Refuse -- an unchecked facet
-        # must never count as passed.
-        if verbose:
-            print(f"[stage3] alg3 refused: facet check for d={poly.dim} "
-                  f"(triangles) is not implemented")
-        return CheckReport(ok=False, n_facets=int(poly.n_segments), n_passed=0,
-                           failures=[(-1, f"facet check for d={poly.dim} not "
-                                          f"implemented")])
+        if oracle is None or poly.vertices is None or poly.simplices is None:
+            if verbose:
+                print(f"[stage3] alg3 refused: no d={poly.dim} validity oracle "
+                      f"(the robot page model is 2-D)")
+            return CheckReport(ok=False, n_facets=int(poly.n_segments), n_passed=0,
+                               failures=[(-1, f"no validity oracle for d={poly.dim}")])
+        return _check_simplices(cfg, poly, oracle, verbose)
     n_facets = 0
     n_passed = 0
     failures = []
@@ -1091,5 +1089,35 @@ def check_polytope(
         for i, why in failures[:5]:
             print(f"         facet {i} FAILED: {why}")
     return CheckReport(ok=ok, n_facets=n_facets, n_passed=n_passed,
+                       failures=failures, failure_points=failure_points,
+                       max_recursion=max_rec)
+
+
+def _check_simplices(cfg: Config, poly: Polytope, oracle: FacetOracle,
+                     verbose: bool) -> CheckReport:
+    """Algorithm 3 over the triangles of a d >= 3 polytope."""
+    from .facets import enclosing_ball
+
+    n_passed, failures, failure_points, max_rec = 0, [], [], 0
+    verts = np.asarray(poly.vertices, dtype=float)
+    simp = np.asarray(poly.simplices, dtype=int)
+    scale = np.asarray(oracle.scale, dtype=float)
+    for i, s_ in enumerate(simp):
+        r = check_simplex(oracle, verts[s_],
+                          getattr(cfg.wall, "facet_max_depth_tri", 5))
+        max_rec = max(max_rec, r.recursions)
+        if r.ok:
+            n_passed += 1
+        else:
+            failures.append((i, r.reason))
+            c, _ = enclosing_ball(verts[s_] * scale)
+            failure_points.append((c / scale, r.reason))
+    ok = len(simp) > 0 and n_passed == len(simp)
+    if verbose:
+        print(f"[stage3] alg3 facets {n_passed}/{len(simp)} passed "
+              f"(d={poly.dim} triangles), max recursion {max_rec}")
+        for i, why in failures[:5]:
+            print(f"         facet {i} FAILED: {why}")
+    return CheckReport(ok=ok, n_facets=len(simp), n_passed=n_passed,
                        failures=failures, failure_points=failure_points,
                        max_recursion=max_rec)

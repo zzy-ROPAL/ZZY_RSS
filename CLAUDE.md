@@ -42,7 +42,8 @@
 > | EXP 3(路图) | INFEASIBLE 165/165 γ=2.7 | **INFEASIBLE 156/156 γ=2.7** |
 >
 > 测试:`python3 tests/test_tdc.py`(球 Euler 2、环面 0、开放流形被拒、漏掉的墙被两侧检查抓住)。
-> **d=3 还差**:三角形的面检查(现在**直接拒绝**)、Σ 圆盘 → 管、θ 接缝守卫。
+> **三角形面检查已做(§41)**:`facets.py`,段与三角形共用一个 Alg 3 递归,门的**椭圆管**守卫是精确的;d=2 逐面不变。
+> **d=3 还差**:机器人的 d=3 页模型(`WeldSurface(u,v)`、门曲线)、θ 接缝守卫。没有 oracle 时 d=3 的面检查**仍然拒绝**。
 > 作者的代码(`InfPlanner.cpp`)用的是 **Coxeter**,不是 TDC,见 §39。
 >
 > **Alg 3 慢 100 倍已修(§40)**:`_pd_ijrr` 的 SLSQP 约束是 `classify` 的 ±1 阶跃,
@@ -241,6 +242,7 @@ export PYTHONPATH=src
 python3 tests/test_ik.py                                   # IK 验收(必须全过)
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
+python3 tests/test_facets.py                               # Alg 3 的三角形面:球壳合成页 + 门的管守卫(§41)
 python3 scripts/run_demo.py --res 61 --out out/demo        # 三个案例 + 视频 + 图
 python3 scripts/make_summary.py out/demo                   # 汇总 SUMMARY.md
 python3 scripts/visualize.py --tilt 30 --no-obstacle       # 3D 场景/分支/纤维图
@@ -309,7 +311,9 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | **页边锚点** | y=0/y=1 边线上的精确有效构型喂进训练集(**不是路图**) | `edge_anchor_samples()` in `wall.py` |
 | IJRR §4.3 重建 | **切向 Delaunay 复形**:(ε,η)-网沿切空间生长 → 加权 TDC(精确法向)→ 权重去不一致 → 闭合 + 定向 + **两侧检查**;无网格,维数无关 | `src/zzy_rss/tangential.py`,`reconstruct_wall_tdc()` in `wall.py` |
 | 旧重建(网格) | `plt.contour`,只为复现旧数字(`reconstruction="contour"`) | `reconstruct_wall_contour()` in `wall.py` |
-| IJRR Alg 3 查面 | **Σ 守卫在最前** → 最小包围球 → `Y⁺` 穿透深度 → 二分递归 | `src/zzy_rss/wall.py` |
+| IJRR Alg 3 查面 | **Σ 守卫在最前** → 最小包围球 → `Y⁺` 穿透深度 → 细分递归;**段与三角形共用**,机器人部分走 `FacetOracle` | `src/zzy_rss/facets.py`,`robot_facet_oracle()` in `wall.py` |
+| d=3 门的守卫 | 门是**曲线**,邻域是**椭圆管**;三角形–线段**精确**距离 + 包围球粗筛 | `triangle_hits_tube()` in `facets.py` |
+| IJRR Eq. 3 穿透深度 | 朝最近有效种子**步进 + 二分**(`pd_search="march"`),旧 SLSQP 从未收敛(§40) | `_pd_ijrr()` in `wall.py` |
 | IJRR Alg 4 外循环 | 失败路由:重建失败 / 面心有效 / 面过长 | `src/zzy_rss/flood.py` |
 | 区域标号 | **θ 周期**:页是圆柱,跨 ±π 接缝合并 | `src/zzy_rss/flood.py` |
 | 已认证关闭的门 | `live_discs` 卸掉其圆盘 ⇒ 证明可在单页内闭合 | `src/zzy_rss/flood.py` |
@@ -485,9 +489,19 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 
 34. **TDC 不处理周期 θ,d=3 的面检查不存在 —— 两处都是拒绝,不是近似。**(§39)
     `theta_periodic=True` ⇒ `reconstruct_wall_tdc` 返回 `closed=False`;
-    d=3 多胞形 ⇒ `check_polytope` 返回 `ok=False`、0 面通过。
-    **没查过的面永远不能算通过。** 不变量 12 里"θ 平铺网格"的说法只对旧的
+    d=3 多胞形**没有 oracle** ⇒ `check_polytope` 返回 `ok=False`、0 面通过
+    (三角形检查本身已在 §41 实现,缺的是机器人的 d=3 页模型)。
+    **没查过的面永远不能算通过。** d=3 的 oracle 必须带**管**守卫,圆盘守卫是 2 维的。 不变量 12 里"θ 平铺网格"的说法只对旧的
     `contour` 重建成立。
+
+35. **三角形的细分深度上限按代价定,不按半径定。**(§41)三角形每层分 4 份,
+    深度 k 付 4ᵏ 叶。沿用段的 8 ⇒ 擦边 0.001 的合成墙 135 万次查询;
+    `facet_max_depth_tri=5` ⇒ 1 024 次,照样失败。**不要把它调回 8**(不变量 11/13)。
+
+36. **`pd_mode="ijrr_local_opt"` 不能再用 SLSQP。**(§40)约束是 `classify` 的
+    ±1 阶跃,梯度为零,722/722 次求解从未收敛,pd 全是回退值,却占 `run_proof` 的 99.9%。
+    `pd_search="march"` 直接找优化器想找的那个有效点,结果只会更紧。
+    **Lipschitz 模式不是无网格的替代默认值**:EXP 3 上 INCONCLUSIVE。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
@@ -698,8 +712,9 @@ PRM 的边按 `edge_resolution=0.01` 查过。**路径这件事上 PRM 严格优
 7. ~~E4 强制变号场景~~ 并入待办 2:§34 把"两者所在区域重合"量化了,
    并排除了**逐列割**与横杆族;一般障碍见 §35,焊缝**方向**是另一个旋钮
 8. `d=3` 场景([IROS] 2D 曲面),此时三角化与 IJRR 的真实开销结构才回归。
-   **重建已就绪**(§39,TDC 在球/环面上已验证);还缺:三角形面检查、Σ 管、
-   `WeldSurface(u,v)`、θ 接缝守卫(有界 θ,切口放在有效集的空隙处并检查)。
+   **重建已就绪**(§39,TDC 在球/环面上已验证),**三角形面检查与 Σ 管守卫已就绪**
+   (§41,球壳合成页上已验证);还缺:`WeldSurface(u,v)` 与 d=3 的机器人 oracle、
+   d=3 门曲线的发现、θ 接缝守卫(有界 θ,切口放在有效集的空隙处并检查)。
    **这才是上 C++ / Gudhi / FCL 的触发条件**,不是现在这个 2-D 演示
    (`docs/seven_questions.md` Q1/Q2:证明本身已经 0.64 s)
 9. 性能:按 `docs/seven_questions.md` Q1 的顺序做——

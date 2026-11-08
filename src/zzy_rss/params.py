@@ -356,6 +356,13 @@ class WallParams:
     # 8 is ample. Do NOT raise this -- a failing facet costs ~2^depth leaf
     # checks, and depth 20 is what made EXP 2 grind for 18 CPU minutes.
     facet_max_depth: int = 8
+    # The same cap for TRIANGLE facets (d = 3, findings 41). A triangle splits
+    # into 4, not 2, so depth k costs up to 4^k leaves: depth 8 is 65,536 per
+    # facet, and a synthetic wall grazing C_obs by 0.001 measured 1.35 M depth
+    # queries. 5 keeps the cost near the segment budget (1,365 nodes) and
+    # still shrinks the ball 32x; a wall that needs more is grazing, and
+    # invariant 11 says Algorithm 4 must push it in, not subdivide it.
+    facet_max_depth_tri: int = 5
     contour_level: float = 0.0
 
     # Virtual-boundary band thickness (IJRR Fig. 5). Lets a wall close against
