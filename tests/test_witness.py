@@ -163,6 +163,40 @@ def test_null_motion_is_verified_not_assumed() -> float:
     return worst
 
 
+def test_self_motion_is_one_dimensional() -> int:
+    """Pin the precondition the closed form rests on.
+
+    certify_fiber describes the 1-D counter-rotating slice. That is the WHOLE
+    fiber only when the self-motion manifold is 1-D -- a 7-DOF arm with the
+    full tool pose fixed. Raising the TASK dimension keeps this (a 2-D surface
+    task still leaves exactly the arm angle free, so the page grows to
+    (u, v, theta) and the fiber stays 1-D). Raising the REDUNDANCY breaks it,
+    and breaks it in the dangerous direction: "no connected delta interval"
+    would stop proving the pages cannot be joined, yet would still discharge
+    the disc and skip the door -- a false infeasibility proof.
+
+    If this ever reads other than 1, certify_fiber must return exact=False,
+    which is what the guard inside it does.
+    """
+    cfg, arm, weld, scene = _scene(15.0, 0.32, 0.40, 0.26, _zgap_y())
+    rng = np.random.default_rng(3)
+    n_checked = 0
+    for _ in range(40):
+        y = float(rng.uniform(0.05, 0.95))
+        th = float(rng.uniform(-1.0, 1.0))
+        res = arm.ik_branch(*weld.pose(y), th, (1, 1, -1))
+        if not res.ok:
+            continue
+        n_self = int(res.q.size - np.linalg.matrix_rank(arm.jacobian(res.q),
+                                                        tol=1e-6))
+        assert n_self == 1, (
+            f"self-motion is {n_self}-dimensional at y={y:.3f}, theta={th:.3f}; "
+            f"the closed-form fiber slice is no longer the whole fiber")
+        n_checked += 1
+    assert n_checked > 10
+    return n_checked
+
+
 def test_unknown_never_discharges() -> None:
     """A door we could not evaluate must stay LIVE, not be certified blocked.
 
@@ -318,6 +352,9 @@ if __name__ == "__main__":
               f"{abs(deg):.4f} deg")
     drift = test_null_motion_is_verified_not_assumed()
     print(f"[witness] null motion     : verified, worst drift {drift * 1e3:.2e} mm")
+    n_sm = test_self_motion_is_one_dimensional()
+    print(f"[witness] redundancy      : self-motion is 1-D at all {n_sm} sampled "
+          f"configurations (the closed form's precondition)")
     test_unknown_never_discharges()
     print("[witness] unknown doors   : stay live (never 'certified blocked')")
     n = test_fold_doors_are_characterised()

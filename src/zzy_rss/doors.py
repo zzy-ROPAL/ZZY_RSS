@@ -775,6 +775,35 @@ def certify_fiber(
     q0 = res.q
     i, k = pair
 
+    # (0) REDUNDANCY GUARD. The closed form describes the 1-D counter-rotating
+    # slice (q_i + delta, q_k - delta). That is the WHOLE fiber only when the
+    # self-motion manifold is 1-dimensional, i.e. the task fixes the full pose
+    # of a 7-DOF arm. Raising the TASK dimension is fine -- a 2-D surface task
+    # ([IROS] d=3) still leaves exactly the arm angle free, so the page grows
+    # to (u, v, theta) while the fiber stays 1-D. Raising the REDUNDANCY is
+    # not: relaxing the torch's spin about its own axis, say, gives a 2-D
+    # self-motion set, and then "no connected delta interval" does NOT prove
+    # the pages cannot be joined -- a route may exist through the directions
+    # this slice does not see.
+    #
+    # That failure is the dangerous direction: it would report
+    # certified_blocked, live_discs would discharge the disc, the door would
+    # be skipped, and the result could be a FALSE INFEASIBILITY PROOF. The
+    # null-motion test below cannot catch it, because the slice is still a
+    # null motion and its drift is still zero.
+    #
+    # Measured off the degeneracy, since ON it the Jacobian is rank-deficient
+    # by construction (that is what makes it a door).
+    q_gen = q0.copy()
+    q_gen[(i + k) // 2] += 1e-3        # nudge the vanishing joint off zero
+    n_self = int(q0.size - np.linalg.matrix_rank(arm.jacobian(q_gen), tol=1e-6))
+    if n_self != 1:
+        return FiberCertificate(
+            pair=pair, exact=False,
+            reason=(f"self-motion manifold is {n_self}-dimensional, so the "
+                    f"counter-rotating slice is not the whole fiber; the "
+                    f"closed form would not be conclusive"))
+
     # (1) Is this actually a null motion? Verify, never assume.
     drift = _null_motion_drift(cfg, arm, scene, q0, pair)
     if drift > cfg.crossing.null_motion_tol_m:

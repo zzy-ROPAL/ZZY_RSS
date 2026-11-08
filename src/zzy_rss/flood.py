@@ -412,6 +412,16 @@ def point_in_wall(cfg: Config, poly: Polytope, point) -> bool | None:
     inside = False
     for loop in poly.loops:
         v = np.asarray(loop, dtype=float)
+        # DIMENSION GUARD. Even-odd ray casting over (y, theta) is a PLANAR
+        # test. At d >= 3 the proof object is a triangulated surface, and this
+        # loop would happily index columns 0 and 1 of 3-D vertices and return a
+        # silently wrong boolean. That boolean drives exit 1: a wrong "outside"
+        # skips a door the robot CAN reach, the flood terminates early, and the
+        # result is a FALSE INFEASIBILITY PROOF. Refuse instead -- None means
+        # undecided, which routes to exit 2/3/4 and ultimately to following the
+        # door, which is always safe.
+        if v.ndim != 2 or v.shape[1] != 2:
+            return None
         if len(v) < 3:
             continue
         count = 0
