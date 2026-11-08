@@ -26,6 +26,10 @@ from .params import Config
 from .pagemap import PageMap, page_name
 from .scene import Scene
 from .doors import SigmaDisc, door_fiber_validity, door_passable
+from .source import (
+    GridSource, Region, RoadmapLabeller, RoadmapSource, eta_separate,
+    grid_sources, roadmap_sources,
+)
 from .wall import (
     LABEL_TOPOLOGICAL, PageLabeller, assign_label,
     sigma_disc_samples,
@@ -42,19 +46,6 @@ from .witness import LEG_DOOR, WitnessPath, door_leg, plan_in_page, verify_witne
 FEASIBLE = "FEASIBLE"
 INFEASIBLE = "INFEASIBLE"
 INCONCLUSIVE = "INCONCLUSIVE"
-
-
-@dataclass
-class Region:
-    """One page-restricted connected component of the valid set."""
-
-    page: str
-    index: int
-    n_cells: int
-    y_min: float
-    y_max: float
-    reaches_start: bool
-    reaches_goal: bool
 
 
 @dataclass
@@ -583,7 +574,7 @@ def run_proof(
     pages: dict, sigma: dict, n_train_max: int = 900, n_invalid_max: int = 160,
     verbose: bool = True, alg4_iters: int = 4, seeds: list | None = None,
     use_second_wall: bool = True, use_witness: bool = True,
-    start_yt: tuple | None = None,
+    start_yt: tuple | None = None, sources: dict | None = None,
 ) -> ProofResult:
     """IJRR Algorithm 4 wrapped in the page/door flood fill.
 
@@ -597,11 +588,15 @@ def run_proof(
     raise it.
     """
     rng = np.random.default_rng(cfg.planner.rng_seed)
-    labels, regions_by_page = {}, {}
-    for name, pm in pages.items():
-        lab, regs = label_regions(cfg, pm)
-        labels[name] = lab
-        regions_by_page[name] = regs
+    # The five questions go through a SOURCE. GridSource is the behaviour that
+    # shipped; RoadmapSource answers the same five from a PRM with no cells at
+    # all (findings 38). Pass `sources` to choose; the default stays the grid
+    # so existing callers are untouched.
+    if sources is None:
+        sources = grid_sources(cfg, pages)
+    regions_by_page = {n: src.regions() for n, src in sources.items()}
+    on_roadmap = any(getattr(s_, "kind", "grid") == "roadmap"
+                     for s_ in sources.values())
 
     # Seed the queue. By default: every region that touches the start of the
     # weld, on every page -- which proves the STRONGER claim that no posture
@@ -637,19 +632,19 @@ def run_proof(
     parent: dict = {}
     entry_point: dict = {}
     for n_, k_ in queue:
-        pm_ = pages[n_]
-        pts_ = region_points(pm_, labels[n_], k_)
         if start_yt is not None:
             entry_point[(n_, k_)] = tuple(start_yt)
-        elif len(pts_):
-            entry_point[(n_, k_)] = tuple(pts_[int(np.argmin(pts_[:, 0]))])
+        else:
+            ep = sources[n_].entry_point(k_)
+            if ep is not None:
+                entry_point[(n_, k_)] = ep
     q_start_cfg = None
     if queue:
         n0, k0 = queue[0]
         yt0 = entry_point.get((n0, k0))
         if yt0 is not None:
             r0 = arm.ik_branch(*weld.pose(float(yt0[0])), float(yt0[1]),
-                               pages[n0].signs)
+                               sources[n0].signs)
             q_start_cfg = r0.q if r0.ok else None
 
     while queue:
@@ -657,12 +652,12 @@ def run_proof(
         if (name, k) in visited:
             continue
         visited.add((name, k))
-        pm = pages[name]
-        lab = labels[name]
+        src = sources[name]
+        pm = pages.get(name)
         reg = next(r for r in regions_by_page[name] if r.index == k)
         visited_list.append(asdict(reg))
 
-        pts = region_points(pm, lab, k)
+        pts = src.seed_pool(k)
         if verbose:
             print(f"\n[stage4] region ({name}, {k}): {reg.n_cells} cells, "
                   f"y in [{reg.y_min:.3f}, {reg.y_max:.3f}]")
@@ -686,7 +681,7 @@ def run_proof(
                 node = (p[0], p[1]) if p is not None else None
             chain.reverse()
             for idx, (pn, pk) in enumerate(chain):
-                signs_i = pages[pn].signs
+                signs_i = sources[pn].signs
                 entry_i = entry_point.get((pn, pk))
                 if entry_i is None:
                     route = []
@@ -742,11 +737,21 @@ def run_proof(
                 second_walls=second_walls)
 
         seed_pts = thin(pts, n_train_max, rng)
-        rest = other_valid_points(pm, lab, k, regions_by_page[name],
-                                  cfg.wall.rest_mode)
+        rest = src.rest_pool(k, cfg.wall.rest_mode)
+        rest_pts0 = thin(rest, n_train_max, rng)
+        # eta-separation, roadmap only. A grid already guarantees one cell of
+        # vacuum between the classes; a roadmap does not, and the kernel width
+        # Algorithm 1 must reach is 1/d^2 in that gap. See eta_separate.
+        if on_roadmap and cfg.wall.eta_separation > 0.0:
+            scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+            seed_pts, rest_pts0, n_cut = eta_separate(
+                seed_pts, rest_pts0, cfg.wall.eta_separation, scale)
+            if verbose and n_cut:
+                print(f"[eta] region ({name}, {k}): dropped {n_cut} point(s) "
+                      f"within {cfg.wall.eta_separation} of the other class")
         ring = virtual_boundary_samples(cfg, 80)
-        rest_pts = np.vstack([thin(rest, n_train_max, rng), ring])
-        inv = thin(invalid_points(pm), n_invalid_max, rng)
+        rest_pts = np.vstack([rest_pts0, ring])
+        inv = thin(src.obstacle_points(), n_invalid_max, rng)
         # Discharge the doors that fiber certification has proved impassable,
         # exactly as the demo's prove() does. A disc exists to stop the wall
         # routing through a door that MIGHT be passable (invariant 7); a door
@@ -755,28 +760,29 @@ def run_proof(
         # page that is 8 of 16 doors, and the detour is what drove gamma from
         # 1.3 to 334 while prove() -- which does discharge them -- settled at
         # 1.3 (findings 29).
-        discs, discharged = live_discs(cfg, arm, weld, scene, pm.signs,
+        discs, discharged = live_discs(cfg, arm, weld, scene, src.signs,
                                        sigma.get(name, []), verbose=False)
         if verbose and discharged:
             print(f"[stage5-fiber] {len(discharged)} disc(s) discharged on "
                   f"{name}: their doors are certified blocked")
 
         # Teach the wall where the doors are, so it cannot route through one.
-        tol_d = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
-                               pm.theta_grid[1] - pm.theta_grid[0]))
+        tol_d = src.tol()
         s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d)
         if len(s_extra):
             seed_pts = np.vstack([seed_pts, s_extra])
         if len(r_extra):
             rest_pts = np.vstack([rest_pts, r_extra])
 
-        labeller = PageLabeller(
-            cfg, arm, weld, scene, pm.signs, pm, lab, k,
-            search_cells=cfg.wall.label_search_cells,
-            motion_samples=cfg.wall.label_motion_samples,
+        labeller = (
+            RoadmapLabeller(cfg, arm, weld, scene, src, k)
+            if getattr(src, "kind", "grid") == "roadmap" else
+            PageLabeller(cfg, arm, weld, scene, src.signs, pm, src.lab, k,
+                         search_cells=cfg.wall.label_search_cells,
+                         motion_samples=cfg.wall.label_motion_samples)
         )
         poly, rep, wmodel, iters, rounds = find_inf_proof_region(
-            cfg, arm, weld, scene, pm.signs, seed_pts, rest_pts, inv, discs,
+            cfg, arm, weld, scene, src.signs, seed_pts, rest_pts, inv, discs,
             max_iters=alg4_iters, verbose=verbose, labeller=labeller,
         )
         if verbose:
@@ -804,9 +810,7 @@ def run_proof(
         # verdict. Both exits 3 and 4 follow the door -- only the tag differs,
         # and the tag is what decides whether a goal reached beyond it may be
         # called FEASIBLE.
-        tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
-                             pm.theta_grid[1] - pm.theta_grid[0]))
-        here = discs_in_region(discs, pts, tol)
+        here = discs_in_region(discs, pts, src.tol())
         for d in here:
             ex, follow, verified, why = "4-unknown", True, False, ""
 
@@ -835,18 +839,18 @@ def run_proof(
             # seconds, and a door that cannot be crossed makes the path to it
             # pointless.
             if follow and use_witness and cfg.witness.enable:
-                target = [o for o in d.pages if o != name and o in pages]
-                partner = pages[target[0]].signs if target else None
+                target = [o for o in d.pages if o != name and o in sources]
+                partner = sources[target[0]].signs if target else None
                 if partner is None:
                     why = "no partner page on this door"
                 else:
-                    dleg, cert = door_leg(cfg, arm, weld, scene, d, pm.signs,
+                    dleg, cert = door_leg(cfg, arm, weld, scene, d, src.signs,
                                           partner)
                     if dleg is None:
                         why = f"not crossable -- {cert.reason}"
                     else:
                         entry = entry_point.get((name, k))
-                        pleg = (plan_in_page(cfg, arm, weld, scene, pm.signs,
+                        pleg = (plan_in_page(cfg, arm, weld, scene, src.signs,
                                              entry, target_yt=d.anchor)
                                 if entry is not None else None)
                         if pleg is not None:
@@ -865,7 +869,7 @@ def run_proof(
             if follow and not verified and use_second_wall:
                 others = [o for o in discs if o is not d]
                 p2, r2, w2, ok2 = second_wall(
-                    cfg, arm, weld, scene, pm.signs, seed_pts, inv, d, others,
+                    cfg, arm, weld, scene, src.signs, seed_pts, inv, d, others,
                     alg4_iters=max(1, alg4_iters // 3), verbose=False)
                 second_walls.append({
                     "page": name, "region": k, "door_y": float(d.y),
@@ -895,15 +899,14 @@ def run_proof(
                 continue
 
             for other in d.pages:
-                if other == name or other not in pages:
+                if other == name or other not in sources:
                     continue
-                opm, olab = pages[other], labels[other]
-                i = int(np.argmin(np.abs(opm.y_grid - d.y)))
-                j = int(np.argmin(np.abs(opm.theta_grid - d.theta)))
-                # Conservative: enqueue every region within the disc footprint.
-                rad = max(1, int(np.ceil(d.radius / (opm.y_grid[1] - opm.y_grid[0]))))
-                sub = olab[max(0, i - rad): i + rad + 1, max(0, j - rad): j + rad + 1]
-                for kk in sorted(set(int(v) for v in np.unique(sub) if v > 0)):
+                osrc = sources[other]
+                # The one question with no adjudicator downstream. On a grid
+                # it is a footprint guess over a label array; on a roadmap the
+                # anchor was injected as a vertex, so it is a lookup of the
+                # component it actually joined.
+                for kk in osrc.regions_under(d.y, d.theta, d.radius):
                     doors_followed.append({
                         "from": f"{name}/{k}", "to": f"{other}/{kk}",
                         "y": d.y, "theta": d.theta, "kind": d.kind,
@@ -916,7 +919,7 @@ def run_proof(
                         to=f"{other}/{kk}")))
                     if (other, kk) not in visited:
                         queue.append((other, kk))
-                        parent[(other, kk)] = (name, k, d, opm.signs,
+                        parent[(other, kk)] = (name, k, d, osrc.signs,
                                                d.anchor, verified)
                         entry_point[(other, kk)] = tuple(d.anchor)
                         if verbose:

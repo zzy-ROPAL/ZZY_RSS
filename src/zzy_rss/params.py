@@ -304,6 +304,14 @@ class WallParams:
     # (epsilon, eta)-net subsampling (IJRR Definition 2).
     net_keep_fraction: float = 0.5
     net_d_min: float = 0.02
+    # Cross-class eta-separation for the ROADMAP source (findings 38).
+    # A grid never puts two opposite-class points closer than one cell, which
+    # overstates the separation; a roadmap measures the true one (0.03839 vs
+    # 0.07502 on EXP 3's start page) and Algorithm 1 then needs gamma ~ 679
+    # instead of ~178. This drops both members of every cross-class pair
+    # closer than eta, which bounds the required gamma by 1/eta^2 again.
+    # 0.0 disables it. Only the roadmap source reads this.
+    eta_separation: float = 0.06
 
     # Class of a point Algorithms 2 and 4 feed back into the training set.
     # "topological" is SDCL's rule (makeTrainingDataFromGraph): the point

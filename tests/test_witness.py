@@ -370,6 +370,58 @@ def _fake_disc(idx):
     return SigmaDisc(kind=DOOR_INTERIOR, y=0.5, theta=0.0, radius=0.02,
                      radius_theta=0.02, vanishing=frozenset({idx}))
 
+def test_roadmap_two_class_distance_converges() -> list:
+    """De-gridding is blocked only by the WRONG rest class (findings 38).
+
+    The handoff predicted that dropping the grid would push the required
+    kernel width from ~178 to ~679, because a grid cannot put two
+    opposite-class points closer than one cell while a roadmap can sample
+    arbitrarily close. That is true for rest_mode "all_valid" and false for
+    "goal_only".
+
+    With "all_valid" the rest class contains small dead components that sit a
+    hair from the start component, and the hair gets thinner without bound as
+    sampling densifies -- exactly invariant 15's complaint, now measured as a
+    DIVERGENCE rather than a constant factor. With "goal_only" the two classes
+    are separated by the real obstacle, whose thickness is a fixed geometric
+    quantity, so d_min converges and gamma stays bounded.
+    """
+    from zzy_rss.doors import build_sigma
+    from zzy_rss.source import roadmap_sources
+
+    cfg, arm, weld, scene = _scene(15.0, 0.32, 0.40, 0.26, _zgap_y())
+    pms = {n: p for n, p in build_all_pages_shared(
+        cfg, arm, weld, scene, with_kin=False, verbose=False).items()
+        if n in PAGES}
+    sig = build_sigma(cfg, arm, weld, pms, verbose=False)
+    sc = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+
+    rows = []
+    for n in (1500, 4000):
+        src = roadmap_sources(cfg, arm, weld, scene, pms, sig,
+                              n_samples=n, verbose=False)["++-"]
+        cand = [r for r in src.regions() if r.reaches_start and not r.reaches_goal] \
+            or [r for r in src.regions() if r.reaches_start]
+        k = sorted(cand, key=lambda r: -r.n_cells)[0].index
+        seed = src.seed_pool(k)
+        out = {}
+        for mode in ("goal_only", "all_valid"):
+            rest = src.rest_pool(k, mode)
+            out[mode] = float(np.linalg.norm(
+                seed[:, None, :] * sc - rest[None, :, :] * sc, axis=2).min())
+        rows.append((n, out["goal_only"], out["all_valid"]))
+
+    (n0, g0, a0), (n1, g1, a1) = rows
+    assert a1 < a0, ("all_valid d_min did not shrink with density; the "
+                     "divergence this test documents is gone")
+    assert g1 > a1 * 2.0, (
+        f"goal_only ({g1:.5f}) is no longer well clear of all_valid "
+        f"({a1:.5f}); the rest class is not what keeps gamma bounded")
+    assert g1 > 0.04, (
+        f"goal_only d_min collapsed to {g1:.5f}; eta-separation is now "
+        f"required and cfg.wall.eta_separation must be switched on")
+    return rows
+
 
 if __name__ == "__main__":
     rows = test_closed_form_matches_brute_force()
@@ -396,6 +448,11 @@ if __name__ == "__main__":
     fired = test_verifier_rejects_tampered_paths()
     print(f"[witness] verifier        : rejects all {fired} tampered paths "
           f"(limits, constraint, junction, step, goal)")
+    rows = test_roadmap_two_class_distance_converges()
+    print("[witness] de-gridding     : roadmap two-class d_min --")
+    for n, g, a in rows:
+        print(f"              n={n:<6} goal_only {g:.5f} (gamma {1/g**2:>5.0f})  "
+              f"all_valid {a:.5f} (gamma {1/a**2:>5.0f})")
     gap = test_exact_clearance_is_not_optimistic()
     print(f"[witness] exact clearance : never above the sampled value "
           f"(worst optimism {gap * 1e3:.3f} mm)")
