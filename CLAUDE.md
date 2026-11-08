@@ -61,8 +61,22 @@
 > | | **门的发现也脱网格**(解析求根 + 顶点局部极小兜底) | `build_sigma_roadmap` in `doors.py` |
 > | | 八页共享构建搬到路图上(1 次 IK + 1 次碰撞 + 8 次限位) | `classify_all_pages` |
 >
-> **默认仍是网格**(`run_proof(..., sources=None)`),且**逐位不变**。
-> 无网格路线用 `bootstrap_roadmap()`,实测 **`PageMap` 构建次数 = 0**。
+> ### ⚠️ **默认已经是无网格**(`cfg.planner.page_source="roadmap"`)
+>
+> `run_proof(..., sources=None)` 现在**自己建路图**,不再碰格子。
+> 要回到网格后端:`page_source="grid"`(需要传 `pages`)。
+> 无网格全流程用 `bootstrap_roadmap()`,实测 **`PageMap` 构建次数 = 0**。
+>
+> **代价是真的,先看清楚:**
+>
+> | | 网格 | 无网格(默认) |
+> |---|---|---|
+> | EXP 2 | ~2 s,**INFEASIBLE** 251/251 γ=1.2 | 5.6 s,**INFEASIBLE** 145/145 γ=1.0 |
+> | **EXP 3** | ~1 s,**INFEASIBLE** 161/161 γ=1.5 | **130 s,INCONCLUSIVE** 154/160,**γ 顶到上限 400** |
+>
+> **EXP 3 目前在无网格下证不出来。** Alg 1 在 `gamma_max=400` 上仍分不开,
+> 6 个面没过。原因见下面第 3 条:路图的起始分量更大、与终点分量互相穿插。
+> **要复现已发表的 EXP 3 数字,显式设 `page_source="grid"`。**
 >
 > **三条必须先知道的结论:**
 >
@@ -70,10 +84,14 @@
 >    `goal_only` 下两类最近距离**收敛**到真实障碍厚度(~0.077,与网格同),
 >    `all_valid` 则随采样加密**发散**(1 200 → 10 000 样本:0.030 → 0.0139)。
 >    ⇒ **不变量 15 是脱网格能成立的前提,不只是省事。**
-> 2. **路图更慢,不更快**:EXP 2 网格 ~2 s,无网格 5.0 s。
+> 2. **路图更慢,不更快**:EXP 2 网格 ~2 s,无网格 5.6 s。
 >    买到的是 `regions_under` 那个洞和 d=3 的可扩展性,不是速度。
-> 3. **路图造出来的墙更难**:EXP 3 网格 161 面 γ=1.5,路图 506 面 γ=28–81
->    (Alg 1 精度仍是 1.0,慢的是 Alg 2/3/4)。起始分量更大、与终点分量互相穿插。
+> 3. **路图造出来的墙更难,EXP 3 上已经难到证不出来。**
+>    网格 161 面 γ=1.5;路图随采样集不同给出 506 面 γ=28(能过)
+>    或 154/160 **γ 顶到 400**(过不了)。
+>    起始分量 **401 点、横跨 y∈[0.002, 0.962]**,与终点分量 y∈[0.421, 0.987]
+>    几乎完全重叠、只靠 θ 分开并互相穿插。
+>    **这是当前最重要的未解问题**,见待办 3c。
 >
 > **换成真实 STL 的账(§38f)**:IK **完全不受影响**(形状不进 IK),
 > 碰撞只占 20% 耗时,胶囊本来就是网格的保守外包络可做粗筛
@@ -218,13 +236,21 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     --families zgap-rel --weld-x 0.32 --weld-z 0.40 --tilts 15      # 场景搜索(含门判据)
 ```
 
-**无网格跑法**(§38,`PageMap` 一个都不建):
+**无网格是默认**(§38,`PageMap` 一个都不建):
 
 ```python
 from zzy_rss.source import bootstrap_roadmap
 srcs, sig = bootstrap_roadmap(cfg, arm, weld, scene, n_samples=1500)
 res = run_proof(cfg, arm, weld, scene, None, sig, sources=srcs, seeds=[(page, k)])
 #                                      ^^^^ pages 可以是 None
+```
+
+**要用网格后端**(复现已发表数字、或 EXP 3):
+
+```python
+cfg = dataclasses.replace(cfg, planner=dataclasses.replace(
+    cfg.planner, page_source="grid"))
+res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 ```
 
 `run_experiment.py --pd-mode {ijrr_local_opt,lipschitz}` 切换穿透深度算法。
@@ -602,6 +628,15 @@ PRM 的边按 `edge_resolution=0.01` 查过。**路径这件事上 PRM 严格优
    η-分离不是障碍(是 `rest_mode` 的假象,不变量 29)。
    **遗留**:EXP 3 的无网格**证明**慢(γ 71→81,Alg 1 成功,慢在 Alg 2/3/4);
    要快得让墙更简单(子采样 / η-网),不是调 IK。
+
+3c. **【当前最重要】EXP 3 在无网格下证不出来。**
+   `gamma_max=400` 上 Alg 1 仍分不开,154/160 面,130 s。
+   不是 IK、不是碰撞——是**墙太难**。可试的顺序:
+   (a) **子采样 / η-网**让训练集稀疏且分离(`subsample_net` 已有,未接到训练类上);
+   (b) **精确边界锚点**(二分 `classify()` 钉真实类边界,`boundary_anchor_samples` 待写);
+   (c) 检查起始分量为何横跨整页——路图的边校验比网格 4-邻接更宽松,
+       可能把网格分开的东西连起来了,这本身**更忠实**,但让分离问题更难。
+   **不要**靠调高 `gamma_max` 解决(不变量 14)。
 
 3b. 证书独立校验器(`write_certificate` 已输出 JSON,校验器待写)。
    **现在 JSON 里多了 `verdict` / `witness_path` / `witness_report` /

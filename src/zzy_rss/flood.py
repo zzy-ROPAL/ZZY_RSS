@@ -384,6 +384,12 @@ def find_inf_proof_region(
     return poly, rep, wall, max_iters, alg2_total
 
 
+def _default_pages() -> dict:
+    """page name -> sign branch, for building sources without any PageMap."""
+    from .arm import SIGN_BRANCHES
+    return {page_name(sg): sg for sg in SIGN_BRANCHES}
+
+
 def point_in_wall(cfg: Config, poly: Polytope, point) -> bool | None:
     """Is (y, theta) inside the verified wall? None when undecidable.
 
@@ -594,10 +600,23 @@ def run_proof(
     # all (findings 38). Pass `sources` to choose; the default stays the grid
     # so existing callers are untouched.
     if sources is None:
-        if pages is None:
-            raise ValueError("run_proof needs either `pages` (grid) or "
-                             "`sources` (e.g. a roadmap)")
-        sources = grid_sources(cfg, pages)
+        if cfg.planner.page_source == "grid":
+            if pages is None:
+                raise ValueError("page_source='grid' needs `pages`")
+            sources = grid_sources(cfg, pages)
+        else:
+            # Grid-free by default. Door anchors are injected as roadmap
+            # vertices, which is what turns `regions_under` from a guess into
+            # a lookup -- callers that want the anchors right should build
+            # sources with bootstrap_roadmap and pass them in, so that Sigma
+            # and the roadmap come from the same pass.
+            sources = roadmap_sources(
+                cfg, arm, weld, scene,
+                pages if pages is not None else {
+                    n: type("P", (), {"signs": sg})()
+                    for n, sg in _default_pages().items()},
+                sigma, n_samples=cfg.planner.source_samples,
+                verbose=verbose)
     regions_by_page = {n: src.regions() for n, src in sources.items()}
     on_roadmap = any(getattr(s_, "kind", "grid") == "roadmap"
                      for s_ in sources.values())

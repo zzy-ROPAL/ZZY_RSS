@@ -420,6 +420,17 @@ class PlannerParams:
     k_neighbors: int = 12
     edge_resolution: float = 0.01
     rng_seed: int = 20261029
+    # Where run_proof gets its five answers. "roadmap" is the default: a grid
+    # is a uniform lattice, so its connectivity between two cell centres was
+    # never checked, and `regions_under` -- the one question with no
+    # adjudicator downstream -- becomes a footprint guess over a label array
+    # instead of a lookup of the component a door anchor actually joined
+    # (findings 38). "grid" keeps the original backend for the plotting
+    # scripts and for speed comparisons.
+    page_source: str = "roadmap"      # "roadmap" | "grid"
+    # Samples per page for the roadmap backend. Separate from n_samples,
+    # which the standalone PRM in prm.py uses.
+    source_samples: int = 1500
 
 
 @dataclass(frozen=True)
