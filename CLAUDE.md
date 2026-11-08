@@ -10,24 +10,25 @@
 
 ## 现状
 
-> ### ⚠️ main 上的本文件是旧的(2026-11-07)
+> ### 分支地图(2026-11-08)
 >
-> 它还写着 EXP 4 场景"已找到"、EXP 5"场景未搜"。**两者都已实现并跑通**,
-> 但代码**不在 main 上**。先读 **`docs/session_routing_handoff.md`**(自包含)。
+> **本文件与代码都在 `main` 上,是最新的。** 待办 #0 / #2 / #3 与"完全脱网格"
+> 已合入 main(见 §37–38f)。
 >
 > | 分支 | HEAD | 有什么 |
 > |---|---|---|
-> | `main` | — | 只有文档 |
-> | `claude/practical-curie-u9nwur` | `fe500d5` | 接缝 + `wall_side` + 两个 bug 修复,EXP 1–4 |
-> | `claude/relaxed-wright-fahn93` | `591ae64` | EXP 5:圆弧缝、`q4` 折叠线门 |
+> | **`main`** | — | **当前状态:四出口、三值判定、见证路径、第二道墙、脱网格** |
+> | `claude/practical-curie-u9nwur` | `fe500d5` | 接缝 + `wall_side`,EXP 1–4。**`wall_side` 尚未合入 main** |
+> | `claude/relaxed-wright-fahn93` | `591ae64` | EXP 5:圆弧缝、`q4` 折叠线门。**尚未合入 main** |
 > | `exp5-routing` | `ae48719` | `wall_side` 移植到 EXP 5 + 圆柱 membership 修复 |
 >
-> 两条代码线在 `doors.py`/`flood.py`/`wall.py` 分歧 **1282 行**,`merge-tree` 报 6 处冲突。
-> **不要**为了跑一个实验去合并。
+> 还没合进来的东西:`door_routing=wall_side`、圆弧焊缝、EXP 5 的两个脚本、
+> 以及**圆柱 membership 修复**(`point_in_loops` + `loop_kinds`)。
+> 当前 main 的 `flood.point_in_wall` 是**平面**射线法,`theta_periodic=True` 时
+> 直接返回 `None`(未定 ⇒ 跟门 ⇒ 安全),要用圆柱页得从 `ae48719` 取回那个修复。
 >
-> 另外:页对称性那条支线(含 `b0e36ae` 的"碰撞不依页只对胶囊成立"限定
-> 与 `geometry_is_page_dependent()` 守卫)已在 `b9605f1` 整体 revert,
-> 需要时从 `1886b74` 取回。
+> 页对称性支线在 `b9605f1` 被整体 revert,但其中的
+> **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
 > ### 🆕 2026-11-08:判定改成三值,门的可穿越性改成闭式(§37)
 >
@@ -51,6 +52,33 @@
 > EXP 2 **INFEASIBLE**(251/251)、EXP 3 **INFEASIBLE**(161/161)。
 > 测试:`python3 tests/test_witness.py`(闭式 vs 4001 步暴力行走、
 > 5 种被篡改路径必须全被拒)。
+
+> ### 🆕 2026-11-08(二):**网格已完全移除**(§38–38f)
+>
+> | | 东西 | 位置 |
+> |---|---|---|
+> | **待办 #3** | `GridSource` / `RoadmapSource` 统一接口;`run_proof` 一个格子都不读 | `src/zzy_rss/source.py` |
+> | | **门的发现也脱网格**(解析求根 + 顶点局部极小兜底) | `build_sigma_roadmap` in `doors.py` |
+> | | 八页共享构建搬到路图上(1 次 IK + 1 次碰撞 + 8 次限位) | `classify_all_pages` |
+>
+> **默认仍是网格**(`run_proof(..., sources=None)`),且**逐位不变**。
+> 无网格路线用 `bootstrap_roadmap()`,实测 **`PageMap` 构建次数 = 0**。
+>
+> **三条必须先知道的结论:**
+>
+> 1. **η-分离这个"唯一障碍"是 `rest_mode` 选错造成的假象**(§38)。
+>    `goal_only` 下两类最近距离**收敛**到真实障碍厚度(~0.077,与网格同),
+>    `all_valid` 则随采样加密**发散**(1 200 → 10 000 样本:0.030 → 0.0139)。
+>    ⇒ **不变量 15 是脱网格能成立的前提,不只是省事。**
+> 2. **路图更慢,不更快**:EXP 2 网格 ~2 s,无网格 5.0 s。
+>    买到的是 `regions_under` 那个洞和 d=3 的可扩展性,不是速度。
+> 3. **路图造出来的墙更难**:EXP 3 网格 161 面 γ=1.5,路图 506 面 γ=28–81
+>    (Alg 1 精度仍是 1.0,慢的是 Alg 2/3/4)。起始分量更大、与终点分量互相穿插。
+>
+> **换成真实 STL 的账(§38f)**:IK **完全不受影响**(形状不进 IK),
+> 碰撞只占 20% 耗时,胶囊本来就是网格的保守外包络可做粗筛
+> ⇒ **总体 ×2–4,不是 ×10–50**。真正的代价是**正确性**:
+> 八页共享要退回逐页,门的认证要退回采样(待办 5 回来)。
 
 Stage 0–5 已实现并可运行,墙严格按 [IJRR] RBF-SVM 方法构造(Algorithm 1–4 逐条对应)。
 三个演示案例已在**真实 LWA 4D** 参数上跑通,见 `docs/demo_summary.md`。
@@ -184,9 +212,19 @@ python3 scripts/run_three.py --res 61 --iters 14 --out out/three    # 网格流�
 python3 scripts/run_three.py --only 3 --out out/three               # 只跑 EXP 3(77 s)
 python3 scripts/search_scene.py --mode welds --res 61 --jobs 4      # 焊缝摆放的"门景观"
 python3 scripts/run_sampled.py --samples 1500 --only exp2           # 采样流水线(150/150)
+python3 scripts/fig_door_cases.py --out out/door_cases.png          # 四出口要处理的门/墙情形(6 图)
 python3 scripts/run_sampled.py --samples 1500 --only exp2 --no-edge-anchors  # 对照
 python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     --families zgap-rel --weld-x 0.32 --weld-z 0.40 --tilts 15      # 场景搜索(含门判据)
+```
+
+**无网格跑法**(§38,`PageMap` 一个都不建):
+
+```python
+from zzy_rss.source import bootstrap_roadmap
+srcs, sig = bootstrap_roadmap(cfg, arm, weld, scene, n_samples=1500)
+res = run_proof(cfg, arm, weld, scene, None, sig, sources=srcs, seeds=[(page, k)])
+#                                      ^^^^ pages 可以是 None
 ```
 
 `run_experiment.py --pd-mode {ijrr_local_opt,lipschitz}` 切换穿透深度算法。
@@ -232,7 +270,12 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
 | **见证路径** | 页内段 PRM+Dijkstra,过门段 δ 扫掠,拼接成**一个**对象 | `src/zzy_rss/witness.py` |
 | **路径验证器** | FK + 限位 + 精确 clearance + 步长 + 接缝 + 端点;**无 SVM 无拓扑无分辨率** | `verify_witness()` in `witness.py` |
 | **第二道墙** | 只为排除**一道门**;`others` 必须去掉它自己 | `second_wall()` in `flood.py` |
-| **四个出口** | 1 墙₁ 免费 → 2 墙₂ → 3 见证路径 → 4 未知(跟,打标签) | `run_proof()` in `flood.py` |
+| **四个出口** | 1 墙₁ 免费 → **3 见证路径** → 2 墙₂ → 4 未知(按**代价**排序,见不变量 26) | `run_proof()` in `flood.py` |
+| **页数据来源(五问)** | `GridSource` / `RoadmapSource` 同一接口;`run_proof` 不再读格子 | `src/zzy_rss/source.py` |
+| **无网格 Stage 2** | 解析求根 + **顶点局部极小**兜底 + 顶点上的 Σ_coord/Σ_kin | `build_sigma_roadmap()` in `doors.py` |
+| **路图版八页共享** | 1 次 IK + 1 次碰撞 + 8 次限位比较(不变量 19) | `classify_all_pages()` in `source.py` |
+| **胶囊假设守卫** | 离轴几何 ⇒ 共享构建直接报错;纤维零运动检查 ⇒ `exact=False` | `geometry_is_page_dependent()` |
+| **跨类 η-网** | IJRR Definition 2;`goal_only` 下从不触发,留给 `all_valid` 与高维 | `eta_separate()` in `source.py` |
 | 证书输出 | JSON,供独立校验器复查(校验器待写) | `src/zzy_rss/flood.py` |
 | 3D 可视化 | 场景 / 符号分支对比 / 门纤维 | `scripts/visualize.py` |
 | 演示三案例 + 视频 | 网格流水线,EXP 1/2/3 | `scripts/run_three.py` |
@@ -363,6 +406,28 @@ python3 scripts/search_scene.py --mode scenes --res 61 --jobs 4 \
     (只会让面检查失败),**对扫掠路径段符号是反的**——乐观的 clearance
     会认证一段实际会碰撞的运动。路径验证用精确的 `segment_box_distance`
     (实测差距 0.129 mm,理论可达 3.4 mm)。
+
+29. **`rest` 类用 `goal_only` 是脱网格的前提,不只是省事。**(§38)
+    `all_valid` 把到不了终点的小分量放进 rest,它们与起始分量只隔一根头发,
+    **采样越密、头发量得越细**:1 200 → 10 000 样本,d_min 0.030 → **0.0139**,
+    需要的 γ 1 107 → **5 189**,**发散**。`goal_only` 收敛到真实障碍厚度 ~0.077
+    (与网格的 0.0667 同一个数)。这是**不变量 15 的定量版**。
+
+30. **只有正面证明才卸载圆盘;`unknown` 必须让圆盘留着。**(§37/§38b)
+    `door_passable` 是三值的。把"门处无 IK""纤维未刻画"读成"已认证关闭"
+    会让墙穿过一道从未评估过的门。**漏一道门是唯一能造假 INFEASIBLE 的方向。**
+
+31. **换掉一个判据之前,先确认新判据在这个结构上会不会触发。**(§38b 的教训)
+    我把网格的"`|q_j|` 局部极小"换成"沿边变号",理由是变号没有容差——
+    但**页内 q_j 的符号由构造固定,只触零不穿零**,所以那个兜底**一条门也找不到**,
+    解析器独自扛着却**看起来像被交叉验证过**。测试照样通过,因为解析器本来就找得全。
+
+32. **八页共享(不变量 19)只对轴对称连杆成立,现在有守卫。**(§38e)
+    符号翻转是把**一条**连杆绕**自身**关节-关节轴滚 π:轴和端点都不动,只有滚转翻了。
+    胶囊/圆柱/球对此不变;**离轴 hub、真实 STL 不是**(实测位移 **210 mm**)。
+    `geometry_is_page_dependent()` 让共享构建**直接报错**;
+    `certify_fiber` 的零运动检查让闭式判据退回 `exact=False` ⇒ 圆盘留着 ⇒ 保守跟门。
+    **IK 完全不受影响**——形状不进 IK,八页骨架位移恒为 9.02e-14 mm。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
@@ -532,7 +597,16 @@ PRM 的边按 `edge_resolution=0.01` 查过。**路径这件事上 PRM 严格优
    §34a / §35 的"结构性不可能"**已撤回**:测量成立,结论不成立。
    遗留:`run_proof` 在这个场景上很慢(EXP 3 是 1.5 s,这里 13 分钟未出),
    先把 `alg4_iters` 降到 4、`n_train_max` 降到 450 试。
-3. 证书独立校验器(`write_certificate` 已输出 JSON,校验器待写)
+3. ~~**完全去除网格**~~ **已完成**(§38–38f):`source.py` 的五问接口、
+   无网格 Stage 2、路图版八页共享。**`PageMap` 构建次数 = 0**(脚本带断言陷阱)。
+   η-分离不是障碍(是 `rest_mode` 的假象,不变量 29)。
+   **遗留**:EXP 3 的无网格**证明**慢(γ 71→81,Alg 1 成功,慢在 Alg 2/3/4);
+   要快得让墙更简单(子采样 / η-网),不是调 IK。
+
+3b. 证书独立校验器(`write_certificate` 已输出 JSON,校验器待写)。
+   **现在 JSON 里多了 `verdict` / `witness_path` / `witness_report` /
+   `door_decisions` / `second_walls`**;`verdict` 是权威字段,
+   `proven` 只为旧调用方保留,**不能**读成"not proven ⇒ feasible"(不变量 24)。
 10. **EXP 5(`q4` 折叠线门)—— 规格已定,见 `docs/exp5_spec.md`
     与交接说明 `docs/exp5_brief.md`(场景未搜)。**
     门在页上是一条**线**、在 `Q` 里是一个**点**,和点门恰好对偶。
@@ -549,8 +623,9 @@ PRM 的边按 `edge_resolution=0.01` 查过。**路径这件事上 PRM 严格优
 5. 门认证的严格化:纤维是 `Q` 中零测集,采样只是证据,需区间算术。
    **注意:q4 折叠门自动没有这个问题**(§33f)——整条 θ 线是一个物理构型,
    认证只需查一个构型;但折叠门在直焊缝上落不到任务内部(不变量 22)
-6. `Σ_coord` / `Σ_kin` 仍读网格(`pm.near_axis`、`pm.kin_measure`),
-   要完全无网格需改成在样本点上求值(§25)
+6. ~~`Σ_coord` / `Σ_kin` 仍读网格~~ **已完成**(§38b):
+   `degenerate_discs_on_vertices` 在路图顶点上求值。
+   网格后端仍保留原路径(那是后端本身,不是遗留依赖)。
 7. ~~E4 强制变号场景~~ 并入待办 2:§34 把"两者所在区域重合"量化了,
    并排除了**逐列割**与横杆族;一般障碍见 §35,焊缝**方向**是另一个旋钮
 8. `d=3` 场景([IROS] 2D 曲面),此时三角化与 IJRR 的真实开销结构才回归。
