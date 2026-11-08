@@ -1049,11 +1049,18 @@ def interior_doors_on_edges(
         return found
     kk = min(k_neighbors + 1, len(verts))
     _d, nbr = tree.query(verts, k=kk)
+    # One IK per VERTEX, not one per edge end. Each vertex appears once as i
+    # and about k_neighbors times as somebody's j, so solving on demand cost
+    # ~13 IK calls per vertex and made this scan 40% of the whole bootstrap.
+    qv = np.full(len(verts), np.nan)
+    for i, v in enumerate(verts):
+        q, _ = _q_at(cfg, arm, weld, float(v[0]), float(v[1]), signs, joint)
+        if q is not None:
+            qv[i] = q
     seen = set()
     for i in range(len(verts)):
-        qi, _ = _q_at(cfg, arm, weld, float(verts[i][0]), float(verts[i][1]),
-                      signs, joint)
-        if qi is None:
+        qi = qv[i]
+        if not np.isfinite(qi):
             continue
         for j in np.atleast_1d(nbr[i])[1:]:
             j = int(j)
@@ -1061,9 +1068,8 @@ def interior_doors_on_edges(
             if key in seen:
                 continue
             seen.add(key)
-            qj, _ = _q_at(cfg, arm, weld, float(verts[j][0]), float(verts[j][1]),
-                          signs, joint)
-            if qj is None or np.sign(qi) == np.sign(qj):
+            qj = qv[j]
+            if not np.isfinite(qj) or np.sign(qi) == np.sign(qj):
                 continue
             a, b = verts[i].copy(), verts[j].copy()
             qa = qi
