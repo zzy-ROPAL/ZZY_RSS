@@ -118,7 +118,9 @@ class WallModel:
         return f, g
 
 
-def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallModel:
+def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray,
+               scale: np.ndarray | None = None,
+               gamma_start: float | None = None) -> WallModel:
     """IJRR Algorithm 1: escalate gamma until the training data is fully separated.
 
     The loop deliberately over-fits -- complete separation is the requirement,
@@ -127,11 +129,19 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray) -> WallM
     fragmenting into Gaussian islands (IJRR Fig. 7).
     """
     wp = cfg.wall
-    scale = np.array([wp.scale_y, wp.scale_theta])
+    # The page's own axis scaling: (y, theta) by default, (u, v, theta) for a
+    # surface task -- any dimension, as long as the points match it.
+    scale = (np.array([wp.scale_y, wp.scale_theta]) if scale is None
+             else np.asarray(scale, dtype=float))
     x = np.vstack([seed_pts, rest_pts]) * scale
     y = np.concatenate([np.ones(len(seed_pts)), -np.ones(len(rest_pts))])
 
-    gamma = wp.gamma_init
+    # gamma_start (opt-in, findings 42): a RETRAIN after a few points were
+    # added may start the scan near the previous gamma instead of at
+    # gamma_init. It can only miss a smaller separating gamma below the start,
+    # i.e. cost kernel width -- never soundness, which rests on closedness and
+    # Algorithm 3. The d = 2 pipeline never passes it.
+    gamma = wp.gamma_init if gamma_start is None else max(wp.gamma_init, float(gamma_start))
     svm = None
     acc = 0.0
     capped = False
@@ -507,6 +517,7 @@ def sample_wall(
     wall: WallModel, invalid_pts: np.ndarray,
     seed_pts: np.ndarray, rest_pts: np.ndarray,
     max_rounds: int = 8, verbose: bool = True, labeller=None,
+    valid_fn=None, gamma_warm: float | None = None,
 ) -> tuple[WallModel, np.ndarray, np.ndarray, np.ndarray, int]:
     """IJRR Algorithm 2: project invalid seeds onto the wall and retrain if any
     projection lands in the valid region.
@@ -515,6 +526,11 @@ def sample_wall(
     it is added back into the training data (which is what pushes the wall in)
     and the SVM is retrained.
     """
+    dim = int(np.asarray(invalid_pts).reshape(len(invalid_pts), -1).shape[1]) \
+        if len(invalid_pts) else len(wall.scale)
+    if valid_fn is None:
+        def valid_fn(m):
+            return classify(cfg, arm, weld, scene, float(m[0]), float(m[1]), signs)[0]
     rounds = 0
     for rounds in range(1, max_rounds + 1):
         wall_pts = []
@@ -523,12 +539,11 @@ def sample_wall(
             m = project_to_wall(wall, q)
             if m is None:
                 continue
-            ok, _tag = classify(cfg, arm, weld, scene, float(m[0]), float(m[1]), signs)
-            if ok:
+            if valid_fn(m):
                 free_hits.append(m)
             else:
                 wall_pts.append(m)
-        wall_pts = np.asarray(wall_pts, dtype=float).reshape(-1, 2)
+        wall_pts = np.asarray(wall_pts, dtype=float).reshape(-1, dim)
 
         if not free_hits:
             if verbose:
@@ -579,8 +594,10 @@ def sample_wall(
                   f"VALID -> retrain (gamma was {wall.gamma:.2f})"
                   + (f", skipped {n_skipped} within the {margin:g} margin"
                      if n_skipped else ""))
-        wall = train_wall(cfg, seed_pts, rest_pts)
-    return wall, np.zeros((0, 2)), seed_pts, rest_pts, rounds
+        wall = train_wall(cfg, seed_pts, rest_pts, scale=wall.scale,
+                          gamma_start=(None if gamma_warm is None
+                                       else gamma_warm * wall.gamma))
+    return wall, np.zeros((0, dim)), seed_pts, rest_pts, rounds
 
 
 # --------------------------------------------------------------------------
@@ -876,7 +893,6 @@ def _pd_ijrr(
     d = np.linalg.norm((valid_seeds - point) * scale, axis=1)
     order = np.argsort(d)
     best = float(d[order[0]])
-    how = "IJRR (fallback: nearest sample)"
 
     if getattr(cfg.wall, "pd_search", "march") == "slsqp":
         for k in order[: cfg.wall.pd_seed_attempts]:
@@ -901,34 +917,61 @@ def _pd_ijrr(
     def valid(z):
         return classify(cfg, arm, weld, scene, float(z[0]), float(z[1]), signs)[0]
 
-    step = float(cfg.planner.edge_resolution)
-    for k in order[: cfg.wall.pd_seed_attempts]:
+    return pd_march(point, valid_seeds, valid, scale,
+                    step=float(cfg.planner.edge_resolution),
+                    attempts=int(cfg.wall.pd_seed_attempts),
+                    bisect_iters=int(cfg.wall.pd_bisect_iters))
+
+
+def pd_march(point: np.ndarray, valid_seeds: np.ndarray, valid_fn, scale: np.ndarray,
+             step: float, attempts: int, bisect_iters: int,
+             cap: float = float("inf")) -> tuple[float, str]:
+    """IJRR Eq. 3 by marching toward the nearest valid seeds (any dimension).
+
+    Returns an upper bound on the distance from `point` to the valid set, in
+    SCALED units: the nearest seed, tightened by walking from the point
+    toward each of the `attempts` nearest seeds and bisecting at the first
+    valid sample.
+
+    `cap`: Algorithm 3 only asks whether pd >= r. Marching stops at the step
+    that passes the cap, and the answer is min(found, nearest seed, cap) --
+    so pd >= r comes out exactly when the uncapped march would say so, at a
+    fraction of the cost (findings 42).
+    """
+    scale = np.asarray(scale, dtype=float)
+    d = np.linalg.norm((valid_seeds - point) * scale, axis=1)
+    order = np.argsort(d)
+    best = float(d[order[0]])
+    how = "IJRR (fallback: nearest sample)"
+    for k in order[: attempts]:
         seed = valid_seeds[k]
         length = float(d[k])
         if length <= 0.0:
             return 0.0, "point is a valid seed"
         # Only a valid point closer than the best so far can tighten the bound.
-        n = int(np.ceil(min(length, best) / step))
+        n = int(np.ceil(min(length, best, cap) / step))
         lo_t = 0.0                       # last parameter known invalid
         hit = None
         for i in range(1, n + 1):
             t = min(1.0, i * step / length)
-            if valid(point + t * (seed - point)):
+            if valid_fn(point + t * (seed - point)):
                 hit = t
                 break
             lo_t = t
         if hit is None:
             continue
         hi_t = hit
-        for _ in range(int(cfg.wall.pd_bisect_iters)):
+        for _ in range(int(bisect_iters)):
             mid = 0.5 * (lo_t + hi_t)
-            if valid(point + mid * (seed - point)):
+            if valid_fn(point + mid * (seed - point)):
                 hi_t = mid
             else:
                 lo_t = mid
         cand = hi_t * length
         if cand < best:
             best, how = cand, "IJRR march to first valid"
+    if best > cap:
+        return float(cap), "IJRR march: no valid point within the cap"
     return best, how
 
 
@@ -1012,8 +1055,8 @@ def robot_facet_oracle(
         guard=guard,
         virtual=lambda c: bool(in_virtual_invalid(cfg, c[None, :])[0]),
         valid=valid,
-        depth=lambda c: y_plus_penetration(cfg, arm, weld, scene, signs, c,
-                                           valid_seeds),
+        depth=lambda c, _r: y_plus_penetration(cfg, arm, weld, scene, signs, c,
+                                               valid_seeds),
     )
 
 

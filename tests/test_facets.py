@@ -38,7 +38,7 @@ R_IN, R_OUT = 0.4, 0.8
 
 
 def _shell_oracle(guard=None, counter=None):
-    def depth(c):
+    def depth(c, _need=None):
         if counter is not None:
             counter[0] += 1
         r = float(np.linalg.norm(c))

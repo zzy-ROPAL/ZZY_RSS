@@ -30,6 +30,22 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### 🆕 2026-11-08(四):**第一个 d=3 实验跑通**(§42)
+>
+> 焊缝扫成**面片**(EXP 2 的线沿 z 扫 ±5 cm),页是 `(u, v, θ)`,全程无网格:
+>
+> | | 判定 | 时间 | 墙 |
+> |---|---|---|---|
+> | 无障碍(3 个种子) | **FEASIBLE**,已验证路径(逐段扫掠认证) | 4–7 s | — |
+> | ZGAP(6000 样本,4 个种子) | **INFEASIBLE** | 15–22 s | 2014–2156 个三角形,**全部在 `C_obs`**,γ 1.2–1.9 |
+> | ZGAP(2000 样本,种子 1) | INCONCLUSIVE | **34 min** | 采样太稀,γ → 117 不闭合(失败太慢,待加预算) |
+>
+> 稠密 PRM(20 000 样本)交叉检查:同一起点**到不了**目标,与证书一致。
+> 门曲线(q2,两条)是**球 ∩ 平面 = 圆**的闭式解,与 2-D 解析找门器在 40 个切片上
+> 逐点一致;两条都被**卸载**(Lipschitz 守卫,不是区间算术)。
+> 复现:`python3 scripts/run_3d.py --obstacle zgap`;测试 `tests/test_page3.py`。
+> **还没有 3 维跨页泛洪**:活门在墙内 ⇒ INCONCLUSIVE。
+
 > ### 🆕 2026-11-08(三):墙的重建换成**切向 Delaunay 复形**(§39)
 >
 > `reconstruct_wall` 默认 **`reconstruction="tdc"`**:IJRR §4.3 的 TDC,
@@ -243,6 +259,8 @@ python3 tests/test_ik.py                                   # IK 验收(必须全
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
 python3 tests/test_facets.py                               # Alg 3 的三角形面:球壳合成页 + 门的管守卫(§41)
+python3 tests/test_page3.py                                # d=3 面片:门曲线、卸载、FEASIBLE/INFEASIBLE、θ 切口(§42)
+python3 scripts/run_3d.py --obstacle zgap                 # 第一个 d=3 实验(--obstacle none 为可行对照)
 python3 scripts/run_demo.py --res 61 --out out/demo        # 三个案例 + 视频 + 图
 python3 scripts/make_summary.py out/demo                   # 汇总 SUMMARY.md
 python3 scripts/visualize.py --tilt 30 --no-obstacle       # 3D 场景/分支/纤维图
@@ -313,6 +331,9 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | 旧重建(网格) | `plt.contour`,只为复现旧数字(`reconstruction="contour"`) | `reconstruct_wall_contour()` in `wall.py` |
 | IJRR Alg 3 查面 | **Σ 守卫在最前** → 最小包围球 → `Y⁺` 穿透深度 → 细分递归;**段与三角形共用**,机器人部分走 `FacetOracle` | `src/zzy_rss/facets.py`,`robot_facet_oracle()` in `wall.py` |
 | d=3 门的守卫 | 门是**曲线**,邻域是**椭圆管**;三角形–线段**精确**距离 + 包围球粗筛 | `triangle_hits_tube()` in `facets.py` |
+| **焊接面片** | `p(u,v)` 平面片,姿态固定;每个 v 切片是一条 `WeldLine` | `WeldSurface` in `weld.py` |
+| **d=3 页** | 路图(无网格)、θ 切口检查、面锚点、目标面样本、Alg 4、单页判定 | `src/zzy_rss/page3.py` |
+| **d=3 门曲线** | q2/q6 门 = 球 ∩ 腕心平面 = 圆(闭式);折叠/Σ_coord 碰到面片就拒绝;沿曲线 Lipschitz 守卫的认证 | `src/zzy_rss/doors3.py` |
 | IJRR Eq. 3 穿透深度 | 朝最近有效种子**步进 + 二分**(`pd_search="march"`),旧 SLSQP 从未收敛(§40) | `_pd_ijrr()` in `wall.py` |
 | IJRR Alg 4 外循环 | 失败路由:重建失败 / 面心有效 / 面过长 | `src/zzy_rss/flood.py` |
 | 区域标号 | **θ 周期**:页是圆柱,跨 ±π 接缝合并 | `src/zzy_rss/flood.py` |
@@ -502,6 +523,20 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
     ±1 阶跃,梯度为零,722/722 次求解从未收敛,pd 全是回退值,却占 `run_proof` 的 99.9%。
     `pd_search="march"` 直接找优化器想找的那个有效点,结果只会更紧。
     **Lipschitz 模式不是无网格的替代默认值**:EXP 3 上 INCONCLUSIVE。
+
+37. **d=3 页盒之外一律是虚拟无效区,不是一条薄带。**(§42)对面片任务这是精确的
+    (离开面片工具就不在任务上;θ 越过切口由切口检查保证)。照搬 d=2 的薄带(环 2.5ε、
+    窗口 3ε),曲面上的环点永远不够密,墙从缝里鼓出去被窗口剪开。
+
+38. **d=3 判 INFEASIBLE 必须精确地把整块目标板放在墙外。**(§42)判据:墙的
+    u 最大值 < 1−goal_tol(封闭体积在墙的凸包里)。全部验证过的墙也会越过目标板
+    (实测 u_max=1.0196)——那时只能 INCONCLUSIVE。**d=2 的 `run_proof` 还没有这个检查**。
+
+39. **d=3 的回灌点按连通性定类,带守卫。**(§42)最近类在稀疏 3 维路图上常错,
+    两类交错,γ 1.6 → 78。`Page3.label_point` + `feedback_margin=0.03`。
+
+40. **门曲线的卸载是 Lipschitz 守卫,不是证明。**(§42)每个样本是精确闭式;
+    样本之间靠"同一机制的余量 > 2 × 相邻变化"。机制混杂或任一样本不精确 ⇒ 留着。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
@@ -712,9 +747,9 @@ PRM 的边按 `edge_resolution=0.01` 查过。**路径这件事上 PRM 严格优
 7. ~~E4 强制变号场景~~ 并入待办 2:§34 把"两者所在区域重合"量化了,
    并排除了**逐列割**与横杆族;一般障碍见 §35,焊缝**方向**是另一个旋钮
 8. `d=3` 场景([IROS] 2D 曲面),此时三角化与 IJRR 的真实开销结构才回归。
-   **重建已就绪**(§39,TDC 在球/环面上已验证),**三角形面检查与 Σ 管守卫已就绪**
-   (§41,球壳合成页上已验证);还缺:`WeldSurface(u,v)` 与 d=3 的机器人 oracle、
-   d=3 门曲线的发现、θ 接缝守卫(有界 θ,切口放在有效集的空隙处并检查)。
+   **第一个 d=3 实验已跑通**(§42:平面片,单页,FEASIBLE 与 INFEASIBLE 都有)。
+   还缺:**3 维跨页泛洪**(活门在墙内现在是 INCONCLUSIVE)、门曲线认证的严格化、
+   **弯曲面片**(门曲线要数值求根)、d=2 补上"目标线在墙外"的精确检查(不变量 38)。
    **这才是上 C++ / Gudhi / FCL 的触发条件**,不是现在这个 2-D 演示
    (`docs/seven_questions.md` Q1/Q2:证明本身已经 0.64 s)
 9. 性能:按 `docs/seven_questions.md` Q1 的顺序做——

@@ -174,12 +174,26 @@ def test_missed_component_fails_sidedness() -> str:
 def test_inconsistencies_are_fixed_by_weights() -> tuple:
     """The torus produces inconsistent stars; the weight perturbation is what
     makes it closed. Without it the complex must NOT come out closed."""
-    raw = _run(_torus(), 3, 0.05, fix_rounds=0)
-    fixed = _run(_torus(), 3, 0.05)
+    raw = _run(_torus(), 3, 0.05, fix_rounds=0, refine_rounds=0)
+    fixed = _run(_torus(), 3, 0.05, refine_rounds=0)
     assert raw.stats["n_inconsistent"] > 0, "no inconsistency to fix"
     assert not raw.closed, "inconsistent complex reported closed"
     assert fixed.closed and fixed.stats["n_inconsistent"] == 0
     return raw.stats["n_inconsistent"], fixed.stats["fix_rounds"]
+
+
+def test_local_refinement_closes_a_thin_tube() -> tuple:
+    """A torus whose tube (0.12) is only twice the net spacing (0.06): weights
+    alone leave inconsistent stars and an open complex. Adding the projected
+    edge midpoints of the inconsistent simplices -- a handful of points, not a
+    globally halved eta -- must close it with the right topology."""
+    f = _torus(0.6, 0.12)
+    raw = _run(f, 3, 0.06, refine_rounds=0)
+    ref = _run(f, 3, 0.06)
+    assert not raw.closed and raw.stats["n_inconsistent"] > 0
+    assert ref.closed and ref.stats["euler"] == 0, ref.note
+    assert 0 < ref.stats["refined_points"] < 0.05 * len(raw.points)
+    return raw.stats["n_inconsistent"], ref.stats["refined_points"], len(raw.points)
 
 
 def _toy_wall():
@@ -246,6 +260,9 @@ if __name__ == "__main__":
     raw, rounds = test_inconsistencies_are_fixed_by_weights()
     print(f"[tdc] weights    : {raw} inconsistent simplices without, closed "
           f"after {rounds} round(s) with")
+    bad, added, n = test_local_refinement_closes_a_thin_tube()
+    print(f"[tdc] refinement : thin torus open with {bad} inconsistent simplices; "
+          f"closed (Euler 0) after adding {added} points to {n}")
     r = test_svm_wall_without_any_grid()
     print(f"[tdc] SVM wall   : {r['loops']} loop(s), {r['segments']} facets, "
           f"gamma {r['gamma']:.1f}, eta {r['eta']:.3f}, contour trapped")

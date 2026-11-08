@@ -127,6 +127,108 @@ class WeldParams:
 
 
 @dataclass(frozen=True)
+class SurfaceParams:
+    """A FLAT weld patch: the 2-D task of [IROS] d = 3 (findings 42).
+
+    The tool tip traces p(u, v) = p0 + u * (p1 - p0) + v * sweep for
+    (u, v) in [0, 1]^2, with the same fixed tool orientation as WeldParams.
+    Every v-slice is therefore an ordinary straight weld line, which is what
+    lets the 2-D machinery (IK, door geometry, fiber certificates) be reused
+    slice by slice. The page becomes (u, v, theta).
+
+    Default: EXP 2's line (x = 0.28, z = 0.46, vertical torch) swept +/-5 cm
+    in z, so v = 0.5 IS the EXP 2 weld.
+    """
+
+    p0: tuple = (0.28, -0.26, 0.41)
+    p1: tuple = (0.28, 0.26, 0.41)
+    sweep: tuple = (0.0, 0.0, 0.10)
+    approach: tuple = (0.0, 0.0, -1.0)
+    reference: tuple = (1.0, 0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class Page3Params:
+    """The 3-D page (u, v, theta) of one sign branch, and its proof (findings 42).
+
+    Units follow the 2-D page: u and v in [0, 1], theta in radians, and the
+    SVM sees theta / pi, so one scaled unit means the same on every axis.
+    """
+
+    scale: tuple = (1.0, 1.0, 1.0 / np.pi)
+    theta_min: float = -np.pi
+    theta_max: float = np.pi
+    # Roadmap. Edges are validated at PlannerParams.edge_resolution.
+    n_samples: int = 6000
+    k_neighbors: int = 12
+    rng_seed: int = 20261108
+    # Task: start pose, and the goal set u >= 1 - goal_tol (any v, any theta).
+    start_u: float = 0.0
+    start_v: float = 0.5
+    goal_tol: float = 0.02
+    # Training budget per wall, as run_proof's n_train_max / n_invalid_max.
+    n_train_max: int = 900
+    n_invalid_max: int = 300
+    alg4_iters: int = 4
+    # Retrains start Algorithm 1's gamma scan at gamma_warm x the previous
+    # gamma (wall.train_wall gamma_start). A 3-D wall sits at gamma ~ 40, and
+    # the exact scan from 1.0 in steps of 0.1 refits ~400 SVMs per retrain
+    # (~15 s each, up to 8 per Algorithm 2 pass). None = the exact scan.
+    gamma_warm: float | None = 0.5
+    # The virtual boundary on a SURFACE task (findings 42). Everything outside
+    # the page box is declared invalid -- not a thin band as at d = 2. That is
+    # exact here: off the patch in u or v the tool is not on the task at all,
+    # and beyond the theta range the theta-cut check has shown nothing valid
+    # comes near the cut. The ring of rest samples (scaled distance ring_offset
+    # outside the box, ring_per_face random points per face) only steers the
+    # SVM shut; the wall may close anywhere between the page and the
+    # reconstruction window (window_margin, scaled). With the d = 2 band
+    # (ring 0.075, window 0.09 in u) a 3-D wall bulged through the gaps of any
+    # affordable ring and was clipped open by the window.
+    ring_per_face: int = 120
+    ring_offset: float = 0.12
+    window_margin: float = 0.35
+    # Face anchors: the d = 3 edge_anchor_samples (findings 32 / 42). Random
+    # states ON the four task faces (u = 0, 1 and v = 0, 1); the valid ones go
+    # into the TRAINING set (never the roadmap, invariant 18), labelled by the
+    # component they connect to through a validated edge. Without them the
+    # sparse 3-D start class does not say where the start region stops at the
+    # faces, and the first wall cut into it (43 of 48 failed facets).
+    anchors_per_face: int = 400
+    anchor_connect_tries: int = 4
+    # Goal-face samples: random states ON u = 1 - goal_tol (every v and theta,
+    # valid or not) in the REST class. The verdict needs the whole goal slab
+    # outside the wall, and the exact test for that is "the wall ends before
+    # u = 1 - goal_tol". Without these the wall was free to close through the
+    # (virtual) region past u = 1 wherever no goal-component sample stood,
+    # and a fully verified wall reached u = 1.02 -> INCONCLUSIVE. Like the
+    # ring, they only steer the SVM; the exact test is unchanged.
+    goal_face_samples: int = 600
+    # Algorithms 2 and 4 feed valid wall points back into training. On a
+    # sparse 3-D roadmap the NEAREST sample is often in the wrong class, the
+    # classes interleave, and gamma ran 1.6 -> 78 until the wall could not
+    # close (findings 42). So the 3-D page labels fed-back points by
+    # CONNECTIVITY (SDCL's rule, page.label_point), and drops one that sits
+    # closer than feedback_margin (scaled) to the other class -- the d = 2
+    # sampled pipeline's guard (findings 32), for the same reason.
+    feedback_margin: float = 0.03
+    # TDC net spacing for a SURFACE wall (scaled units). Coarser than the
+    # d = 2 net_d_min: the facet count grows as 1/eta^2, not 1/eta.
+    eta: float = 0.06
+    # The theta cut (invariant 5 / the bounded-theta decision): refuse unless
+    # no valid configuration lies within seam_eps of theta_min / theta_max.
+    seam_eps: float = 0.05
+    seam_samples: int = 4000
+    # Door curves: samples around each sphere-plane circle, tube radii in
+    # (u, v, theta) units, and how densely the fiber certificate is sampled
+    # along a curve before its Lipschitz guard is applied.
+    door_samples: int = 2048
+    tube_radius: tuple = (0.02, 0.02, 0.06)
+    cert_stride: int = 4
+    cert_lipschitz_safety: float = 2.0
+
+
+@dataclass(frozen=True)
 class BoxObstacle:
     """Axis-aligned box obstacle."""
 

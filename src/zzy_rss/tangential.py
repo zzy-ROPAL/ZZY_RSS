@@ -268,6 +268,7 @@ class TangentialComplex:
     n_inconsistent: int
     fix_rounds: int
     stars: list = dc_field(default_factory=list, repr=False)
+    inconsistent: list = dc_field(default_factory=list, repr=False)
 
 
 def tangential_complex(
@@ -329,7 +330,8 @@ def tangential_complex(
 
     simp = (np.asarray(sorted(good), dtype=int).reshape(-1, k + 1)
             if good else np.zeros((0, k + 1), dtype=int))
-    return TangentialComplex(pts, normals, simp, len(bad), rounds, stars)
+    return TangentialComplex(pts, normals, simp, len(bad), rounds, stars,
+                             inconsistent=list(bad))
 
 
 # --------------------------------------------------------------------------
@@ -495,7 +497,7 @@ def reconstruct(
     side_points: np.ndarray | None = None, step: float = 1.0, accept: float = 0.8,
     k_neighbors: int = 0, fix_rounds: int = 20, weight_frac: float = 0.3,
     side_tol: float = 1.0, max_points: int = 20000,
-    rng: np.random.Generator | None = None,
+    rng: np.random.Generator | None = None, refine_rounds: int = 6,
 ) -> Reconstruction:
     """Net -> TDC -> closed? -> oriented? -> right side of every labelled point?
 
@@ -523,10 +525,40 @@ def reconstruct(
     normals = unit_normals(field, net)
     tc = tangential_complex(net, normals, k_neighbors=k_neighbors,
                             fix_rounds=fix_rounds, weight_frac=weight_frac, rng=rng)
-    stats.update(n_simplices=len(tc.simplices), n_inconsistent=tc.n_inconsistent,
-                 fix_rounds=tc.fix_rounds)
     simp = tc.simplices
     ok, note = closure_report(simp, k)
+    # LOCAL refinement (findings 42). TDC is consistent only where the
+    # sample is dense relative to the manifold's local feature size, and a
+    # high-gamma wall has sharp spots. Halving eta everywhere costs 2^k times
+    # the points; adding them only where stars disagree costs a handful: the
+    # edge midpoints of every inconsistent simplex, projected onto M, are
+    # inserted and the complex is rebuilt. Only runs when closure FAILED with
+    # inconsistencies left, so a reconstruction that already closes is
+    # untouched.
+    n_refined = 0
+    for _ in range(int(refine_rounds)):
+        if ok or not tc.inconsistent:
+            break
+        mids = []
+        for simp_bad in tc.inconsistent:
+            vs = net[list(simp_bad)]
+            for i in range(len(vs)):
+                for j in range(i + 1, len(vs)):
+                    mids.append(0.5 * (vs[i] + vs[j]))
+        z, okp = project_batch(field, np.asarray(mids))
+        z = z[okp & np.all((z >= lo) & (z <= np.asarray(hi, dtype=float)), axis=1)]
+        sel = _greedy_net(z, cKDTree(net), 0.25 * accept * eta)
+        if len(sel) == 0:
+            break
+        net = np.vstack([net, z[sel]])
+        n_refined += len(sel)
+        normals = unit_normals(field, net)
+        tc = tangential_complex(net, normals, k_neighbors=k_neighbors,
+                                fix_rounds=fix_rounds, weight_frac=weight_frac, rng=rng)
+        simp = tc.simplices
+        ok, note = closure_report(simp, k)
+    stats.update(n_simplices=len(tc.simplices), n_inconsistent=tc.n_inconsistent,
+                 fix_rounds=tc.fix_rounds, refined_points=n_refined)
     rec = Reconstruction(net, simp, [], ok, note, stats)
     if not ok:
         if tc.n_inconsistent:

@@ -486,7 +486,9 @@ def verify_witness(
             rep.n_configs += 1
 
             # (1) on-constraint
-            pos, rot = weld.pose(float(leg.y[j]))
+            # A leg carries one task coordinate per sample: y on a weld line,
+            # (u, v) on a weld surface.
+            pos, rot = weld.pose(*np.atleast_1d(np.asarray(leg.y[j], dtype=float)))
             fk_pos, fk_rot = arm.fk(q)
             e_pos = float(np.linalg.norm(fk_pos - pos))
             e_rot = float(np.linalg.norm(fk_rot - rot))
@@ -547,7 +549,7 @@ def verify_witness(
             rep.failures.append(("start", f"path does not start at q_start: "
                                           f"{gap:.3e} rad"))
     if goal_y is not None:
-        reached = float(path.legs[-1].y[-1])
+        reached = float(np.atleast_1d(path.legs[-1].y[-1])[0])
         if reached < goal_y - cfg.flood.goal_y_tol:
             rep.failures.append(("goal", f"path ends at y={reached:.4f}, "
                                          f"short of goal_y={goal_y}"))

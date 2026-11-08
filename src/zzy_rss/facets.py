@@ -48,8 +48,10 @@ class FacetOracle:
                      (it touches a door). Checked FIRST and at every level.
     virtual(c)    -> True if c is in the virtual invalid band (Fig. 5).
     valid(c)      -> True if c is a VALID configuration.
-    depth(c)      -> (pd, how): penetration depth of an invalid c, in SCALED
-                     units, so it compares directly with the ball radius.
+    depth(c, r)   -> (pd, how): penetration depth of an invalid c, in SCALED
+                     units, so it compares directly with the ball radius r.
+                     Only pd >= r matters, so an oracle may stop searching
+                     once it knows that and return any value >= r.
     """
 
     scale: np.ndarray
@@ -152,7 +154,7 @@ def check_simplex(oracle: FacetOracle, verts: np.ndarray, max_depth: int,
         return FacetResult(False, "facet centre is VALID", radius=radius,
                            recursions=depth)
 
-    pd, how = oracle.depth(centre)
+    pd, how = oracle.depth(centre, radius)
     if pd >= radius:
         return FacetResult(True, how, depth_used=pd, radius=radius,
                            recursions=depth)
