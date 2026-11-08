@@ -1031,65 +1031,55 @@ def _q_at(cfg: Config, arm: SrsArm, weld: WeldLine, y: float, theta: float,
     return (float(res.q[joint]), res) if res.ok else (None, res)
 
 
-def interior_doors_on_edges(
+def interior_doors_on_vertices(
     cfg: Config, arm: SrsArm, weld: WeldLine, verts: np.ndarray, tree,
     signs: tuple, name: str, sign_index: int, spacing: float,
-    k_neighbors: int = 8, n_bisect: int = 40,
+    k_neighbors: int = 8,
 ) -> list[SigmaDisc]:
-    """Backstop for q2/q6 doors: a SIGN CHANGE of q_j across a roadmap edge.
+    """Backstop for q2/q6 doors: a LOCAL MINIMUM of |q_j| below touch_tol.
 
-    No tolerance. Either the two endpoints disagree in sign or they do not,
-    and when they disagree the zero is bracketed and bisection locates it to
-    machine precision along that edge.
+    NOT a sign change. Within a page the sign of q_j is fixed by construction
+    -- the IK returns q_j = s_j * arccos(.), which never goes negative on an
+    s_j = + page -- so q_j can only TOUCH zero, never cross it, and a sign
+    scan finds nothing at all. (An earlier version of this function looked for
+    sign changes and was therefore a silent no-op: the analytic finder was
+    carrying the whole load while appearing to be cross-checked. Door
+    discovery losing its backstop is the direction that can forge a proof,
+    which is why it is called out here.)
+
+    So the criterion is the grid version's, on scattered points: |q_j| below
+    the tolerance AND no k-NN neighbour lower. The 3x3 cell window becomes the
+    k nearest vertices.
     """
     joint = JOINT_OF_SIGN[sign_index]
     radius = _radius_from_spacing(cfg, spacing)
+    tol = cfg.sigma.touch_tol
     found: list[SigmaDisc] = []
     if len(verts) < 2:
         return found
-    kk = min(k_neighbors + 1, len(verts))
-    _d, nbr = tree.query(verts, k=kk)
-    # One IK per VERTEX, not one per edge end. Each vertex appears once as i
-    # and about k_neighbors times as somebody's j, so solving on demand cost
-    # ~13 IK calls per vertex and made this scan 40% of the whole bootstrap.
-    qv = np.full(len(verts), np.nan)
+
+    # One IK per vertex. Solving on demand at each comparison cost ~k times
+    # this and made the scan 40% of the whole bootstrap.
+    mag = np.full(len(verts), np.inf)
     for i, v in enumerate(verts):
         q, _ = _q_at(cfg, arm, weld, float(v[0]), float(v[1]), signs, joint)
         if q is not None:
-            qv[i] = q
-    seen = set()
+            mag[i] = abs(q)
+
+    kk = min(k_neighbors + 1, len(verts))
+    _d, nbr = tree.query(verts, k=kk)
     for i in range(len(verts)):
-        qi = qv[i]
-        if not np.isfinite(qi):
+        v = mag[i]
+        if not np.isfinite(v) or v > tol:
             continue
-        for j in np.atleast_1d(nbr[i])[1:]:
-            j = int(j)
-            key = (min(i, j), max(i, j))
-            if key in seen:
-                continue
-            seen.add(key)
-            qj = qv[j]
-            if not np.isfinite(qj) or np.sign(qi) == np.sign(qj):
-                continue
-            a, b = verts[i].copy(), verts[j].copy()
-            qa = qi
-            for _ in range(n_bisect):
-                m = 0.5 * (a + b)
-                qm, _ = _q_at(cfg, arm, weld, float(m[0]), float(m[1]),
-                              signs, joint)
-                if qm is None:
-                    break
-                if np.sign(qm) == np.sign(qa):
-                    a, qa = m, qm
-                else:
-                    b = m
-            m = 0.5 * (a + b)
-            found.append(SigmaDisc(
-                kind=DOOR_INTERIOR, y=float(m[0]), theta=float(m[1]),
-                radius=radius, radius_theta=radius,
-                vanishing=frozenset({sign_index}),
-                detail=f"q{joint + 1} sign change on a roadmap edge, page {name}",
-            ))
+        if mag[np.atleast_1d(nbr[i])[1:]].min() < v - 1e-15:
+            continue
+        found.append(SigmaDisc(
+            kind=DOOR_INTERIOR, y=float(verts[i][0]), theta=float(verts[i][1]),
+            radius=radius, radius_theta=radius,
+            vanishing=frozenset({sign_index}),
+            detail=f"q{joint + 1}~0 local minimum on a roadmap vertex, "
+                   f"page {name}"))
     return _merge_discs(found, radius)
 
 
@@ -1174,7 +1164,7 @@ def build_sigma_roadmap(
         # Backstops, now on the roadmap.
         if cfg.sigma.use_numeric_crosscheck:
             for sign_index in (0, 2):
-                discs += interior_doors_on_edges(
+                discs += interior_doors_on_vertices(
                     cfg, arm, weld, src.valid, src._tree, signs, name,
                     sign_index, spacing,
                     k_neighbors=cfg.planner.k_neighbors)

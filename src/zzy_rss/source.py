@@ -48,6 +48,7 @@ from scipy.spatial import cKDTree
 from .arm import SrsArm
 from .params import Config
 from .pagemap import PageMap
+from .pagemap import q_for_branch
 from .prm import UnionFind, classify
 from .scene import Scene
 from .weld import WeldLine
@@ -236,14 +237,34 @@ class RoadmapSource:
         sc = self.valid * self.scale
         self._tree = cKDTree(sc)
         uf = UnionFind(n)
-        _d, nbr = self._tree.query(sc, k=min(kk + 1, n))
+        d, nbr = self._tree.query(sc, k=min(kk + 1, n))
+        # Kruskal order: shortest candidate edge first.
+        #
+        # The union-find skip below only fires for a pair already joined, so
+        # how fast components merge decides how many edges are validated at
+        # all -- and validating one means a local plan at edge_resolution,
+        # which is the expensive thing here. Short edges are both likelier to
+        # be valid and likelier to merge, so taking them first makes the skip
+        # fire far more often. Vertex order makes it fire least.
+        cand = []
         for i in range(n):
-            for j in np.atleast_1d(nbr[i])[1:]:
+            for col, j in enumerate(np.atleast_1d(nbr[i])[1:], start=1):
                 j = int(j)
-                if uf.find(i) == uf.find(j):
-                    continue
-                if self._edge(self.valid[i], self.valid[j]):
-                    uf.union(i, j)
+                if i < j:
+                    cand.append((float(d[i][col]), i, j))
+                else:
+                    cand.append((float(d[i][col]), j, i))
+        cand.sort()
+        seen = set()
+        for _w, i, j in cand:
+            if (i, j) in seen:
+                continue
+            seen.add((i, j))
+            if uf.find(i) == uf.find(j):
+                continue
+            if self._edge(self.valid[i], self.valid[j]):
+                uf.union(i, j)
+        self._uf = uf
         roots, comp = {}, np.zeros(n, dtype=int)
         for i in range(n):
             r = uf.find(i)
@@ -421,44 +442,148 @@ def bootstrap_roadmap(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     roadmap edges, and door anchors are injected as roadmap vertices so that
     `regions_under` is a lookup rather than a guess.
 
-      pass 1   sample each page, no anchors        -> a roadmap to look for
-                                                      sign changes along
-      pass 2   rebuild with every anchor injected  -> anchors are real
-                                                      vertices in real
-                                                      components
+      pass 1   sample, no anchors        -> a roadmap to look for sign changes
+      pass 2   same samples + anchors    -> anchors are real vertices in real
+                                            components
 
-    Pass 1's roadmap is used only to FIND doors; pass 2's is what the proof
-    runs on. The extra sampling is the price of not having a grid to scan.
+    Both passes go through build_all_roadmaps_shared, so each costs ONE IK and
+    ONE collision check per sample for all eight pages, not eight of each
+    (invariant 19). The second pass reuses the same RNG seed, so it re-samples
+    the identical point set and only the injected anchors are new.
     """
-    from .arm import SIGN_BRANCHES
     from .doors import build_sigma_roadmap
-    from .pagemap import page_name
 
-    names = list(page_names) if page_names is not None else \
-        [page_name(s_) for s_ in SIGN_BRANCHES]
-    signs_of = {page_name(s_): s_ for s_ in SIGN_BRANCHES}
-
-    rng = np.random.default_rng(cfg.planner.rng_seed)
-    scout = {}
-    for name in names:
-        scout[name] = RoadmapSource(
-            cfg, arm, weld, scene, signs_of[name], name, n_samples=n_samples,
-            anchors=None, rng=rng,
-            start_yt=start_yt if name == start_page else None)
+    scout = build_all_roadmaps_shared(
+        cfg, arm, weld, scene, n_samples=n_samples,
+        rng=np.random.default_rng(cfg.planner.rng_seed),
+        start_yt=start_yt, start_page=start_page, verbose=False)
+    if page_names is not None:
+        scout = {n: s_ for n, s_ in scout.items() if n in page_names}
     sigma = build_sigma_roadmap(cfg, arm, weld, scout, with_kin=with_kin,
                                 verbose=verbose)
 
-    rng = np.random.default_rng(cfg.planner.rng_seed)
-    sources = {}
-    for name in names:
-        src = RoadmapSource(
-            cfg, arm, weld, scene, signs_of[name], name, n_samples=n_samples,
-            anchors=[d.anchor for d in sigma.get(name, []) if d.vanishing],
-            rng=rng, start_yt=start_yt if name == start_page else None)
-        sources[name] = src
-        if verbose:
-            print(f"[roadmap] page {name}: {len(src.valid):5d} valid / "
-                  f"{len(src.invalid):5d} invalid, {len(src.regions())} "
-                  f"component(s), {src.n_injected} injected, "
-                  f"spacing {src.tol():.5f}")
+    anchors = {n: [d.anchor for d in ds if d.vanishing]
+               for n, ds in sigma.items()}
+    sources = build_all_roadmaps_shared(
+        cfg, arm, weld, scene, n_samples=n_samples,
+        rng=np.random.default_rng(cfg.planner.rng_seed),
+        start_yt=start_yt, start_page=start_page, extra=anchors,
+        verbose=verbose)
+    if page_names is not None:
+        sources = {n: s_ for n, s_ in sources.items() if n in page_names}
     return sources, sigma
+
+
+def geometry_is_page_dependent(cfg: Config) -> bool:
+    """Is any link's collision geometry off its own joint-joint axis?
+
+    The eight branches place shoulder, elbow, wrist and tool identically --
+    they are eight coordinate spellings of one posture, asserted to 3e-16 by
+    test_branch_geometry_identical. A sign flip rotates a link by pi about
+    its OWN axis, so geometry that is rotationally symmetric about that axis
+    (a capsule) occupies exactly the same space on all eight pages, and one
+    collision query serves them all.
+
+    Off-axis geometry breaks that, and it is the shared build's only
+    assumption that the kinematics do not guarantee.
+    """
+    p = cfg.arm
+    return bool(getattr(p, "use_off_axis_upper_arm", False)
+                or getattr(p, "use_off_axis_elbow", False))
+
+
+def classify_all_pages(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+                       y: float, theta: float) -> dict:
+    """Validity of one page point on ALL EIGHT pages, from ONE IK.
+
+    Invariant 19's mechanism, applied to a roadmap instead of a grid:
+
+      * IK EXISTENCE depends only on |W(y) - S| lying in the annulus, which
+        carries no sign, so one solve settles all eight;
+      * COLLISION depends on the POSTURE, and the eight branches place every
+        link identically -- they are eight spellings of one arm placement;
+      * only JOINT LIMITS tell them apart, and the mirror identities give the
+        other seven joint vectors in closed form.
+
+    So the cost is 1 IK + 1 FK + 1 collision + 8 limit comparisons, not 8 of
+    each. The grid path has had this since findings 33; the roadmap was
+    paying full price per page.
+    """
+    from .arm import SIGN_BRANCHES
+    if geometry_is_page_dependent(cfg):
+        raise ValueError(
+            "the shared eight-page build assumes COLLISION is the same on "
+            "every page, which holds because the eight branches are eight "
+            "spellings of ONE arm placement -- but only while each link's "
+            "collision geometry is rotationally symmetric about its own "
+            "joint-joint axis. Capsules are. An off-axis hub is not: "
+            "flipping s2 carries the upper-arm hub 210 mm, s4 carries the "
+            "elbow hub 180 mm, and the eight pages then differ by collision "
+            "(measured: 11 pp in valid fraction, 26 of 961 cells wrong on "
+            "each s2=- page). Real STL meshes will not be symmetric either. "
+            "Switch use_off_axis_* off, or build each page separately.")
+    ref = SIGN_BRANCHES[0]
+    pos, rot = weld.pose(y)
+    res = arm.ik_branch(pos, rot, theta, ref,
+                        coord_axis_tol=cfg.pagemap.coord_axis_tol,
+                        coord_radius_tol=cfg.pagemap.coord_radius_tol)
+    if not res.ok:
+        return {sg: (False, None) for sg in SIGN_BRANCHES}
+    hit = scene.check(arm.frames(res.q)).in_collision
+    out = {}
+    for sg in SIGN_BRANCHES:
+        q = res.q if sg == ref else q_for_branch(res.q, ref, sg)
+        out[sg] = ((not hit) and arm.within_limits(q), q)
+    return out
+
+
+def build_all_roadmaps_shared(
+    cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+    n_samples: int | None = None, rng=None, start_yt: tuple | None = None,
+    start_page: str | None = None, extra: dict | None = None,
+    verbose: bool = False,
+) -> dict:
+    """Eight RoadmapSources from ONE sample set and ONE IK per sample."""
+    from .arm import SIGN_BRANCHES
+    from .pagemap import page_name
+    rng = rng or np.random.default_rng(cfg.planner.rng_seed)
+    pm = cfg.pagemap
+    n = n_samples or cfg.planner.n_samples
+
+    pts = []
+    for name, lst in (extra or {}).items():
+        pts.extend([np.asarray(e, dtype=float) for e in lst])
+    if start_yt is not None:
+        pts.append(np.asarray(start_yt, dtype=float))
+    n_inject = len(pts)
+    pts.extend(np.column_stack([rng.uniform(pm.y_min, pm.y_max, n),
+                                rng.uniform(pm.theta_min, pm.theta_max, n)]))
+
+    per_page = {page_name(sg): ([], []) for sg in SIGN_BRANCHES}
+    for p in pts:
+        verdicts = classify_all_pages(cfg, arm, weld, scene,
+                                      float(p[0]), float(p[1]))
+        for sg, (ok, _q) in verdicts.items():
+            per_page[page_name(sg)][0 if ok else 1].append(p)
+
+    out = {}
+    for sg in SIGN_BRANCHES:
+        name = page_name(sg)
+        valid, invalid = per_page[name]
+        src = RoadmapSource.__new__(RoadmapSource)
+        src.cfg, src.arm, src.weld, src.scene = cfg, arm, weld, scene
+        src.signs, src.name = sg, name
+        src.scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+        src.valid = np.asarray(valid, dtype=float).reshape(-1, 2)
+        src.invalid = np.asarray(invalid, dtype=float).reshape(-1, 2)
+        src.n_injected = n_inject
+        src._tree = None
+        src._tol = None
+        src.comp = src._components()
+        src._regions = src._build_regions()
+        out[name] = src
+        if verbose:
+            print(f"[roadmap*] page {name}: {len(src.valid):5d} valid / "
+                  f"{len(src.invalid):5d} invalid, {len(src.regions())} "
+                  f"component(s), spacing {src.tol():.5f}")
+    return out
