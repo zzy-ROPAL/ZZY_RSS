@@ -62,21 +62,26 @@ def main() -> None:
     for i, (sg, pl, what, col) in enumerate(panels):
         key = (name(sg), 0)
         w, wi = walls[key], info[key]
+        wb = walls.get((name(sg), 1))
+        wbi = info.get((name(sg), 1))
         ax = fig.add_subplot(2, 2, i + 1, projection="3d")
         draw_volume(ax, classify_grid(cfg, arm, scene, surf, sg, us, vs, ts), us, vs, ts)
-        vv = w["vertices"].copy()
-        vv[:, 2] /= np.pi
-        ax.add_collection3d(Poly3DCollection(vv[w["simplices"]], facecolor=col, alpha=0.30,
-                                             edgecolor=col, linewidths=0.05))
+        for ww, cc, al in ((w, col, 0.25), (wb, "#2b9348", 0.6)):
+            if ww is None:
+                continue
+            vv = ww["vertices"].copy()
+            vv[:, 2] /= np.pi
+            ax.add_collection3d(Poly3DCollection(vv[ww["simplices"]], facecolor=cc, alpha=al,
+                                                 edgecolor=cc, linewidths=0.05))
         doors(ax, curves)
         goal_face(ax)
         if sg == A:
             ax.scatter([0], [0.5], [th0 / np.pi], s=80, color="#1d6fd8", edgecolor="k",
                        depthshade=False)
         frame(ax, "")
-        ax.set_title(f"{pl} ({name(sg)}): wall around the {what}\n"
-                     f"closed, {wi['facets']} triangles verified in C_obs, gamma {wi['gamma']}, "
-                     f"ends at u = {wi['u_max']} < goal", fontsize=11)
+        ax.set_title(f"{pl} ({name(sg)})\nwall A: {what}, {wi['facets']} verified, u_max {wi['u_max']}\n"
+                     f"wall B: door pocket, {wbi['facets'] if wbi else '-'} verified, "
+                     f"u_max {wbi['u_max'] if wbi else '-'}", fontsize=11)
 
         ax = fig.add_subplot(2, 2, i + 3)
         U, T = np.meshgrid(np.linspace(0, 1, 301), np.linspace(-np.pi, np.pi, 361), indexing="ij")
@@ -86,8 +91,11 @@ def main() -> None:
         ax.imshow(code.T, origin="lower", extent=[0, 1, -1, 1], aspect="auto", interpolation="nearest",
                   cmap=matplotlib.colors.ListedColormap(["#ffffff", "#e76f51", "#2a9d8f"]),
                   vmin=0, vmax=2)
-        for a, b in slice_segments(w["vertices"], w["simplices"], 0.5):
-            ax.plot([a[0], b[0]], [a[2] / np.pi, b[2] / np.pi], color=col, lw=2.6)
+        for ww, cc in ((w, col), (wb, "#2b9348")):
+            if ww is None:
+                continue
+            for a, b in slice_segments(ww["vertices"], ww["simplices"], 0.5):
+                ax.plot([a[0], b[0]], [a[2] / np.pi, b[2] / np.pi], color=cc, lw=2.6)
         for c in curves:
             j = int(np.argmin(np.abs(c.pts[:, 1] - 0.5)))
             ax.plot(c.pts[j, 0], c.pts[j, 2] / np.pi, "*", color="#7b2cbf", ms=18, mec="k")
@@ -100,16 +108,17 @@ def main() -> None:
         ax.set_ylabel("theta / pi")
         ax.set_title(f"{pl} ({name(sg)}), slice v = 0.5", fontsize=11)
     fig.legend(handles=[
-        Line2D([], [], color="#1d6fd8", lw=3, label="wall 1 (page 1)"),
-        Line2D([], [], color="#d62828", lw=3, label="wall 2 (page 2)"),
+        Line2D([], [], color="#1d6fd8", lw=3, label="page 1 wall A (start region)"),
+        Line2D([], [], color="#d62828", lw=3, label="page 2 wall A (region behind the door)"),
+        Line2D([], [], color="#2b9348", lw=3, label="wall B (door pocket)"),
         Line2D([], [], color="#e76f51", lw=8, alpha=0.6, label="collision (2 boxes)"),
         Line2D([], [], color="#2a9d8f", lw=8, alpha=0.6, label="q7 / joint limits"),
         Line2D([], [], ls="", marker="*", ms=14, color="#7b2cbf", mec="k", label="q6 door"),
         Line2D([], [], ls="", marker="o", ms=9, color="#1d6fd8", mec="k", label="start"),
         Line2D([], [], color="#d62828", lw=4, label="goal u = 1")],
-        loc="lower center", ncol=7, fontsize=11)
+        loc="lower center", ncol=4, fontsize=11)
     fig.suptitle(f"Two-wall infeasibility proof: {t['verdict']} -- {t['reason']}", fontsize=13)
-    fig.subplots_adjust(left=0.04, right=0.98, top=0.92, bottom=0.07, hspace=0.18, wspace=0.12)
+    fig.subplots_adjust(left=0.04, right=0.98, top=0.91, bottom=0.10, hspace=0.20, wspace=0.12)
     fig.savefig(args.out, dpi=110)
     print(f"wrote {args.out}")
 
