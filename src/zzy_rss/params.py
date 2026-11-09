@@ -465,6 +465,12 @@ class WallParams:
     # between region k and a small neighbour -- gamma 2 -> 10 on EXP 3's
     # partner page, with facets landing in valid cells (findings 29).
     rest_mode: str = "goal_only"
+    # Training samples for the Sigma discs (findings 47, wall.sigma_disc_samples):
+    # sigma_ring "circle" (legacy) or "ellipse" (the guard's own shape);
+    # sigma_side "proximity" (a door near the region is enclosed, a far one
+    # excluded) or "enclose" (every door enclosed; second walls exclude them).
+    sigma_ring: str = "circle"
+    sigma_side: str = "proximity"
     # Algorithm 4 feeds a failed facet centre back into the training data. If
     # that centre sits closer than this (in SCALED page units) to a point of
     # the class it is NOT being given, the two classes stop being separable at

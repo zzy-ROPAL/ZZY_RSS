@@ -534,10 +534,20 @@ def second_wall(
         # A door is only excluded when ALL of it is excluded: one reachable
         # patch is a usable escape hatch, and skipping on a centre that
         # happened to fall outside would be a false infeasibility proof.
+        #
+        # EXACT, as at d = 3 (page3.tube_excluded): no wall segment may enter
+        # the elliptical disc, so the disc lies wholly on one side, and the
+        # centre then decides which. The ring probes alone are a sample: a
+        # wall bulging into the disc between two probes would pass them
+        # (findings 47).
+        from .wall import segment_hits_disc
+        touches = any(segment_hits_disc(a, b, target)
+                      for loop in poly.loops
+                      for a, b in zip(np.asarray(loop)[:-1], np.asarray(loop)[1:]))
         probes = np.vstack([np.array([[target.y, target.theta]]),
                             disc_ring(target, n=32)])
         verdicts = [point_in_wall(cfg, poly, p) for p in probes]
-        outside = bool(verdicts) and all(v is False for v in verdicts)
+        outside = (not touches) and bool(verdicts) and all(v is False for v in verdicts)
     return poly, rep, wmodel, bool(ok and outside)
 
 
@@ -837,7 +847,11 @@ def _run_proof(
 
         # Teach the wall where the doors are, so it cannot route through one.
         tol_d = src.tol()
-        s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d)
+        # The region's own points, before any disc samples: wall 2 starts from
+        # these (findings 47 -- see the exit-2 block below).
+        seed_core = seed_pts
+        s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d, ring=cfg.wall.sigma_ring,
+                                              side=cfg.wall.sigma_side)
         if len(s_extra):
             seed_pts = np.vstack([seed_pts, s_extra])
         if len(r_extra):
@@ -881,7 +895,14 @@ def _run_proof(
         # verdict. Both exits 3 and 4 follow the door -- only the tag differs,
         # and the tag is what decides whether a goal reached beyond it may be
         # called FEASIBLE.
-        here = discs_in_region(discs, pts, src.tol())
+        # Which doors this region must resolve. By proximity, a far door is in
+        # wall 1's REST class, so a verified wall 1 has it outside and nothing
+        # is lost by not listing it. With sigma_side="enclose" wall 1 ENCLOSES
+        # every door (findings 47): a far door is then inside it and must be
+        # resolved here like a near one -- skipping it would let the queue
+        # empty while a reachable door was never looked at.
+        here = (list(discs) if cfg.wall.sigma_side == "enclose"
+                else discs_in_region(discs, pts, src.tol()))
         for d in here:
             ex, follow, verified, why = "4-unknown", True, False, ""
 
@@ -939,8 +960,18 @@ def _run_proof(
             # and costs only time, because exit 4 follows the door anyway.
             if follow and not verified and use_second_wall:
                 others = [o for o in discs if o is not d]
+                # Seed = the region + the OTHER near doors' disc samples. Not
+                # wall 1's seed_pts: that holds THIS door's centre and ring in
+                # the seed class (sigma_disc_samples put it there so wall 1
+                # encloses it), while second_wall puts its ring in the rest
+                # class -- the two classes then share points, Algorithm 1 can
+                # never separate them, and exit 2 could not succeed on any
+                # door wall 1 encloses (findings 47).
+                s_oth, _ = sigma_disc_samples(others, pts, tol_d, ring=cfg.wall.sigma_ring,
+                                              side="proximity")
+                seed2 = np.vstack([seed_core, s_oth]) if len(s_oth) else seed_core
                 p2, r2, w2, ok2 = second_wall(
-                    cfg, arm, weld, scene, src.signs, seed_pts, inv, d, others,
+                    cfg, arm, weld, scene, src.signs, seed2, inv, d, others,
                     alg4_iters=max(1, alg4_iters // 3), verbose=False)
                 second_walls.append({
                     "page": name, "region": k, "door_y": float(d.y),

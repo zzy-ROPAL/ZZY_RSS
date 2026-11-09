@@ -209,7 +209,8 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray,
 
 
 def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
-                       n_ring: int = 12) -> tuple:
+                       n_ring: int = 12, ring: str = "circle",
+                       side: str = "proximity") -> tuple:
     """Training points that stop the wall routing THROUGH a door.
 
     The SVM separates two classes of valid points and knows nothing about
@@ -223,14 +224,23 @@ def sigma_disc_samples(discs: list, region_pts: np.ndarray, tol: float,
     flood fill follows it from here. So each such disc contributes its centre
     and a ring of points to the SEED class; discs belonging elsewhere go to
     the REST class. Returns (seed_extra, rest_extra).
+
+    ring="ellipse" (findings 47) puts the ring on the disc's ELLIPSE, the
+    shape the Sigma guard tests (invariant 6). The legacy "circle" uses
+    `radius` on both axes, so on a q2 disc (0.033 in y, 0.209 in theta) it
+    covers |dtheta| <= 0.033 only, and a wall excluding the door is free to
+    clip the rest of the ellipse -- every facet that does is then rejected.
+    side="enclose" puts EVERY disc in the seed class: wall 1 then only has
+    to separate start from goal, and each door is left to a second wall.
     """
     seed_extra, rest_extra = [], []
     for d in discs:
         c = np.array([d.y, d.theta])
         pts = [c]
         for a in np.linspace(0.0, 2.0 * np.pi, n_ring, endpoint=False):
-            pts.append(c + d.radius * np.array([np.cos(a), np.sin(a)]))
-        near = (len(region_pts) > 0
+            rt = d.r_theta if ring == "ellipse" else d.radius
+            pts.append(c + np.array([d.radius * np.cos(a), rt * np.sin(a)]))
+        near = side == "enclose" or (len(region_pts) > 0
                 and float(np.min(np.linalg.norm(region_pts - c, axis=1)))
                 <= max(tol, d.radius))
         (seed_extra if near else rest_extra).extend(pts)

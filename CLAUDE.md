@@ -37,6 +37,13 @@
 > `prove3` 全部排除 ⇒ INFEASIBLE(单页);`run_flood3` 中路图已连门则跳过。
 > 负对照两例正确失败/跳过,§46 四面墙逐字不变;**正对照场景待搜**。测试 `tests/test_second_wall3.py`。
 > **注意:§46 的"两面墙"是两面墙₁(每个访问区域一面),不是墙₂。**
+>
+> **§47b:EXP 2 的单页两类墙证明(2 维)**。EXP 2 原配置 + **关掉纤维卸载**(两道 q2 门都是活门):
+> 墙₁ 起点|终点 **304/304**,墙₂ 起点|门 0 **140/140**、起点|门 1 **143/143** ⇒ **INFEASIBLE**,6.7 s,
+> `run_proof` 独立复核一致。`python3 scripts/exp2_two_walls.py`,图 `docs/figs/exp2_two_walls.png`。
+> 顺带修掉 2 维墙₂ 的三个 bug(种子含目标门的盘 ⇒ 2 维 exit 2 **从来不可能成功**;训练环是圆而守卫是椭圆;
+> "门在外"只靠探针)。新开关 `WallParams.sigma_ring="ellipse"`、`sigma_side="enclose"`(默认不变)。
+> 默认设定下 EXP 2 实测 **291/291**(TDC),145/145 是 §39 之前的数字。
 
 > ### 🆕🆕🆕 2026-11-09(三):**3 维两面墙不可行证明**(§46)
 >
@@ -332,6 +339,7 @@ python3 tests/test_flood3.py                               # 3 维跨页路径:�
 python3 tests/test_batch.py                                # 批量判定逐态等于标量判定(§44)
 python3 tests/test_budget.py                               # 预算:停止 = 失败的墙,只会 INCONCLUSIVE;升级(§44)
 python3 tests/test_second_wall3.py                         # 3 维墙₂ 的"门管整个在外"精确判据(§47)
+python3 scripts/exp2_two_walls.py                          # EXP 2 单页两类墙:墙₁ 起点|终点 + 墙₂ 起点|门(§47b)
 python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   # 稀疏起步,自动升级(§44)
 python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 \
     --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl   # 新 EXP 3(§45)
@@ -672,6 +680,10 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 
 53. **碰到种子侧门管的非终点区域必须在墙内。**(§45)门管整个在墙内,而贴着管的有效状态
     让墙无处可走;并入种子类只让证书更强。终点分量永不并入。
+
+55. **墙₂ 的种子不能含目标门自己的盘。**(§47b)墙₁ 把近门的圆心与环放进 seed,墙₂ 把同一个环放进 rest
+    ⇒ 两类重合 ⇒ 永远分不开。墙₂ 种子 = 区域点 + **其他**门的盘样本。`sigma_side="enclose"` 时
+    `run_proof` 要对**所有**门判出口,墙₁ 圈住的远门也是。
 
 54. **3 维墙₂ 排除一道门,必须整根门管在外,且没有三角形碰到它。**(§47)目标管被移出 Σ 守卫
     (否则贴管的三角形全被拒),所以墙₂ 可能穿过门;门有一段在内就是可用的逃生口,

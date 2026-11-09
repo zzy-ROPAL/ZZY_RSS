@@ -286,7 +286,8 @@ def prove(cfg, arm, weld, scene, pm, lab, k, discs, iters=6, verbose=False):
     live, disch = live_discs(cfg, arm, weld, scene, sg, discs)
     tol = float(np.hypot(pm.y_grid[1] - pm.y_grid[0],
                          pm.theta_grid[1] - pm.theta_grid[0]))
-    se, re_ = sigma_disc_samples(live, pts, tol)
+    se, re_ = sigma_disc_samples(live, pts, tol, ring=cfg.wall.sigma_ring,
+                                 side=cfg.wall.sigma_side)
     seed = thin(pts, 450, rng)
     _, regs_here = label_regions(cfg, pm)
     rest = np.vstack([thin(other_valid_points(pm, lab, k, regs_here,
