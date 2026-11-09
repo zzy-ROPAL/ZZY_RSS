@@ -637,9 +637,11 @@ class _PageLabeller:
 
 
 def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
-               inv: np.ndarray, oracle: FacetOracle, verbose: bool = True) -> tuple:
+               inv: np.ndarray, oracle: FacetOracle, verbose: bool = True,
+               iters: int | None = None) -> tuple:
     """IJRR Algorithm 4 on the 3-D page. Returns (poly, report, wall, log)."""
     p3 = page.p3
+    n_iters = int(p3.alg4_iters if iters is None else iters)
     rng = np.random.default_rng(p3.rng_seed + 2)
     scale = page.scale
     # Topological labels and the feedback guard for everything fed back
@@ -653,7 +655,7 @@ def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
     eta = float(p3.eta)
     poly, rep, log = Polytope(), CheckReport(False, 0, 0), []
     checked_wall = wall          # the wall `poly` was reconstructed from
-    for it in range(1, int(p3.alg4_iters) + 1):
+    for it in range(1, n_iters + 1):
         _budget.check_time()
         t0 = time.time()
         wall, wall_pts, seed, rest, rounds = sample_wall(
@@ -852,6 +854,141 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
 
 
 # --------------------------------------------------------------------------
+# exit 2: a second wall for ONE door curve (findings 47)
+# --------------------------------------------------------------------------
+
+
+def tube_excluded(vertices: np.ndarray, simplices: np.ndarray, curve,
+                  lo: np.ndarray, hi: np.ndarray, scale: np.ndarray) -> tuple:
+    """Is the WHOLE on-patch tube of `curve` outside the closed mesh?
+
+    Exact, not sampled. Each on-patch piece of the curve (clip_to_box) has a
+    connected tube; if no triangle touches it, the tube lies wholly on one
+    side of the closed surface, and one probe point decides which. This is
+    the d = 3 answer to the 2-D second_wall's ring of 32 probes: the wall
+    may not run through the door, since a door partly inside is a usable
+    escape hatch, and excluding it then would be a false proof.
+
+    Returns (excluded, reason). A curve with no on-patch piece has no door
+    and is trivially excluded."""
+    from .facets import triangle_hits_tube
+    tubes = in_box_tubes(_Box(lo, hi), [curve])
+    if not tubes:
+        return True, "no part of the curve is on the patch"
+    verts = np.asarray(vertices, dtype=float)
+    simp = np.asarray(simplices, dtype=int)
+    for k, tb in enumerate(tubes):
+        for t in simp:
+            if triangle_hits_tube(verts[t], tb):
+                return False, f"a wall triangle touches the door tube (piece {k})"
+        probe = np.asarray(tb.polyline[:1], dtype=float) * scale
+        if bool(inside(probe, verts * scale, simp, 2)[0]):
+            return False, f"the door tube is inside the wall (piece {k})"
+    return True, f"all {len(tubes)} on-patch piece(s) of the tube are outside"
+
+
+class _Box:
+    """The two attributes in_box_tubes reads from a page."""
+
+    def __init__(self, lo, hi):
+        self.lo, self.hi = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
+
+
+def second_wall3(cfg: Config, page: Page3, target, others: list,
+                 entries: np.ndarray, verbose: bool = True) -> dict:
+    """Exit 2 at d = 3: a wall whose only job is to separate the region on
+    the page's focus from ONE live door curve (IJRR Definition 1 with
+    X = that door; the goal plays no part).
+
+    As at d = 2 (flood.second_wall):
+      * seed = the focus component (no door pockets: a pocket touches the
+        target's tube by definition) + entry states + face anchors on the
+        start side, plus the OTHER live tubes near the region;
+      * rest = the target's tube + the outside ring ONLY -- not the goal,
+        which would make one wall thread between two targets (invariant 15
+        in reverse);
+      * the target is dropped from the Sigma guard, else every triangle
+        hugging it is rejected; tube_excluded then demands, exactly, that
+        no triangle touches it after all.
+
+    ok = closed, every triangle in C_obs, every entry inside, the target's
+    whole tube outside. Failing is safe: the caller follows the door."""
+    p3 = page.p3
+    rng = np.random.default_rng(p3.rng_seed + 5)
+    st: dict = {"curve": f"q{target.joint}"}
+    saved = page.inside
+    page.inside = set()
+    try:
+        region = page.seed_points()
+        seed = region
+        if len(seed) > p3.n_train_max:
+            seed = seed[rng.choice(len(seed), p3.n_train_max, replace=False)]
+        seed = np.vstack([entries, seed])
+        t_seed, t_rest = tube_samples([target], np.zeros((0, 3)), page.scale, 0.03,
+                                      page.lo, page.hi)
+        rest0 = np.vstack([t_rest, t_seed])           # (t_seed is empty: no region)
+        if not len(rest0):
+            return dict(ok=True, poly=Polytope(), stats=st,
+                        wall=dict(closed=False, facets="0/0", ok=False, gamma=None),
+                        reason="the target curve has no part on the patch")
+        if cfg.wall.eta_separation > 0.0:
+            seed, rest0, n_cut = eta_separate(seed, rest0, cfg.wall.eta_separation,
+                                              page.scale)
+            st["eta_cut"] = int(n_cut)
+        a_seed, _a_rest = face_anchors(page, rng)
+        if len(a_seed):
+            seed = np.vstack([seed, a_seed])
+        rest = np.vstack([rest0, virtual_ring3(cfg, page, int(p3.ring_per_face), rng)])
+        s_extra, r_extra = tube_samples(others, region, page.scale, 0.03, page.lo, page.hi)
+        if len(s_extra):
+            seed = np.vstack([seed, s_extra])
+        if len(r_extra):
+            rest = np.vstack([rest, r_extra])
+        inv = page.invalid
+        if len(inv) > p3.n_invalid_max:
+            inv = inv[rng.choice(len(inv), p3.n_invalid_max, replace=False)]
+        oracle = robot_oracle3(cfg, page, others)
+        iters = p3.second_wall_iters if p3.second_wall_iters is not None else p3.alg4_iters
+        label = (f"wall2 {''.join('+' if s > 0 else '-' for s in page.signs)}/"
+                 f"{page.start_comp} q{target.joint}")
+        try:
+            with _budget.wall_attempt(cfg.budget, label):
+                poly, rep, wall, log = find_wall3(cfg, page, seed, rest, inv, oracle,
+                                                  verbose, iters=iters)
+        except _budget.BudgetExceeded as e:
+            if e.scope != "wall":
+                raise
+            if verbose:
+                print(f"[budget] {e.reason}")
+            st["budget_stop"] = e.reason
+            return dict(ok=False, poly=Polytope(), stats=st, reason=e.reason,
+                        wall=dict(closed=False, facets="0/0", ok=False,
+                                  gamma=None if e.gamma is None else round(float(e.gamma), 2)))
+    finally:
+        page.inside = saved
+    st["alg4"] = log
+    info = dict(closed=poly.closed, facets=f"{rep.n_passed}/{rep.n_facets}",
+                gamma=round(float(wall.gamma), 2), ok=bool(rep.ok and poly.closed))
+    out = dict(ok=False, poly=poly, wall=info, stats=st, reason="")
+    if not info["ok"]:
+        why = rep.failures[0][1] if rep.failures else (poly.note or "not closed")
+        out["reason"] = f"no verified second wall ({info['facets']} facets; {why})"
+        return out
+    verts, simp = poly.vertices * page.scale, poly.simplices
+    if not np.all(inside(np.asarray(entries) * page.scale, verts, simp, 2)):
+        out["reason"] = "verified second wall does not enclose every entry state"
+        return out
+    excl, why = tube_excluded(poly.vertices, simp, target, page.lo, page.hi, page.scale)
+    if not excl:
+        out["reason"] = f"verified second wall, but {why}"
+        return out
+    out["ok"] = True
+    out["reason"] = (f"closed, every triangle in C_obs, every entry inside, {why}: "
+                     f"the region cannot reach this door")
+    return out
+
+
+# --------------------------------------------------------------------------
 # the decision
 # --------------------------------------------------------------------------
 
@@ -971,6 +1108,29 @@ def _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose,
                           f"inside the wall ({', '.join(st['live_inside'])}), i.e. page "
                           f"changes" if inside_live else ""),
                        st, doors, [w["wall"]], poly=w["poly"])
+    if inside_live and p3.second_wall:
+        # Exit 2 (findings 47): try to exclude each enclosed door with a wall
+        # of its own. Every one must go; one that stays leaves the page open.
+        second, remaining = [], []
+        for c in inside_live:
+            others = [o for o in live if o is not c]
+            w2 = second_wall3(cfg, page, c, others, page.start[None, :], verbose=verbose)
+            second.append(dict(curve=f"q{c.joint}", excluded=w2["ok"],
+                               reason=w2["reason"], wall=w2["wall"]))
+            if verbose:
+                print(f"[exit2-3d] q{c.joint} curve: "
+                      f"{'EXCLUDED' if w2['ok'] else 'not excluded'} -- {w2['reason']}")
+            if not w2["ok"]:
+                remaining.append(c)
+        st["second_walls"] = second
+        st["seconds"] = round(time.time() - t0, 1)
+        if not remaining:
+            return Result3(INFEASIBLE, "closed wall, every triangle in C_obs, start "
+                           "inside, goal slab outside; every live door inside it is "
+                           f"excluded by a verified second wall ({len(second)})",
+                           st, doors, [w["wall"]],
+                           poly=w["poly"])
+        inside_live = remaining
     if inside_live:
         return Result3(INCONCLUSIVE, f"live q{inside_live[0].joint} door curve is INSIDE "
                        f"the wall: following it needs the cross-page flood "

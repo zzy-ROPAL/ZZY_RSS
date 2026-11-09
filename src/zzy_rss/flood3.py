@@ -9,7 +9,10 @@ that page's roadmap). Starting from the start posture's region it repeats:
     every LIVE door curve inside the wall must be followed: the robot can
     reach it and leave the page there, so every component of the partner
     page that touches the curve is queued. A curve outside the wall is
-    unreachable from this region (exit 1).
+    unreachable from this region (exit 1). With Page3Params.second_wall, a
+    curve inside it first gets a wall of its own (exit 2, findings 47):
+    region inside, that curve's whole tube outside => unreachable, skipped.
+    A second wall that fails just means the curve is followed.
 
 INFEASIBLE when the queue empties with every wall verified and the goal never
 reached; FEASIBLE only with a verified end-to-end path; INCONCLUSIVE else.
@@ -47,7 +50,7 @@ from . import budget as _budget
 from .arm import SrsArm
 from .doors3 import certify_curve, door_curves, patch_singularities
 from .page3 import (FEASIBLE, INCONCLUSIVE, INFEASIBLE, Page3, choose_start_theta,
-                    densify3, region_wall, theta_cut_check)
+                    densify3, region_wall, second_wall3, theta_cut_check)
 from .params import Config, Page3Params
 from .scene import Scene
 from .weld import WeldSurface
@@ -143,6 +146,7 @@ class FloodResult3:
     stats: dict = field(default_factory=dict)
     path: object = None        # the verified WitnessPath behind a FEASIBLE verdict
     polys: list = field(default_factory=list)   # (page, comp, Polytope) per wall built
+    second_walls: list = field(default_factory=list)  # exit 2 attempts (findings 47)
 
 
 def run_flood3(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
@@ -360,6 +364,8 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
     entries = {root: [0]}                 # vertex indices that enter the region
     parent: dict = {root: None}           # region -> (prev region, n_from, n_to)
     visited, regions, certificate, crossings = set(), [], [], []
+    second_walls: list = []
+    st["second_walls"] = second_walls      # also on INCONCLUSIVE / FEASIBLE exits
 
     while queue:
         node = queue.pop(0)
@@ -421,9 +427,41 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
         for (ci, c), ins in zip(live, w["live_inside"]):
             if not ins:
                 crossings.append(dict(page=page_name(signs), comp=comp, curve=ci,
-                                      joint=f"q{c.joint}", followed=False,
+                                      joint=f"q{c.joint}", followed=False, exit="1-wall1",
                                       why="outside the verified wall: unreachable"))
                 continue
+            # Exit 2 (findings 47): a second wall for this one curve. Skipped
+            # when one of the curve's injected near-door states is a vertex
+            # of THIS region: the roadmap already connects the region to the
+            # door, so no separating wall exists and trying one only burns its
+            # Algorithm 4 budget (2-D runs exit 3 first for the same reason).
+            # The skip costs work, never soundness: the door is followed.
+            if p3.second_wall:
+                touch = [page.inject_index[n] for n, k in enumerate(ds.key) if k[0] == ci]
+                connected = any(vb >= 0 and int(page.comp[vb]) == comp for vb in touch)
+                if connected:
+                    w2 = None
+                    if verbose:
+                        print(f"[exit2-3d] q{c.joint} curve: the roadmap connects it to "
+                              f"this region -> no second wall, follow")
+                else:
+                    others = [o for _, o in live if o is not c]
+                    w2 = second_wall3(cfg, page, c, others, entry_pts, verbose=verbose)
+                    second_walls.append(dict(page=page_name(signs), comp=comp, curve=ci,
+                                             joint=f"q{c.joint}", excluded=w2["ok"],
+                                             reason=w2["reason"], wall=w2["wall"]))
+                    state.setdefault("polys2", []).append(
+                        (page_name(signs), comp, ci, w2["poly"]))
+                    if verbose:
+                        print(f"[exit2-3d] q{c.joint} curve: "
+                              f"{'EXCLUDED' if w2['ok'] else 'not excluded'} -- "
+                              f"{w2['reason']}")
+                    page.set_focus(comp)
+                if w2 is not None and w2["ok"]:
+                    crossings.append(dict(page=page_name(signs), comp=comp, curve=ci,
+                                          joint=f"q{c.joint}", followed=False,
+                                          exit="2-wall2", why=w2["reason"]))
+                    continue
             # At the door posture the robot can also move along the fiber
             # (the gimbal null motion) before it leaves, so it may depart in
             # ANY direction -- onto the partner page, or back onto THIS page
@@ -477,7 +515,8 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
                                                     reason=c.reason)
                                                for (s2, ci), c in certified.items() if s2 == s]
                                for s in pages},
-                        stats=st, polys=list(state.get("polys", [])))
+                        stats=st, polys=list(state.get("polys", [])),
+                        second_walls=second_walls)
 
 
 # --------------------------------------------------------------------------

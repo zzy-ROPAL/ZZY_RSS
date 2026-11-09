@@ -116,6 +116,8 @@ def main() -> None:
                     help="Algorithm 1's gamma search (findings 45)")
     ap.add_argument("--wall-seconds", type=float, default=None,
                     help="per-wall budget (BudgetParams.wall_seconds)")
+    ap.add_argument("--second-wall", action="store_true",
+                    help="exit 2 at d = 3: a wall per enclosed live door curve (findings 47)")
     ap.add_argument("--no-batch", action="store_true",
                     help="scalar validity loops instead of batch.py (findings 44)")
     args = ap.parse_args()
@@ -163,6 +165,8 @@ def main() -> None:
     p3 = dataclasses.replace(Page3Params(), n_samples=args.samples, rng_seed=args.seed)
     if args.alg4_iters is not None:
         p3 = dataclasses.replace(p3, alg4_iters=args.alg4_iters)
+    if args.second_wall:
+        p3 = dataclasses.replace(p3, second_wall=True)
     if args.start_u is not None:
         p3 = dataclasses.replace(p3, start_u=args.start_u)
     if args.start_v is not None:
@@ -184,6 +188,7 @@ def main() -> None:
                    task=dict(verdict=task.verdict, reason=task.reason,
                              regions=task.regions, crossings=task.crossings,
                              walls=task.certificate, witness=task.witness,
+                             second_walls=task.second_walls,
                              seconds=round(time.time() - t1, 1), stats=task.stats))
         if args.save:
             import pickle
@@ -230,6 +235,7 @@ def main() -> None:
                    samples=args.samples, seed=args.seed, mode="flood", verdict=res.verdict, reason=res.reason,
                    seconds=round(time.time() - t, 1), regions=res.regions,
                    walls=res.certificate, crossings=res.crossings, doors=res.doors,
+                   second_walls=res.second_walls,
                    witness=res.witness, stats=res.stats)
         print(json.dumps(out, default=str))
         return

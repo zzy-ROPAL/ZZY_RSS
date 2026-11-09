@@ -239,6 +239,16 @@ class Page3Params:
     lazy_rounds: int = 6
     # Crossing pairs tried per door hop before phase 1 gives up on a route.
     cross_tries: int = 400
+    # Exit 2 at d = 3 (findings 47): a SECOND wall whose only job is one live
+    # door curve that the region's wall 1 encloses. Seed = the region, rest =
+    # that curve's tube + the outside ring; the goal plays no part. It
+    # excludes the door only if the wall verifies, encloses every entry state
+    # and no triangle touches the curve's tube (exact, so the whole tube is on
+    # one side) with a probe outside. Failing is safe: the door is followed,
+    # as without it. Off by default so every documented 3-D number stands.
+    second_wall: bool = False
+    # Algorithm 4 rounds for a second wall; None = alg4_iters.
+    second_wall_iters: int | None = None
 
 
 @dataclass(frozen=True)

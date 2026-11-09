@@ -30,6 +30,14 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### 🆕🆕🆕🆕 2026-11-09(四):**第二道墙移植到 3 维**(§47)
+>
+> `Page3Params.second_wall`(默认关)/ `run_3d.py --second-wall`:墙₁ 内的每道活门曲线试一面**只为它**的墙
+> (seed = 区域,rest = 目标门管 + 外环,守卫去掉目标管)。排除判据**精确**:没有三角形碰到目标管 ∧ 探针在外。
+> `prove3` 全部排除 ⇒ INFEASIBLE(单页);`run_flood3` 中路图已连门则跳过。
+> 负对照两例正确失败/跳过,§46 四面墙逐字不变;**正对照场景待搜**。测试 `tests/test_second_wall3.py`。
+> **注意:§46 的"两面墙"是两面墙₁(每个访问区域一面),不是墙₂。**
+
 > ### 🆕🆕🆕 2026-11-09(三):**3 维两面墙不可行证明**(§46)
 >
 > §45 场景 + 第二个盒子 (0.30, 0.20, 0.30) ⇒ 页 2 也被堵:**INFEASIBLE**,墙 1(`+++` 起始区域)**2552/2552**,
@@ -323,6 +331,7 @@ python3 tests/test_crossing.py                             # 门直穿:假象、
 python3 tests/test_flood3.py                               # 3 维跨页路径:直穿 + 纤维旋转、整圈不匹配被拒(§43)
 python3 tests/test_batch.py                                # 批量判定逐态等于标量判定(§44)
 python3 tests/test_budget.py                               # 预算:停止 = 失败的墙,只会 INCONCLUSIVE;升级(§44)
+python3 tests/test_second_wall3.py                         # 3 维墙₂ 的"门管整个在外"精确判据(§47)
 python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   # 稀疏起步,自动升级(§44)
 python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 \
     --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl   # 新 EXP 3(§45)
@@ -407,6 +416,7 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | **批量判定** | IK/限位/碰撞向量化,逐态等于 `classify`;`batch_classify=False` 退回标量 | `src/zzy_rss/batch.py`,`check_many()` in `facets.py` |
 | **单页问题("不换页能否到")** | 与单页证书相同,允许活门在墙内(它们就是被排除的换页) | `prove3(doors_as_exits=True)`,`run_3d.py --two-page` |
 | **门管裁剪 / 门口袋** | 门管只在面片内;碰到种子侧门管的非终点分量并入种子类 | `clip_to_box()`、`in_box_tubes()`、`region_wall()` in `page3.py` |
+| **3 维第二道墙(exit 2)** | 只为一道活门曲线;目标管不在守卫里,事后精确要求无三角形碰管 | `second_wall3()`、`tube_excluded()` in `page3.py` |
 | **γ 倍增 + 二分** | `gamma_search="gallop"`(默认 linear) | `train_wall()` in `wall.py` |
 | **预算与升级** | 墙/运行级预算;停止 = 失败的墙 ⇒ INCONCLUSIVE;整个证明按"样本 ×3、换种子"重跑 | `src/zzy_rss/budget.py`,`budgeted_alg4()` / `prove_line_escalating()` in `flood.py` |
 | **焊接面片** | `p(u,v)` 平面片,姿态固定;每个 v 切片是一条 `WeldLine` | `WeldSurface` in `weld.py` |
@@ -662,6 +672,10 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 
 53. **碰到种子侧门管的非终点区域必须在墙内。**(§45)门管整个在墙内,而贴着管的有效状态
     让墙无处可走;并入种子类只让证书更强。终点分量永不并入。
+
+54. **3 维墙₂ 排除一道门,必须整根门管在外,且没有三角形碰到它。**(§47)目标管被移出 Σ 守卫
+    (否则贴管的三角形全被拒),所以墙₂ 可能穿过门;门有一段在内就是可用的逃生口,
+    只看一个探针会造假 INFEASIBLE。`tube_excluded` 是精确的(三角形–线段距离),擦边也拒绝。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
