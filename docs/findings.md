@@ -2617,3 +2617,7 @@ u≈0.6 时 q7 要超过 168.45°;在 u≈0.2 处经 q6=0 翻腕(换到 ++- 页)
 - `scripts/run_3d.py --scene ... --box ... --two-page --save out/exp3_two_page.pkl`。
 - `scripts/fig_two_page.py`:四联图(工作空间三姿态、页 A 的墙、路径叠在 A 的 q7 带上、
   沿路径的 q6/q7 与"不翻腕时的 q7")。
+- `scripts/fig_pages3d.py`:**八页的 (u, v, θ) 三维图**(网格分类的 marching-cubes 等值面,
+  只是图,不是证明):碰撞(八页相同)、q7 越限、q2/q4/q6 越限/无 IK、q1/q3/q5 发丝(淡色);
+  另出一张 A/B 两页放大图,A 页带已验证的墙,B 页带已验证路径。
+  一眼可见:**s6=+ 的四页 q7 带横在上走廊,s6=− 的四页 q7 带移进盒子里**——页间唯一的厚差别。

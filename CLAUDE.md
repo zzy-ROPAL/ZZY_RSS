@@ -322,6 +322,7 @@ python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   #
 python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 \
     --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl   # 新 EXP 3(§45)
 python3 scripts/fig_two_page.py out/exp3_two_page.pkl --out out/fig_exp3_two_page.png               # 新 EXP 3 四联图
+python3 scripts/fig_pages3d.py --data out/exp3_two_page.pkl --out out/fig_pages3d.png               # 八页 (u,v,θ) 三维图 + A/B 页带墙与路径(需 scikit-image)
 python3 scripts/search_scene3.py --places "0.40,0.21,45" --jobs 4                                  # 两页场景的 PRM 筛选
 python3 scripts/design_obstacle3.py --jobs 4                                                       # 盒子摆放(设计辅助)
 python3 scripts/run_3d.py --patch exp2 --flood             # 3 维跨页泛洪(--patch exp3/exp4,--tilt,--high-z,--start-page)
