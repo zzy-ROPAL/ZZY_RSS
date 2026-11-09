@@ -163,6 +163,12 @@ class Page3Params:
     k_neighbors: int = 12
     rng_seed: int = 20261108
     # Task: start pose, and the goal set u >= 1 - goal_tol (any v, any theta).
+    # "posture": the start is one arm posture (one page, one arm angle).
+    # "pose": the start is the TORCH POSE only (findings 47) -- every page
+    # and every valid arm angle at (start_u, start_v) is a starting state,
+    # sampled every start_pose_step in theta.
+    start_mode: str = "posture"
+    start_pose_step: float = 0.017453292519943295     # 1 deg
     start_u: float = 0.0
     start_v: float = 0.5
     goal_tol: float = 0.02

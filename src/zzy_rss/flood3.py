@@ -44,7 +44,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import budget as _budget
-from .arm import SrsArm
+from .arm import SIGN_BRANCHES, SrsArm
 from .doors3 import certify_curve, door_curves, patch_singularities
 from .page3 import (FEASIBLE, INCONCLUSIVE, INFEASIBLE, Page3, choose_start_theta,
                     densify3, region_wall, theta_cut_check)
@@ -196,11 +196,21 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
     sing = patch_singularities(cfg, arm, surf)
     if not sing["ok"]:
         return FloodResult3(INCONCLUSIVE, f"unsupported singular set: {sing['reason']}")
-    if start_theta is None:
-        start_theta = choose_start_theta(cfg, arm, surf, scene, start_signs, p3)
+    pose_mode = getattr(p3, "start_mode", "posture") == "pose"
+    if pose_mode:
+        # Every arm angle at the start pose, on every page (findings 47).
+        th = np.arange(p3.theta_min, p3.theta_max, float(p3.start_pose_step))
+        pose_starts = np.column_stack([np.full(len(th), p3.start_u),
+                                       np.full(len(th), p3.start_v), th])
+        start_theta = None
+        st["start"] = [p3.start_u, p3.start_v, "any theta, any page"]
+    else:
+        pose_starts = np.zeros((0, 3))
         if start_theta is None:
-            return FloodResult3(INCONCLUSIVE, "no valid start posture at the start point")
-    st["start"] = [p3.start_u, p3.start_v, float(start_theta)]
+            start_theta = choose_start_theta(cfg, arm, surf, scene, start_signs, p3)
+            if start_theta is None:
+                return FloodResult3(INCONCLUSIVE, "no valid start posture at the start point")
+        st["start"] = [p3.start_u, p3.start_v, float(start_theta)]
 
     if "geometry" not in state:
         state["geometry"] = door_curves(cfg, arm, surf, p3)
@@ -218,13 +228,14 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
         if signs not in pages:
             t = time.time()
             pg = Page3(cfg, arm, surf, scene, signs, p3,
-                       start_theta if signs == start_signs else None, inject=ds.pts)
+                       start_theta if (signs == start_signs and not pose_mode) else None,
+                       inject=np.vstack([ds.pts, pose_starts]))
             pages[signs] = pg
             cut = theta_cut_check(pg)
             pg.cut_ok, pg.cut_reason = cut["ok"], cut["reason"]
             if verbose:
                 print(f"[flood3] page {page_name(signs)}: {len(pg.valid)} valid vertices, "
-                      f"{int((pg.inject_index >= 0).sum())}/{len(ds.pts)} near-door states "
+                      f"{int((pg.inject_index[:len(ds.pts)] >= 0).sum())}/{len(ds.pts)} near-door states "
                       f"valid ({time.time() - t:.1f} s)")
         return pages[signs]
 
@@ -239,11 +250,27 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
                 out.append((ci, certified[(signs, ci)]))
         return out
 
-    start_page = get_page(start_signs)
-    if not start_page.cut_ok:
-        return FloodResult3(INCONCLUSIVE, f"bounded theta not justified on "
-                            f"{page_name(start_signs)}: {start_page.cut_reason}", stats=st)
-    root = (start_signs, int(start_page.comp[0]))
+    # Starting regions, each with the vertices it is entered by.
+    root_entries: dict = {}
+    for sg in (SIGN_BRANCHES if pose_mode else [start_signs]):
+        pg = get_page(sg)
+        if not pg.cut_ok:
+            return FloodResult3(INCONCLUSIVE, f"bounded theta not justified on "
+                                f"{page_name(sg)}: {pg.cut_reason}", stats=st)
+        if pose_mode:
+            vs = pg.inject_index[len(ds.pts):]
+            for v in vs[vs >= 0]:
+                root_entries.setdefault((sg, int(pg.comp[v])), []).append(int(v))
+        else:
+            root_entries[(sg, int(pg.comp[0]))] = [0]
+    if not root_entries:
+        return FloodResult3(INCONCLUSIVE, "no valid start state on any page", stats=st)
+    roots = list(root_entries)
+    st["start_regions"] = [f"{page_name(s)}/{c}" for s, c in roots]
+    if verbose:
+        print(f"[flood3] {len(roots)} start region(s): {', '.join(st['start_regions'])}")
+    state["root_vertex"] = {r: v[0] for r, v in root_entries.items()}
+    root = roots[0]
 
     # ---- phase 1: FEASIBLE by connectivity, before any wall -------------
     # (CLAUDE.md, correction A: "feasible" comes from reaching the goal, not
@@ -251,9 +278,9 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
     # crossing pairs: x = p + eps d in this region, x' = p - eps d valid on
     # the partner page. A goal region found this way is cashed in for a
     # verified path; a refuted path feeds the lazy-PRM loop. No wall is built.
-    reach_parent: dict = {root: None}
+    reach_parent: dict = {r: None for r in roots}
     reach_pairs: dict = {}            # region -> every (n, n2) from its parent
-    frontier = [root]
+    frontier = list(roots)
     qsum: dict = state.setdefault("qsum", {})
 
     def pair_sum(signs, n):
@@ -275,7 +302,7 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
         if np.any(page.goal_mask() & (page.comp == comp)):
             goal_node = node
             break
-        for n in np.flatnonzero(page.inject_index >= 0):
+        for n in np.flatnonzero(page.inject_index[:len(ds.pts)] >= 0):
             if int(page.comp[page.inject_index[n]]) != comp:
                 continue
             ci = ds.key[n][0]
@@ -332,7 +359,8 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
                     break
                 why = f"crossing leg fails verification: {lrep.failures[0][1]}"
             cur = prev
-        path, why2 = splice_path(pages, ds, reach_parent, goal_node, None, cfg, arm, surf)
+        path, why2 = splice_path(pages, ds, reach_parent, goal_node, None, cfg, arm, surf,
+                                  state.get("root_vertex"))
         why = why2 or why
         if path is not None:
             rep = verify_witness(cfg, arm, surf, scene, path, q_start=path.q_start,
@@ -356,9 +384,9 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
             print(f"[flood3] phase 1 could not cash the route in ({why}); building walls")
 
     # ---- phase 2: walls, region by region -------------------------------
-    queue = [root]
-    entries = {root: [0]}                 # vertex indices that enter the region
-    parent: dict = {root: None}           # region -> (prev region, n_from, n_to)
+    queue = list(roots)
+    entries = {r: list(v) for r, v in root_entries.items()}   # vertices entering each region
+    parent: dict = {r: None for r in roots}   # region -> (prev region, n_from, n_to)
     visited, regions, certificate, crossings = set(), [], [], []
 
     while queue:
@@ -386,7 +414,8 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
         if goal_here.any():
             if verbose:
                 print(f"[flood3] goal reached in {page_name(signs)}/{comp}: splicing a path")
-            path, why = splice_path(pages, ds, parent, node, entries, cfg, arm, surf)
+            path, why = splice_path(pages, ds, parent, node, entries, cfg, arm, surf,
+                                  state.get("root_vertex"))
             if path is None:
                 return FloodResult3(INCONCLUSIVE, f"goal reached on the roadmaps, but no "
                                     f"path could be spliced: {why}",
@@ -595,7 +624,8 @@ def door_crossing_leg(cfg: Config, arm: SrsArm, surf: WeldSurface, page, tpage,
 
 
 def splice_path(pages: dict, ds: DoorSamples, parent: dict, node, entries: dict,
-                cfg: Config, arm: SrsArm, surf: WeldSurface) -> tuple:
+                cfg: Config, arm: SrsArm, surf: WeldSurface,
+                root_vertex: dict | None = None) -> tuple:
     """Start -> ... -> goal across the recorded crossings, as one WitnessPath."""
     chain = []
     cur = node
@@ -605,7 +635,7 @@ def splice_path(pages: dict, ds: DoorSamples, parent: dict, node, entries: dict,
         cur = par[0] if par is not None else None
     chain.reverse()
     legs = []
-    at = 0                                      # vertex we stand on (start: 0)
+    at = int((root_vertex or {}).get(chain[0], 0))   # the start vertex of the root region
     for i, (signs, comp) in enumerate(chain):
         page = pages[signs]
         if i + 1 < len(chain):

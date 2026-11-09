@@ -110,6 +110,9 @@ def main() -> None:
                          "conclusive (findings 44)")
     ap.add_argument("--no-budget", action="store_true",
                     help="disable the fail-fast budgets (findings 44)")
+    ap.add_argument("--start-pose", action="store_true",
+                    help="findings 47: the start is the torch pose only -- every page and "
+                         "every arm angle at the start point (use with --flood)")
     ap.add_argument("--alg4-iters", type=int, default=None,
                     help="Algorithm 4 iterations per wall (Page3Params.alg4_iters)")
     ap.add_argument("--gamma-search", choices=("linear", "gallop"), default="linear",
@@ -161,6 +164,8 @@ def main() -> None:
                                  sweep=(0.0, 0.0, args.sweep))
     surf = WeldSurface(sp)
     p3 = dataclasses.replace(Page3Params(), n_samples=args.samples, rng_seed=args.seed)
+    if args.start_pose:
+        p3 = dataclasses.replace(p3, start_mode="pose")
     if args.alg4_iters is not None:
         p3 = dataclasses.replace(p3, alg4_iters=args.alg4_iters)
     if args.start_u is not None:
@@ -223,7 +228,7 @@ def main() -> None:
         return
     if args.flood:
         res = run_flood3(cfg, arm, surf, scene, signs, p3, start_theta=args.start_theta,
-                         verbose=not args.quiet)
+                         verbose=not args.quiet, max_regions=64 if args.start_pose else 12)
         out = dict(patch=args.patch, start_page=args.start_page, sweep=sp.sweep[2],
                    high_z=args.high_z, tilt=args.tilt,
                    obstacle=args.obstacle,
