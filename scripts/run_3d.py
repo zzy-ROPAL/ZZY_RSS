@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from zzy_rss.arm import SrsArm  # noqa: E402
 from zzy_rss.budget import escalate  # noqa: E402
-from zzy_rss.flood3 import run_flood3  # noqa: E402
+from zzy_rss.flood3 import page_name, run_flood3  # noqa: E402
 from zzy_rss.page3 import Page3, prove3  # noqa: E402
 from zzy_rss.params import (  # noqa: E402
     BoxObstacle, Config, Page3Params, PageMapParams, SceneParams, SurfaceParams,
@@ -94,17 +94,39 @@ def main() -> None:
                     help="also build a PRM of this size from the same start and "
                          "report whether IT reaches the goal (a cross-check)")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--scene", default=None,
+                    help="custom patch 'x,z,tilt,roll[,half_y,sweep]' (search_scene3.surface); "
+                         "overrides --patch geometry and obstacles")
+    ap.add_argument("--box", action="append", default=[],
+                    help="obstacle 'cx,cy,cz,hx,hy,hz' (repeatable; with --scene)")
+    ap.add_argument("--two-page", action="store_true",
+                    help="findings 45: prove the start page ALONE cannot reach the goal "
+                         "(doors as exits), then run the cross-page flood")
+    ap.add_argument("--save", default=None,
+                    help="with --two-page: pickle the wall, the verified path and the "
+                         "scene for scripts/fig_two_page.py")
     ap.add_argument("--escalate", action="store_true",
                     help="re-run on a ladder of more samples / new seeds until "
                          "conclusive (findings 44)")
     ap.add_argument("--no-budget", action="store_true",
                     help="disable the fail-fast budgets (findings 44)")
+    ap.add_argument("--alg4-iters", type=int, default=None,
+                    help="Algorithm 4 iterations per wall (Page3Params.alg4_iters)")
+    ap.add_argument("--gamma-search", choices=("linear", "gallop"), default="linear",
+                    help="Algorithm 1's gamma search (findings 45)")
+    ap.add_argument("--wall-seconds", type=float, default=None,
+                    help="per-wall budget (BudgetParams.wall_seconds)")
     ap.add_argument("--no-batch", action="store_true",
                     help="scalar validity loops instead of batch.py (findings 44)")
     args = ap.parse_args()
 
     obstacles = () if args.obstacle == "none" else {
         "exp2": ZGAP, "exp3": ZGAP_Y, "exp4": EXP4_OBS}[args.patch]
+    if args.scene:
+        obstacles = tuple(BoxObstacle(center=tuple(v[:3]), half_extent=tuple(v[3:6]),
+                                      label=f"box{i}")
+                          for i, v in enumerate([[float(c) for c in b.split(",")]
+                                                 for b in args.box]))
     signs = (tuple(1 if c == "+" else -1 for c in args.start_page)
              if args.start_page else START_SIGNS[args.patch])
     if args.high_z is not None and args.patch == "exp2" and obstacles:
@@ -118,8 +140,16 @@ def main() -> None:
                                                                    batch_classify=False))
     if args.no_budget:
         cfg = dataclasses.replace(cfg, budget=dataclasses.replace(cfg.budget, enabled=False))
+    if args.wall_seconds is not None:
+        cfg = dataclasses.replace(cfg, budget=dataclasses.replace(
+            cfg.budget, wall_seconds=args.wall_seconds))
+    cfg = dataclasses.replace(cfg, wall=dataclasses.replace(cfg.wall,
+                                                            gamma_search=args.gamma_search))
     arm, scene = SrsArm(cfg.arm), Scene(cfg.arm, cfg.scene)
     sp = PATCHES[args.patch]
+    if args.scene:
+        from search_scene3 import surface
+        sp = surface(*[float(c) for c in args.scene.split(",")])
     if args.tilt is not None:
         a = np.radians(args.tilt)
         sp = dataclasses.replace(sp, approach=(float(np.sin(a)), 0.0, -float(np.cos(a))),
@@ -131,12 +161,45 @@ def main() -> None:
                                  sweep=(0.0, 0.0, args.sweep))
     surf = WeldSurface(sp)
     p3 = dataclasses.replace(Page3Params(), n_samples=args.samples, rng_seed=args.seed)
+    if args.alg4_iters is not None:
+        p3 = dataclasses.replace(p3, alg4_iters=args.alg4_iters)
     if args.start_u is not None:
         p3 = dataclasses.replace(p3, start_u=args.start_u)
     if args.start_v is not None:
         p3 = dataclasses.replace(p3, start_v=args.start_v)
 
     t = time.time()
+    if args.two_page:
+        alone = prove3(cfg, arm, surf, scene, signs, p3, start_theta=args.start_theta,
+                       verbose=not args.quiet, doors_as_exits=True)
+        t1 = time.time()
+        task = run_flood3(cfg, arm, surf, scene, signs, p3, start_theta=args.start_theta,
+                          verbose=not args.quiet)
+        out = dict(mode="two-page", scene=args.scene, boxes=args.box, patch=args.patch,
+                   start_page=page_name(signs), samples=args.samples, seed=args.seed,
+                   page_alone=dict(verdict=alone.verdict, scope=alone.scope,
+                                   reason=alone.reason, walls=alone.walls,
+                                   doors=alone.doors, seconds=round(t1 - t, 1),
+                                   stats=alone.stats),
+                   task=dict(verdict=task.verdict, reason=task.reason,
+                             regions=task.regions, crossings=task.crossings,
+                             walls=task.certificate, witness=task.witness,
+                             seconds=round(time.time() - t1, 1), stats=task.stats))
+        if args.save:
+            import pickle
+            Path(args.save).parent.mkdir(parents=True, exist_ok=True)
+            poly = alone.poly
+            legs = ([dict(q=leg.q, y=leg.y, page=tuple(leg.page), note=leg.note)
+                     for leg in task.path.legs] if task.path is not None else [])
+            with open(args.save, "wb") as fh:
+                pickle.dump(dict(out=out, scene=args.scene, boxes=args.box, signs=signs,
+                                 samples=args.samples, seed=args.seed,
+                                 start=alone.stats.get("start"),
+                                 wall=None if poly is None or poly.vertices is None else
+                                 dict(vertices=poly.vertices, simplices=poly.simplices),
+                                 legs=legs), fh)
+        print(json.dumps(out, default=str))
+        return
     if args.escalate:
         def attempt(n, seed, bp):
             c = dataclasses.replace(cfg, budget=bp)

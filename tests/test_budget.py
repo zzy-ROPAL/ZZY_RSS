@@ -124,6 +124,37 @@ def test_escalation_2d() -> list:
     return log
 
 
+def test_gallop_gamma_search() -> dict:
+    """findings 45: gamma by galloping + bisection lands within gamma_step of
+    IJRR's linear scan on data the scan separates, with far fewer SVM fits."""
+    import sklearn.svm as skl
+    rng = np.random.default_rng(3)
+    X = rng.uniform([0.0, -1.0], [1.0, 1.0], size=(900, 2))
+    f = X[:, 1] - 0.5 * np.sin(6.0 * X[:, 0])
+    seed, rest = X[f > 0.06], X[f < -0.06]
+    out = {}
+    for mode in ("linear", "gallop"):
+        cfg = Config()
+        cfg = dataclasses.replace(cfg, wall=dataclasses.replace(cfg.wall, gamma_search=mode))
+        n = [0]
+        orig = skl.SVC.fit
+
+        def fit(self, *a, **k):
+            n[0] += 1
+            return orig(self, *a, **k)
+        skl.SVC.fit = fit
+        try:
+            w = train_wall(cfg, seed, rest)
+        finally:
+            skl.SVC.fit = orig
+        assert w.accuracy == 1.0 and not w.gamma_capped
+        out[mode] = (w.gamma, n[0])
+    (gl, nl), (gg, ng) = out["linear"], out["gallop"]
+    assert abs(gl - gg) <= Config().wall.gamma_step + 1e-9, out
+    assert ng < nl, out
+    return dict(linear=out["linear"], gallop=out["gallop"])
+
+
 def test_structural_not_retried() -> None:
     assert not B.retryable(INCONCLUSIVE, "bounded theta not justified: 3 valid")
     assert not B.retryable(INCONCLUSIVE, "live q2 door curve is INSIDE the wall")
@@ -145,6 +176,9 @@ if __name__ == "__main__":
         print(f"[budget] escalation    : rung {row['rung']} {row['samples']} samples "
               f"seed {row['seed']} gamma_stop {row['gamma_stop']:g} -> {row['verdict']} "
               f"({row['seconds']} s)")
+    r = test_gallop_gamma_search()
+    print(f"[budget] gamma search  : linear gamma {r['linear'][0]:.2f} in {r['linear'][1]} fits, "
+          f"gallop {r['gallop'][0]:.2f} in {r['gallop'][1]} fits")
     test_structural_not_retried()
     print("[budget] structural    : not retried")
     print("[budget] ALL TESTS PASSED")

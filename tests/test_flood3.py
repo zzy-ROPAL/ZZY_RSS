@@ -146,6 +146,59 @@ def test_full_turn_mismatch_is_refused() -> dict:
     return dict(refused=refused, built=built, why=why_seen)
 
 
+def test_q6_crossing_keeps_the_tool_pose() -> dict:
+    """findings 45: at the exact q6 = 0 posture the IK reads q5 AND q7 from
+    vanishing entries, so their SUM is atan2(0, 0) noise as well (unlike the
+    q2 door, where q3 is computed relative to q1). The crossing must take
+    q5 + q7 from R04^T R instead -- otherwise the 'null' sweep turns the
+    torch (16 deg measured) and every q6 crossing fails verification.
+
+    No obstacle: EXP 4's weld (x 0.40, z 0.21, 45 deg torch) swept 6 cm,
+    start page (+++) -> wrist flip -> (++-)."""
+    from search_scene3 import world
+    cfg, arm, scene, surf = world(dict(x=0.40, z=0.21, tilt=45.0, roll=0.0))
+    p3 = dataclasses.replace(Page3Params(), n_samples=1500)
+    A6, B6 = (1, 1, 1), (1, 1, -1)
+    ds = door_samples(door_curves(cfg, arm, surf, p3), np.asarray(p3.scale),
+                      p3.cross_eps, p3.cert_stride)
+    th = choose_start_theta(cfg, arm, surf, scene, A6, p3)
+    pa = Page3(cfg, arm, surf, scene, A6, p3, th, inject=ds.pts)
+    pb = Page3(cfg, arm, surf, scene, B6, p3, None, inject=ds.pts)
+    worst, built = 0.0, 0
+    for n in np.flatnonzero(pa.inject_index >= 0)[:40]:
+        n2 = int(ds.mirror[n])
+        if pb.inject_index[n2] < 0:
+            continue
+        leg, _why = door_crossing_leg(cfg, arm, surf, pa, pb, ds, int(n), n2)
+        if leg is None:
+            continue
+        built += 1
+        for q, uv in zip(leg.q, leg.y):
+            p, R = arm.fk(q)
+            p0, R0 = surf.pose(*uv)
+            worst = max(worst, float(np.linalg.norm(R - R0)), float(np.linalg.norm(p - p0)))
+    assert built and worst < 1e-6, (built, worst)      # was 0.40 rad before the fix
+    goal_b = set(int(c) for c in pb.comp[pb.goal_mask()])
+    assert not pa.reaches_goal(), "the start page alone must not reach the goal here"
+    for n in np.flatnonzero(pa.inject_index >= 0):
+        n2 = int(ds.mirror[n])
+        vb = pb.inject_index[n2]
+        if (pa.comp[pa.inject_index[n]] != pa.start_comp or vb < 0
+                or int(pb.comp[vb]) not in goal_b):
+            continue
+        root, nxt = (A6, int(pa.start_comp)), (B6, int(pb.comp[vb]))
+        path, _w = splice_path({A6: pa, B6: pb}, ds, {root: None, nxt: (root, int(n), n2)},
+                               nxt, None, cfg, arm, surf)
+        if path is None:
+            continue
+        rep = verify_witness(cfg, arm, surf, scene, path, q_start=path.q_start, goal_y=1.0)
+        assert rep.ok, rep.failures[:3]
+        cross = [leg for leg in path.legs if leg.note == "crossing"][0]
+        assert cross.q[0, 5] > 0.0 > cross.q[-1, 5], "q6 must change sign"
+        return dict(legs=built, worst=worst, n_configs=rep.n_configs)
+    raise AssertionError("no start-region crossing into a goal component of (++-)")
+
+
 if __name__ == "__main__":
     for k, v in test_page_changing_paths_verify().items():
         print(f"[flood3] {k:16s}: verified path of {v['n_configs']} configurations "
@@ -154,4 +207,8 @@ if __name__ == "__main__":
     r = test_full_turn_mismatch_is_refused()
     print(f"[flood3] mismatch        : EXP 4 q6 door -- {r['refused']} full-turn pairs "
           f"refused ({r['why']}), {r['built']} matched pairs built")
+    r = test_q6_crossing_keeps_the_tool_pose()
+    print(f"[flood3] q6 wrist flip  : {r['legs']} crossing legs on the constraint "
+          f"(worst {r['worst']:.1e}); verified (+++) -> (++-) path of {r['n_configs']} "
+          f"configurations")
     print("[flood3] ALL TESTS PASSED")

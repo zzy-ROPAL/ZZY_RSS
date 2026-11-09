@@ -408,6 +408,15 @@ class WallParams:
     # robustness signal -- reported, and warned about past gamma_warn -- while
     # the certificate rests on closedness and the facet checks.
     gamma_max: float = 400.0
+    # How Algorithm 1 searches gamma (findings 45). "linear": IJRR's scan,
+    # gamma_init, +gamma_step, ... -- one SVM fit per 0.1, which is what made
+    # the slow walls slow (findings 44: 99% of EXP 3's time). "gallop": grow
+    # by gamma_gallop until the data separates, then bisect back down to
+    # gamma_step resolution -- ~12 fits instead of hundreds. It may settle on
+    # a different separating gamma where accuracy is not monotone in gamma;
+    # soundness never rests on gamma (closedness + Algorithm 3 decide).
+    gamma_search: str = "linear"   # "linear" | "gallop"
+    gamma_gallop: float = 1.25
     gamma_warn: float = 40.0       # report, do not refuse, above this
     svm_C: float = 10.0            # findings 20: 1e6 pins gamma at 1.0
 

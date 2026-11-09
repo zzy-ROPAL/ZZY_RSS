@@ -30,6 +30,24 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### 🆕🆕 2026-11-09(二):**新 EXP 3 —— 第一页证明不可行、第二页证明可行**(§45)
+>
+> 3 维焊接面片(x 0.40, z 0.21, 45° 焊枪,**绕自身轴 roll 305°**)+ **一个 12 cm 盒子**(0.20, 0, 0.34)。
+> 起始页 `+++` 上 **q7 限位**把上走廊堵死;在 u≈0.2 经 **q6 门翻腕**到 `++-`,q7 平移 180°,焊到头。
+>
+> | | 6000 样本 | 9000 样本(另一种子) |
+> |---|---|---|
+> | **页 A 单页**(`prove3(doors_as_exits=True)`) | **INFEASIBLE**,墙 **2680/2680**,γ 1.95 | **INFEASIBLE**,2582/2582,γ 1.86 |
+> | **任务**(`run_flood3`) | **FEASIBLE**,4465 构型已验证跨页路径 | **FEASIBLE**,5277 构型 |
+>
+> 复现:`python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl`,
+> 出图 `python3 scripts/fig_two_page.py out/exp3_two_page.pkl`。
+> **页之间只差关节限位**(碰撞每页相同),q7 带是唯一够厚的页间差别;
+> **无障碍时页 A 必在门点被切开,墙不可能存在**(18 个场景 gap 全为 0.0031)。
+> 顺带修掉:**q6 门过门腿 0/30 → 30/30**(门点 q5+q7 也是 atan2 噪声)、
+> **Alg 2 把面片外的点当有效**(所有 3 维墙)、门管伸出面片、门口袋的标签。
+> 3 维 EXP 2 回归不变(2014/2014,γ 1.5)。新增 `WallParams.gamma_search="gallop"`(默认关):同 γ、快 39×。
+
 > ### 🆕 2026-11-09:**批量判定 + 失败要快的预算/升级;EXP 3 为什么慢**(§44)
 >
 > | | 东西 | 效果 |
@@ -301,6 +319,11 @@ python3 tests/test_flood3.py                               # 3 维跨页路径:�
 python3 tests/test_batch.py                                # 批量判定逐态等于标量判定(§44)
 python3 tests/test_budget.py                               # 预算:停止 = 失败的墙,只会 INCONCLUSIVE;升级(§44)
 python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   # 稀疏起步,自动升级(§44)
+python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 \
+    --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl   # 新 EXP 3(§45)
+python3 scripts/fig_two_page.py out/exp3_two_page.pkl --out out/fig_exp3_two_page.png               # 新 EXP 3 四联图
+python3 scripts/search_scene3.py --places "0.40,0.21,45" --jobs 4                                  # 两页场景的 PRM 筛选
+python3 scripts/design_obstacle3.py --jobs 4                                                       # 盒子摆放(设计辅助)
 python3 scripts/run_3d.py --patch exp2 --flood             # 3 维跨页泛洪(--patch exp3/exp4,--tilt,--high-z,--start-page)
 python3 scripts/run_demo.py --res 61 --out out/demo        # 三个案例 + 视频 + 图
 python3 scripts/make_summary.py out/demo                   # 汇总 SUMMARY.md
@@ -376,6 +399,9 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | **3 维跨页泛洪** | 注入过门端点 → 阶段 1 连通(配对 q_i+q_k 相等)→ 阶段 2 逐区域建墙,活门跟伙伴页与本页;懒惰 PRM | `run_flood3()` in `flood3.py` |
 | **过门腿** | 直穿或纤维反转,从不采样门点 | `door_crossing_leg()` in `flood3.py` |
 | **批量判定** | IK/限位/碰撞向量化,逐态等于 `classify`;`batch_classify=False` 退回标量 | `src/zzy_rss/batch.py`,`check_many()` in `facets.py` |
+| **单页问题("不换页能否到")** | 与单页证书相同,允许活门在墙内(它们就是被排除的换页) | `prove3(doors_as_exits=True)`,`run_3d.py --two-page` |
+| **门管裁剪 / 门口袋** | 门管只在面片内;碰到种子侧门管的非终点分量并入种子类 | `clip_to_box()`、`in_box_tubes()`、`region_wall()` in `page3.py` |
+| **γ 倍增 + 二分** | `gamma_search="gallop"`(默认 linear) | `train_wall()` in `wall.py` |
 | **预算与升级** | 墙/运行级预算;停止 = 失败的墙 ⇒ INCONCLUSIVE;整个证明按"样本 ×3、换种子"重跑 | `src/zzy_rss/budget.py`,`budgeted_alg4()` / `prove_line_escalating()` in `flood.py` |
 | **焊接面片** | `p(u,v)` 平面片,姿态固定;每个 v 切片是一条 `WeldLine` | `WeldSurface` in `weld.py` |
 | **d=3 页** | 路图(无网格)、θ 切口检查、面锚点、目标面样本、Alg 4、单页判定 | `src/zzy_rss/page3.py` |
@@ -614,6 +640,22 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 48. **升级重跑整个证明,不拼接不同级的部件。**(§44)每级有自己的路图、墙与面检查,
     第一个确定的判定就是答案。把 A 级的墙和 B 级的路图拼起来,证书描述的就不是同一个对象
     (不变量 16 的同类错误)。
+
+49. **页之间只差关节限位。**(§45)八页是同一姿态的八种拼写,碰撞每页相同。
+    "A 页不可行、B 页可行"只能来自限位;q1/q3/q5 带 2.3° 是发丝,**q7 带 23° 才是墙的材料**,
+    而 q7 带只在 q6 门(腕翻转)上换页。焊枪绕自身轴的 roll 就是 q7 的平移。
+
+50. **无障碍时,单页墙在门点处不可能存在。**(§45)门附近 q5/q7 取遍所有值,限位带挂在门曲线上;
+    A 页的分隔面必经门点,起始与终点区域在那里相切。要有一段**远离门**的厚分隔(障碍 + q7 带)。
+
+51. **3 维 Alg 2 必须用"任务内"有效性:面片外一律无效。**(§45)外推面片仍可解 IK,
+    Alg 3 早就把盒外当虚拟无效,Alg 2 不这样做就会把盒外的点当种子回灌。`Page3.valid_task`。
+
+52. **门点上 q6 门的 q5+q7 也是 atan2 噪声,要从 R04ᵀR 读。**(§45,不变量 42 的补充)
+    q2 门没有这个问题(q3 相对 q1 计算)。过门腿造出来后还要**单独验证**(门姿态可能擦碰障碍)。
+
+53. **碰到种子侧门管的非终点区域必须在墙内。**(§45)门管整个在墙内,而贴着管的有效状态
+    让墙无处可走;并入种子类只让证书更强。终点分量永不并入。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,

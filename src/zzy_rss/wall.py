@@ -146,7 +146,32 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray,
     svm = None
     acc = 0.0
     capped = False
-    while True:
+
+    def fit(g):
+        _budget.check_gamma(g)              # no-op without an active budget
+        s = SVC(kernel="rbf", gamma=g, C=wp.svm_C)
+        s.fit(x, y)
+        return s, float(s.score(x, y))
+
+    if getattr(wp, "gamma_search", "linear") == "gallop":
+        svm, acc = fit(gamma)
+        lo = None                            # largest gamma known NOT to separate
+        while acc < 1.0:
+            if gamma >= wp.gamma_max:
+                capped = True
+                break
+            lo = gamma
+            gamma = min(wp.gamma_max, gamma * float(wp.gamma_gallop))
+            svm, acc = fit(gamma)
+        if not capped and lo is not None:
+            while gamma - lo > wp.gamma_step:
+                mid = 0.5 * (lo + gamma)
+                s_mid, a_mid = fit(mid)
+                if a_mid >= 1.0:
+                    gamma, svm, acc = mid, s_mid, a_mid
+                else:
+                    lo = mid
+    while getattr(wp, "gamma_search", "linear") != "gallop":
         _budget.check_gamma(gamma)          # no-op without an active budget
         svm = SVC(kernel="rbf", gamma=gamma, C=wp.svm_C)
         svm.fit(x, y)

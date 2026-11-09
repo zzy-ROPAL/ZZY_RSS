@@ -141,6 +141,7 @@ class FloodResult3:
     doors: dict = field(default_factory=dict)         # per page: curve verdicts
     witness: dict | None = None
     stats: dict = field(default_factory=dict)
+    path: object = None        # the verified WitnessPath behind a FEASIBLE verdict
 
 
 def run_flood3(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
@@ -318,9 +319,17 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
             for n, n2 in reach_pairs.get(cur, [])[: int(p3.cross_tries)]:
                 leg, why = door_crossing_leg(cfg, arm, surf, pages[prev[0]], pages[cur[0]],
                                              ds, n, n2)
-                if leg is not None:
+                if leg is None:
+                    continue
+                # A leg that builds can still fail: the door POSTURE may touch an
+                # obstacle while both endpoints, cross_eps away, are free (a door
+                # curve grazing a box; findings 45). Verify the leg on its own,
+                # as refuted_edges does for roadmap edges, and try the next pair.
+                lrep = verify_witness(cfg, arm, surf, scene, WitnessPath(legs=[leg]))
+                if lrep.ok:
                     reach_parent[cur] = (prev, n, n2)
                     break
+                why = f"crossing leg fails verification: {lrep.failures[0][1]}"
             cur = prev
         path, why2 = splice_path(pages, ds, reach_parent, goal_node, None, cfg, arm, surf)
         why = why2 or why
@@ -335,7 +344,7 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
                     FEASIBLE, f"verified path across {hops} door crossing(s) "
                     f"({' -> '.join(page_name(s) for s in _chain_pages(reach_parent, goal_node))})",
                     [dict(page=page_name(s), comp=c) for s, c in reach_parent],
-                    witness=rep.as_dict(), stats=st)
+                    witness=rep.as_dict(), stats=st, path=path)
             bad = refuted_edges(cfg, arm, surf, scene, pages, path)
             if bad:
                 state["bad_edges"] = bad
@@ -396,7 +405,7 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
             return FloodResult3(FEASIBLE, f"verified path across "
                                 f"{sum(1 for l in path.legs if l.note == 'crossing')} "
                                 f"door crossing(s)", regions, certificate, crossings,
-                                witness=rep.as_dict(), stats=st)
+                                witness=rep.as_dict(), stats=st, path=path)
 
         live = live_curves(signs)
         entry_pts = page.valid[entries[node]]
@@ -543,10 +552,24 @@ def door_crossing_leg(cfg: Config, arm: SrsArm, surf: WeldSurface, page, tpage,
     rout = arm.ik_branch(*surf.pose(float(p[0]), float(p[1])), float(p[2]), tpage.signs)
     if not (rin.ok and rout.ok):
         return None, "no IK at the door point"
+    # The pair's SUM at the door, read where it is defined. At the q2 door the
+    # IK computes q3 relative to q1, so q1 + q3 is right even though q1 is
+    # atan2(0, 0). At the q6 door q5 AND q7 are both read from entries of
+    # R04^T R that vanish, so their sum is atan2 noise too (findings 45: 16
+    # deg of tool rotation on EXP 4's patch). There R04^T R = Rz(q5 + q7)
+    # exactly, and R04 depends on q1..q4 only, which are well defined.
+    _, rot_door = surf.pose(float(p[0]), float(p[1]))
+
+    def door_sum(q_door):
+        if i == 4:
+            m = arm.frames(q_door)["R04"].T @ rot_door
+            return float(np.arctan2(m[1, 0], m[0, 0]))
+        return float(q_door[i] + q_door[k])
+
     # The exact door posture in the split each side actually holds.
     def resplit(q_door, q_near):
         q = q_door.copy()
-        tot = q_door[i] + q_door[k]
+        tot = door_sum(q_door)
         q[i] = q_near[i]
         q[k] = tot - q_near[i]
         q[k] += 2.0 * np.pi * np.round((q_near[k] - q[k]) / (2.0 * np.pi))
