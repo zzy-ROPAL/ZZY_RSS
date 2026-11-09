@@ -937,7 +937,8 @@ class _Box:
 
 
 def second_wall3(cfg: Config, page: Page3, target, others: list,
-                 entries: np.ndarray, verbose: bool = True) -> dict:
+                 entries: np.ndarray, verbose: bool = True,
+                 absorb_dead: bool = False) -> dict:
     """Exit 2 at d = 3: a wall whose only job is to separate the region on
     the page's focus from ONE live door curve (IJRR Definition 1 with
     X = that door; the goal plays no part).
@@ -961,6 +962,23 @@ def second_wall3(cfg: Config, page: Page3, target, others: list,
     saved = page.inside
     page.inside = set()
     try:
+        if absorb_dead:
+            # (findings 48) Components other than the region that are closer
+            # to it than to the target door go on the seed side: a wall 2
+            # slipping between the region and a dead pocket wrapped around it
+            # fails the way wall 1 did on page +++. Enclosing them changes
+            # nothing in the claim (start inside, door outside); one that
+            # actually touches the door just makes the wall fail.
+            reg = cKDTree(page.valid[page.comp == page.start_comp] * page.scale)
+            pieces = clip_to_box(np.asarray(target.tube.polyline, dtype=float),
+                                 page.lo, page.hi)
+            tpts = np.vstack(pieces) if pieces else np.asarray(target.pts)
+            ttree = cKDTree(tpts * page.scale)
+            for c in set(int(c) for c in np.unique(page.comp)) - {page.start_comp}:
+                X = page.valid[page.comp == c] * page.scale
+                if float(reg.query(X)[0].min()) < float(ttree.query(X)[0].min()):
+                    page.inside.add(c)
+            st["dead_absorbed"] = sorted(page.inside)
         region = page.seed_points()
         seed = region
         if len(seed) > p3.n_train_max:
@@ -1348,9 +1366,15 @@ def prove3_starts(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
                 out["seconds"] = round(time.time() - t0, 1)
                 return out
             others = [o for o in live if o is not c]
-            w2 = second_wall3(cfg, page, c, others, entries, verbose=verbose)
+            for absorb in (False, True):
+                w2 = second_wall3(cfg, page, c, others, entries, verbose=verbose,
+                                  absorb_dead=absorb)
+                if w2["ok"]:
+                    break
             reg["second_walls"].append(dict(curve=f"q{c.joint}", excluded=w2["ok"],
-                                            reason=w2["reason"], wall=w2["wall"]))
+                                            reason=w2["reason"], wall=w2["wall"],
+                                            absorb_dead=absorb,
+                                            dead_absorbed=w2["stats"].get("dead_absorbed")))
             reg["polys"].append((f"wall 2 q{c.joint}", w2["poly"]))
             if verbose:
                 print(f"[exit2-3d] {name}/{comp} q{c.joint} curve: "

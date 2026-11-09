@@ -37,7 +37,9 @@
 > 每页的起始弧注入路图 ⇒ 起始区域各建墙₁ ⇒ **3601 个稠密起始构型全部在已验证的墙内**(覆盖检查)。
 > **门卸载(已发表设定):八页全部 INFEASIBLE**,801/801 与 388/388 覆盖,墙₁ 2018/2018 与 1958/1958,墙钟 **74.5 s**。
 > 墙₁ 要多试配方(`enclose` / `nearer` / `+near` 并入近的死分量),s6=+ 页要 `enclose+near`。
-> 门全活时 s6=+ 四页的近门墙₂ 建不出(起始区域贴门 ~0.07)⇒ INCONCLUSIVE。图 `docs/figs/exp2_multistart_3d.png`。
+> **门全活也是八页全部 INFEASIBLE**(238.7 s):s6=− 页墙₁ + 两面墙₂;s6=+ 页墙₁(`nearer`)+ 近门墙₂ 1746/1746
+> (墙₂ 也要并入包住起始区域的死分量,`second_wall3(absorb_dead=True)`)。
+> 图 `docs/figs/exp2_multistart_3d.png`(门卸载)、`exp2_multistart_3d_live.png`(门全活,所有墙)。
 
 > ### 🆕🆕🆕🆕 2026-11-09(四):**第二道墙移植到 3 维**(§47)
 >
