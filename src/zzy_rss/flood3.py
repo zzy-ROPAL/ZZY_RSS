@@ -239,7 +239,7 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
                 c = type(g)(sign_index=g.sign_index, pts=g.pts, closed=g.closed, tube=g.tube)
                 certify_curve(cfg, arm, surf, scene, c, signs, p3)
                 certified[(signs, ci)] = c
-            if not certified[(signs, ci)].certified_blocked:
+            if not certified[(signs, ci)].certified_blocked or not p3.discharge_doors:
                 out.append((ci, certified[(signs, ci)]))
         return out
 

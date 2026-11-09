@@ -524,13 +524,15 @@ def in_box_tubes(page: "Page3", curves: list) -> list:
 
 def tube_samples(curves: list, region_pts: np.ndarray, scale: np.ndarray,
                  tol: float, lo: np.ndarray | None = None,
-                 hi: np.ndarray | None = None) -> tuple:
+                 hi: np.ndarray | None = None, side: str = "proximity") -> tuple:
     """Training points that keep the wall off the door tubes (invariant 7).
 
     A curve that comes near the start region goes WHOLE into the seed class
     (the wall must enclose it), any other into the rest class. Per curve, not
     per point: a curve split between the classes would put the wall across
-    its own tube."""
+    its own tube. side="enclose" (WallParams.sigma_side, findings 47c) puts
+    every curve in the seed class: wall 1 then separates start from goal
+    only, and each door is left to a second wall."""
     seed, rest = [], []
     tree = cKDTree(region_pts * scale) if len(region_pts) else None
     for c in curves:
@@ -551,8 +553,8 @@ def tube_samples(curves: list, region_pts: np.ndarray, scale: np.ndarray,
         if lo is not None:                       # (findings 45) on the patch only
             keep = np.all((pts[:, :2] >= lo[:2]) & (pts[:, :2] <= hi[:2]), axis=1)
             pts = pts[keep]
-        near = tree is not None and float(tree.query(c.pts * scale, k=1)[0].min()) <= max(
-            tol, float(np.max(r * scale)))
+        near = side == "enclose" or (tree is not None and float(
+            tree.query(c.pts * scale, k=1)[0].min()) <= max(tol, float(np.max(r * scale))))
         (seed if near else rest).append(pts)
     return (np.vstack(seed) if seed else np.zeros((0, 3)),
             np.vstack(rest) if rest else np.zeros((0, 3)))
@@ -799,7 +801,8 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
     gface[:, 0] = 1.0 - p3.goal_tol
     rest = np.vstack([rest0, a_rest, gface,
                       virtual_ring3(cfg, page, int(p3.ring_per_face), rng)])
-    s_extra, r_extra = tube_samples(live, region, page.scale, 0.03, page.lo, page.hi)
+    s_extra, r_extra = tube_samples(live, region, page.scale, 0.03, page.lo, page.hi,
+                                    side=cfg.wall.sigma_side)
     if len(s_extra):
         seed = np.vstack([seed, s_extra])
     if len(r_extra):
@@ -1006,6 +1009,7 @@ class Result3:
     # WITHOUT a page change (prove3(doors_as_exits=True)) -- a live door
     # inside the wall is then an exit the question excludes, not a gap.
     scope: str = "task"
+    polys2: list = field(default_factory=list)   # (curve label, Polytope) per second wall
 
 
 def prove3(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
@@ -1083,11 +1087,14 @@ def _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose,
     curves = door_curves(cfg, arm, surf, p3)
     for c in curves:
         certify_curve(cfg, arm, surf, scene, c, signs, p3)
-    live = [c for c in curves if not c.certified_blocked]
+    live = [c for c in curves if not c.certified_blocked or not p3.discharge_doors]
     doors = [dict(joint=f"q{c.joint}", n=len(c.pts),
                   u_range=[float(c.pts[:, 0].min()), float(c.pts[:, 0].max())],
                   v_range=[float(c.pts[:, 1].min()), float(c.pts[:, 1].max())],
-                  live=not c.certified_blocked, reason=c.reason) for c in curves]
+                  live=not c.certified_blocked or not p3.discharge_doors,
+                  reason=(c.reason if p3.discharge_doors or not c.certified_blocked else
+                          f"kept LIVE (discharge_doors=False); certification said: "
+                          f"{c.reason}")) for c in curves]
     if verbose:
         for d in doors:
             print(f"[doors-3d] {d['joint']} curve u in [{d['u_range'][0]:.3f}, "
@@ -1111,12 +1118,13 @@ def _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose,
     if inside_live and p3.second_wall:
         # Exit 2 (findings 47): try to exclude each enclosed door with a wall
         # of its own. Every one must go; one that stays leaves the page open.
-        second, remaining = [], []
+        second, remaining, polys2 = [], [], []
         for c in inside_live:
             others = [o for o in live if o is not c]
             w2 = second_wall3(cfg, page, c, others, page.start[None, :], verbose=verbose)
             second.append(dict(curve=f"q{c.joint}", excluded=w2["ok"],
                                reason=w2["reason"], wall=w2["wall"]))
+            polys2.append((f"q{c.joint}#{len(polys2)}", w2["poly"]))
             if verbose:
                 print(f"[exit2-3d] q{c.joint} curve: "
                       f"{'EXCLUDED' if w2['ok'] else 'not excluded'} -- {w2['reason']}")
@@ -1129,7 +1137,7 @@ def _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose,
                            "inside, goal slab outside; every live door inside it is "
                            f"excluded by a verified second wall ({len(second)})",
                            st, doors, [w["wall"]],
-                           poly=w["poly"])
+                           poly=w["poly"], polys2=polys2)
         inside_live = remaining
     if inside_live:
         return Result3(INCONCLUSIVE, f"live q{inside_live[0].joint} door curve is INSIDE "

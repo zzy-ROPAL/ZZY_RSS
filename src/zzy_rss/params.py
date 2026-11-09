@@ -249,6 +249,10 @@ class Page3Params:
     second_wall: bool = False
     # Algorithm 4 rounds for a second wall; None = alg4_iters.
     second_wall_iters: int | None = None
+    # False keeps EVERY door curve live: no Lipschitz-guarded discharge
+    # (findings 47c). Conservative -- a live door only adds work -- and it is
+    # how the one-page two-wall experiment replaces the discharge by walls.
+    discharge_doors: bool = True
 
 
 @dataclass(frozen=True)

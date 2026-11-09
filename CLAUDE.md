@@ -44,6 +44,11 @@
 > 顺带修掉 2 维墙₂ 的三个 bug(种子含目标门的盘 ⇒ 2 维 exit 2 **从来不可能成功**;训练环是圆而守卫是椭圆;
 > "门在外"只靠探针)。新开关 `WallParams.sigma_ring="ellipse"`、`sigma_side="enclose"`(默认不变)。
 > 默认设定下 EXP 2 实测 **291/291**(TDC),145/145 是 §39 之前的数字。
+>
+> **§47c:3 维版本**(ZGAP 面片,页 `(u,v,θ)`,`discharge_doors=False` ⇒ 两条 q2 门曲线都是活门):
+> 墙₁ 起点|终点 **2316/2316**,墙₂ ×2 **1724/1724**、**1722/1722** ⇒ **INFEASIBLE**,~70 s;另两个种子同样 INFEASIBLE。
+> 一面墙全包(终点 + 两门)的对照 1669/1674 闭不上 ⇒ INCONCLUSIVE。
+> `python3 scripts/exp2_two_walls_3d.py`,图 `docs/figs/exp2_two_walls_3d.png`。
 
 > ### 🆕🆕🆕 2026-11-09(三):**3 维两面墙不可行证明**(§46)
 >
@@ -340,6 +345,7 @@ python3 tests/test_batch.py                                # 批量判定逐态�
 python3 tests/test_budget.py                               # 预算:停止 = 失败的墙,只会 INCONCLUSIVE;升级(§44)
 python3 tests/test_second_wall3.py                         # 3 维墙₂ 的"门管整个在外"精确判据(§47)
 python3 scripts/exp2_two_walls.py                          # EXP 2 单页两类墙:墙₁ 起点|终点 + 墙₂ 起点|门(§47b)
+python3 scripts/exp2_two_walls_3d.py                       # 同上,3 维 ZGAP 面片,门曲线全活(§47c)
 python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   # 稀疏起步,自动升级(§44)
 python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 \
     --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl   # 新 EXP 3(§45)
