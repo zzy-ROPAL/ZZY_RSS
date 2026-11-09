@@ -2759,3 +2759,8 @@ GIF:`scripts/make_gifs.py` ⇒ `out/exp3_path.gif`(机器人沿已验证路径,�
 证明不依赖这一点(每面墙₂ 只对自己的门做精确判定);2 维里两面墙₂ 走向不同,是因为 2 维的两道门分处起始区域两侧。
 
 回归:`test_page3`、`test_flood3`、`test_second_wall3` 全过(开关默认关,行为不变)。
+
+**三维图**(`scripts/fig_pages3d_exp2.py`,需 scikit-image):`docs/figs/exp2_pages3d.png` 是八页 `(u, v, θ)` 体图
+(按无效原因着色:碰撞八页相同,只有限位在动;橙线 = q2 门曲线);`docs/figs/exp2_pages3d_walls.png` 是起始页
+`++-` 上三面已验证的墙网格(上排透视,下排沿 v 看:门曲线投成 θ=0 处的短线,墙₁ 包住两条,墙₂ 底面在其上方)。
+透视图里半透明的墙₂ 看起来"吞掉"了下方的门曲线,所以加了沿 v 的侧视。

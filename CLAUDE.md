@@ -48,7 +48,8 @@
 > **§47c:3 维版本**(ZGAP 面片,页 `(u,v,θ)`,`discharge_doors=False` ⇒ 两条 q2 门曲线都是活门):
 > 墙₁ 起点|终点 **2316/2316**,墙₂ ×2 **1724/1724**、**1722/1722** ⇒ **INFEASIBLE**,~70 s;另两个种子同样 INFEASIBLE。
 > 一面墙全包(终点 + 两门)的对照 1669/1674 闭不上 ⇒ INCONCLUSIVE。
-> `python3 scripts/exp2_two_walls_3d.py`,图 `docs/figs/exp2_two_walls_3d.png`。
+> `python3 scripts/exp2_two_walls_3d.py`,图 `docs/figs/exp2_two_walls_3d.png`;
+> 八页三维图与墙网格 `python3 scripts/fig_pages3d_exp2.py` ⇒ `docs/figs/exp2_pages3d.png`、`exp2_pages3d_walls.png`。
 
 > ### 🆕🆕🆕 2026-11-09(三):**3 维两面墙不可行证明**(§46)
 >

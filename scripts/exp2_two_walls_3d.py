@@ -145,6 +145,15 @@ def main() -> None:
     if res.poly is not None and res.poly.vertices is not None:
         figure(cfg, arm, scene, surf, p3, res, out / "exp2_two_walls_3d.png",
                f"3-D EXP 2, page (++-), every door live: {res.verdict}")
+    import pickle
+    with open(out / "exp2_two_walls_3d.pkl", "wb") as fh:
+        pickle.dump(dict(verdict=res.verdict, start=res.stats.get("start"),
+                         wall1=None if res.poly is None or res.poly.vertices is None else
+                         dict(vertices=res.poly.vertices, simplices=np.asarray(res.poly.simplices)),
+                         walls2=[dict(label=lab, vertices=pl.vertices,
+                                      simplices=np.asarray(pl.simplices))
+                                 for lab, pl in res.polys2 if pl.vertices is not None],
+                         report=report), fh)
     print(f"[exp2-3d-2w] wrote {out}")
 
 
