@@ -142,6 +142,7 @@ class FloodResult3:
     witness: dict | None = None
     stats: dict = field(default_factory=dict)
     path: object = None        # the verified WitnessPath behind a FEASIBLE verdict
+    polys: list = field(default_factory=list)   # (page, comp, Polytope) per wall built
 
 
 def run_flood3(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
@@ -411,6 +412,7 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
         entry_pts = page.valid[entries[node]]
         w = region_wall(cfg, page, [c for _, c in live], entry_pts, verbose=verbose)
         certificate.append(dict(page=page_name(signs), comp=comp, **w["wall"]))
+        state.setdefault("polys", []).append((page_name(signs), comp, w["poly"]))
         if not w["ok"]:
             st["seconds"] = round(time.time() - t0, 1)
             return FloodResult3(INCONCLUSIVE, f"{page_name(signs)}/{comp}: {w['reason']}",
@@ -475,7 +477,7 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
                                                     reason=c.reason)
                                                for (s2, ci), c in certified.items() if s2 == s]
                                for s in pages},
-                        stats=st)
+                        stats=st, polys=list(state.get("polys", [])))
 
 
 # --------------------------------------------------------------------------

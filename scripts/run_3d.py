@@ -197,7 +197,12 @@ def main() -> None:
                                  start=alone.stats.get("start"),
                                  wall=None if poly is None or poly.vertices is None else
                                  dict(vertices=poly.vertices, simplices=poly.simplices),
-                                 legs=legs), fh)
+                                 legs=legs,
+                                 task_walls=[dict(page=pg, comp=cp, vertices=pl.vertices,
+                                                  simplices=pl.simplices)
+                                             for pg, cp, pl in task.polys
+                                             if pl is not None and pl.vertices is not None]),
+                            fh)
         print(json.dumps(out, default=str))
         return
     if args.escalate:
