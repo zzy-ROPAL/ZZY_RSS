@@ -28,6 +28,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from zzy_rss.arm import SrsArm  # noqa: E402
+from zzy_rss.budget import escalate  # noqa: E402
 from zzy_rss.flood3 import run_flood3  # noqa: E402
 from zzy_rss.page3 import Page3, prove3  # noqa: E402
 from zzy_rss.params import (  # noqa: E402
@@ -93,6 +94,13 @@ def main() -> None:
                     help="also build a PRM of this size from the same start and "
                          "report whether IT reaches the goal (a cross-check)")
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--escalate", action="store_true",
+                    help="re-run on a ladder of more samples / new seeds until "
+                         "conclusive (findings 44)")
+    ap.add_argument("--no-budget", action="store_true",
+                    help="disable the fail-fast budgets (findings 44)")
+    ap.add_argument("--no-batch", action="store_true",
+                    help="scalar validity loops instead of batch.py (findings 44)")
     args = ap.parse_args()
 
     obstacles = () if args.obstacle == "none" else {
@@ -105,6 +113,11 @@ def main() -> None:
     cfg = dataclasses.replace(
         Config(), pagemap=PageMapParams(n_y=61, n_theta=61),
         scene=SceneParams(gap_open=True, obstacles=obstacles))
+    if args.no_batch:
+        cfg = dataclasses.replace(cfg, planner=dataclasses.replace(cfg.planner,
+                                                                   batch_classify=False))
+    if args.no_budget:
+        cfg = dataclasses.replace(cfg, budget=dataclasses.replace(cfg.budget, enabled=False))
     arm, scene = SrsArm(cfg.arm), Scene(cfg.arm, cfg.scene)
     sp = PATCHES[args.patch]
     if args.tilt is not None:
@@ -124,6 +137,22 @@ def main() -> None:
         p3 = dataclasses.replace(p3, start_v=args.start_v)
 
     t = time.time()
+    if args.escalate:
+        def attempt(n, seed, bp):
+            c = dataclasses.replace(cfg, budget=bp)
+            q = dataclasses.replace(p3, n_samples=n, rng_seed=seed)
+            if args.flood:
+                return run_flood3(c, arm, surf, scene, signs, q,
+                                  start_theta=args.start_theta, verbose=not args.quiet)
+            return prove3(c, arm, surf, scene, signs, q, start_theta=args.start_theta,
+                          verbose=not args.quiet)
+        res, log = escalate(attempt, cfg.budget, args.samples, args.seed)
+        out = dict(patch=args.patch, obstacle=args.obstacle, mode="escalate",
+                   flood=args.flood, verdict=res.verdict, reason=res.reason,
+                   seconds=round(time.time() - t, 1), escalation=log,
+                   stats={k: v for k, v in res.stats.items() if k != "escalation"})
+        print(json.dumps(out, default=str))
+        return
     if args.flood:
         res = run_flood3(cfg, arm, surf, scene, signs, p3, start_theta=args.start_theta,
                          verbose=not args.quiet)

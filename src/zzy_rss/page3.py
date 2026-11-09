@@ -39,7 +39,9 @@ from dataclasses import dataclass, field
 import numpy as np
 from scipy.spatial import cKDTree
 
+from . import budget as _budget
 from .arm import SrsArm
+from .batch import classify_surface_batch, pd_march_batch
 from .doors3 import certify_curve, door_curves, patch_singularities
 from .facets import FacetOracle, tube_guard
 from .params import Config, Page3Params
@@ -99,14 +101,14 @@ class Page3:
         # Injected states next, so their indices are stable and never thinned.
         inject = np.zeros((0, 3)) if inject is None else np.asarray(inject, dtype=float)
         self.inject_index = np.full(len(inject), -1, dtype=int)
-        for i, x in enumerate(inject):
-            if self.valid_fn(x):
-                self.inject_index[i] = len(head)
-                head.append(x)
+        ok_inj = self.valid_many(inject) if len(inject) else np.zeros(0, dtype=bool)
+        for i in np.flatnonzero(ok_inj):
+            self.inject_index[i] = len(head)
+            head.append(inject[i])
         rng = np.random.default_rng(p3.rng_seed)
         n = int(n_samples or p3.n_samples)
         pts = rng.uniform(self.lo, self.hi, size=(n, 3))
-        ok = np.array([self.valid_fn(x) for x in pts])
+        ok = self.valid_many(pts)
         self.valid = np.vstack([np.asarray(head).reshape(-1, 3), pts[ok]])
         self.invalid = pts[~ok]
         # Lazy PRM (findings 43): edges a witness found invalid between the
@@ -124,6 +126,28 @@ class Page3:
 
     def valid_fn(self, pt) -> bool:
         return classify3(self.cfg, self.arm, self.surf, self.scene, pt, self.signs)
+
+    def valid_many(self, pts) -> np.ndarray:
+        """classify3 for N states at once (batch.py; tag-for-tag equal to the
+        scalar path, tests/test_batch.py). `planner.batch_classify=False`
+        falls back to the scalar loop."""
+        pts = np.asarray(pts, dtype=float).reshape(-1, 3)
+        if not self.cfg.planner.batch_classify:
+            return np.array([self.valid_fn(x) for x in pts], dtype=bool)
+        return classify_surface_batch(self.cfg, self.arm, self.surf, self.scene,
+                                      pts, self.signs)[0]
+
+    def states_many(self, pts) -> tuple:
+        """(valid (N,), q (N, 7)) -- `_state` for N states."""
+        pts = np.asarray(pts, dtype=float).reshape(-1, 3)
+        if not self.cfg.planner.batch_classify:
+            out = [self._state(x) for x in pts]
+            ok = np.array([o for o, _ in out], dtype=bool)
+            q = np.array([qq if qq is not None else np.zeros(7) for _, qq in out])
+            return ok, q.reshape(-1, 7)
+        ok, _tag, q = classify_surface_batch(self.cfg, self.arm, self.surf, self.scene,
+                                             pts, self.signs)
+        return ok, q
 
     def _state(self, pt) -> tuple:
         """(valid, q) of one state -- classify3, keeping the joint vector."""
@@ -149,12 +173,9 @@ class Page3:
         jmax = float(self.cfg.witness.step_max)
         m = max(2, int(np.ceil(float(np.linalg.norm((b - a) * self.scale)) / step)))
         ts = np.linspace(0.0, 1.0, m + 1)
-        qs = []
-        for t in ts:
-            ok, q = self._state(a + t * (b - a))
-            if not ok:
-                return False
-            qs.append(q)
+        ok, qs = self.states_many(a[None, :] + ts[:, None] * (b - a)[None, :])
+        if not ok.all():
+            return False
         stack = [(ts[i], qs[i], ts[i + 1], qs[i + 1], 0) for i in range(m)]
         while stack:
             t0, q0, t1, q1, depth = stack.pop()
@@ -294,8 +315,11 @@ def choose_start_theta(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene
     point of the task -- and plays no part in any proof.
     """
     th = np.linspace(p3.theta_min, p3.theta_max, n)
-    ok = np.array([classify3(cfg, arm, surf, scene, (p3.start_u, p3.start_v, t), signs)
-                   for t in th])
+    pts = np.column_stack([np.full(n, p3.start_u), np.full(n, p3.start_v), th])
+    if cfg.planner.batch_classify:
+        ok = classify_surface_batch(cfg, arm, surf, scene, pts, signs)[0]
+    else:
+        ok = np.array([classify3(cfg, arm, surf, scene, x, signs) for x in pts])
     best, run = None, []
     for i in range(n + 1):
         if i < n and ok[i]:
@@ -323,7 +347,7 @@ def theta_cut_check(page: Page3) -> dict:
     th = np.where(side == 0, p3.theta_min + rng.uniform(0, p3.seam_eps, m),
                   p3.theta_max - rng.uniform(0, p3.seam_eps, m))
     pts = np.column_stack([rng.uniform(0, 1, m), rng.uniform(0, 1, m), th])
-    hits = [x for x in pts if page.valid_fn(x)]
+    hits = list(pts[page.valid_many(pts)])
     near = ((page.valid[:, 2] <= p3.theta_min + p3.seam_eps)
             | (page.valid[:, 2] >= p3.theta_max - p3.seam_eps))
     n_v = int(near.sum())
@@ -459,8 +483,7 @@ def face_anchors(page: Page3, rng) -> tuple:
             pts[:, ax] = val
             faces.append(pts)
     cand = np.vstack(faces)
-    ok = np.array([page.valid_fn(x) for x in cand])
-    cand = cand[ok]
+    cand = cand[page.valid_many(cand)]
     if not len(cand):
         return np.zeros((0, 3)), np.zeros((0, 3))
     goal_comps = set(int(c) for c in page.comp[page.goal_mask()]) - {page.start_comp}
@@ -494,9 +517,17 @@ def robot_oracle3(cfg: Config, page: Page3, live_curves: list) -> FacetOracle:
                         attempts=int(wp.pd_seed_attempts),
                         bisect_iters=int(wp.pd_bisect_iters), cap=float(need))
 
+    def depth_many(C, R):
+        return pd_march_batch(C, valid_all, page.valid_many, page.scale,
+                              step=float(cfg.planner.edge_resolution),
+                              attempts=int(wp.pd_seed_attempts),
+                              bisect_iters=int(wp.pd_bisect_iters), caps=R)
+
     return FacetOracle(scale=page.scale, guard=guard,
                        virtual=lambda c: _box_band(cfg, page, c),
-                       valid=page.valid_fn, depth=depth)
+                       valid=page.valid_fn, depth=depth,
+                       valid_many=page.valid_many if cfg.planner.batch_classify else None,
+                       depth_many=depth_many)
 
 
 class _PageLabeller:
@@ -527,10 +558,12 @@ def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
     poly, rep, log = Polytope(), CheckReport(False, 0, 0), []
     checked_wall = wall          # the wall `poly` was reconstructed from
     for it in range(1, int(p3.alg4_iters) + 1):
+        _budget.check_time()
         t0 = time.time()
         wall, wall_pts, seed, rest, rounds = sample_wall(
             cfg, page.arm, None, page.scene, page.signs, wall, inv, seed, rest,
             verbose=False, valid_fn=page.valid_fn, gamma_warm=p3.gamma_warm,
+            valid_many=page.valid_many,
             labeller=labeller)
         seeds = np.vstack([rng.uniform(page.lo - m, page.hi + m, size=(400, 3)),
                            wall_pts, seed, rest]) * scale
@@ -549,8 +582,10 @@ def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
             log.append(entry)
             if verbose:
                 print(f"[stage3-3d] alg4 iter {it}: wall not closed ({rec.note})")
+            _budget.note_unclosed(rec.note)
             eta *= 0.5
             continue
+        _budget.note_closed()
         poly = Polytope(closed=True, n_segments=len(rec.simplices), method="tdc",
                         vertices=rec.points / scale, simplices=rec.simplices,
                         stats=rec.stats)
@@ -647,7 +682,22 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
         inv = inv[rng.choice(len(inv), p3.n_invalid_max, replace=False)]
 
     oracle = robot_oracle3(cfg, page, live)
-    poly, rep, wall, log = find_wall3(cfg, page, seed, rest, inv, oracle, verbose)
+    label = f"{''.join('+' if s > 0 else '-' for s in page.signs)}/{page.start_comp}"
+    try:
+        with _budget.wall_attempt(cfg.budget, label):
+            poly, rep, wall, log = find_wall3(cfg, page, seed, rest, inv, oracle, verbose)
+    except _budget.BudgetExceeded as e:
+        if e.scope != "wall":
+            raise
+        # A stopped wall is a FAILED wall: the region stays in the run, which
+        # can therefore only end INCONCLUSIVE (findings 44).
+        if verbose:
+            print(f"[budget] {e.reason}")
+        st["budget_stop"] = e.reason
+        info = dict(closed=False, facets="0/0", ok=False,
+                    gamma=None if e.gamma is None else round(float(e.gamma), 2))
+        return dict(ok=False, poly=Polytope(), wall=info, stats=st, live_inside=[],
+                    reason=e.reason)
     st["alg4"] = log
     info = dict(closed=poly.closed, facets=f"{rep.n_passed}/{rep.n_facets}",
                 gamma=round(float(wall.gamma), 2), ok=bool(rep.ok and poly.closed))
@@ -692,7 +742,20 @@ class Result3:
 def prove3(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
            signs: tuple, p3: Page3Params, start_theta: float | None = None,
            verbose: bool = True) -> Result3:
-    """Single-page decision on a weld patch: FEASIBLE / INFEASIBLE / INCONCLUSIVE."""
+    """Single-page decision on a weld patch: FEASIBLE / INFEASIBLE / INCONCLUSIVE.
+
+    Runs under cfg.budget (findings 44): a run that exhausts its budget is
+    INCONCLUSIVE "stopped by budget: ...", never a verdict."""
+    try:
+        with _budget.run_budget(cfg.budget, "prove3"):
+            return _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose)
+    except _budget.BudgetExceeded as e:
+        if verbose:
+            print(f"[budget] {e.reason}")
+        return Result3(INCONCLUSIVE, e.reason, {"budget_stop": e.reason})
+
+
+def _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose) -> Result3:
     t0 = time.time()
     st: dict = {}
     sing = patch_singularities(cfg, arm, surf)

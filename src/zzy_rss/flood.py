@@ -21,6 +21,7 @@ from dataclasses import dataclass, field, asdict
 import numpy as np
 from scipy import ndimage
 
+from . import budget as _budget
 from .arm import SrsArm
 from .params import Config
 from .pagemap import PageMap, page_name
@@ -303,6 +304,7 @@ def find_inf_proof_region(
     alg2_total = 0
 
     for it in range(1, max_iters + 1):
+        _budget.check_time()
         wall, wall_pts, seed_pts, rest_pts, rounds = sample_wall(
             cfg, arm, weld, scene, signs, wall, inv_pts, seed_pts, rest_pts,
             verbose=False, labeller=labeller,
@@ -324,7 +326,9 @@ def find_inf_proof_region(
                 if verbose:
                     print(f"[stage3] alg4 iter {it}: wall not closed "
                           f"({poly.note or 'open loop'})")
+                _budget.note_unclosed(poly.note or "open loop")
                 continue
+        _budget.note_closed()
 
         rep = check_polytope(cfg, arm, weld, scene, signs, poly, discs,
                              seed_pts, verbose=False)
@@ -387,6 +391,29 @@ def find_inf_proof_region(
                   f"(d_min -> {cfg.wall.net_d_min:.4f})")
 
     return poly, rep, wall, max_iters, alg2_total
+
+
+def budgeted_alg4(cfg: Config, label: str, verbose: bool = True, **kw) -> tuple:
+    """find_inf_proof_region under a wall budget (findings 44).
+
+    A stopped attempt comes back as a FAILED wall -- open polytope, a check
+    report with the stop as its only failure, the gamma it had reached -- so
+    every caller treats it exactly like a wall that did not verify: wall 1's
+    region stays in the certificate with ok=False (the run can only be
+    INCONCLUSIVE), and a stopped second wall is "no separating wall", so the
+    door is followed (exit 4)."""
+    from types import SimpleNamespace
+    try:
+        with _budget.wall_attempt(cfg.budget, label):
+            return find_inf_proof_region(cfg, verbose=verbose, **kw)
+    except _budget.BudgetExceeded as e:
+        if e.scope != "wall":
+            raise
+        if verbose:
+            print(f"[budget] {e.reason}")
+        g = float("nan") if e.gamma is None else float(e.gamma)
+        return (Polytope(note=e.reason), CheckReport(False, 0, 0, failures=[(-1, e.reason)]),
+                SimpleNamespace(gamma=g), 0, 0)
 
 
 def _default_pages() -> dict:
@@ -485,9 +512,10 @@ def second_wall(
     """
     ring = virtual_boundary_samples(cfg, 80)
     rest_pts = np.vstack([disc_ring(target, n=32), ring])
-    poly, rep, wmodel, iters, rounds = find_inf_proof_region(
-        cfg, arm, weld, scene, signs, seed_pts, rest_pts, inv_pts, others,
-        max_iters=alg4_iters, verbose=verbose,
+    poly, rep, wmodel, iters, rounds = budgeted_alg4(
+        cfg, f"wall2 door y={target.y:.4f}", verbose=verbose,
+        arm=arm, weld=weld, scene=scene, signs=signs, seed_pts=seed_pts,
+        rest_pts=rest_pts, inv_pts=inv_pts, discs=others, max_iters=alg4_iters,
     )
     ok = bool(rep.ok and poly.closed and poly.loops)
     outside = False
@@ -580,7 +608,20 @@ def build_witness(
     return WitnessPath(legs=legs), ""
 
 
-def run_proof(
+def run_proof(cfg: Config, *args, **kw) -> ProofResult:
+    """_run_proof under cfg.budget (findings 44). A run that exhausts its
+    budget is INCONCLUSIVE "stopped by budget: ..."; a wall that exhausts
+    its own is a failed wall inside an otherwise normal run."""
+    try:
+        with _budget.run_budget(cfg.budget, "run_proof"):
+            return _run_proof(cfg, *args, **kw)
+    except _budget.BudgetExceeded as e:
+        if kw.get("verbose", True):
+            print(f"[budget] {e.reason}")
+        return ProofResult(proven=False, reason=e.reason, verdict=INCONCLUSIVE)
+
+
+def _run_proof(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     pages: dict | None, sigma: dict, n_train_max: int = 900,
     n_invalid_max: int = 160,
@@ -809,9 +850,11 @@ def run_proof(
                          search_cells=cfg.wall.label_search_cells,
                          motion_samples=cfg.wall.label_motion_samples)
         )
-        poly, rep, wmodel, iters, rounds = find_inf_proof_region(
-            cfg, arm, weld, scene, src.signs, seed_pts, rest_pts, inv, discs,
-            max_iters=alg4_iters, verbose=verbose, labeller=labeller,
+        poly, rep, wmodel, iters, rounds = budgeted_alg4(
+            cfg, f"{name}/{k}", verbose=verbose,
+            arm=arm, weld=weld, scene=scene, signs=src.signs, seed_pts=seed_pts,
+            rest_pts=rest_pts, inv_pts=inv, discs=discs, max_iters=alg4_iters,
+            labeller=labeller,
         )
         if verbose:
             print(f"[stage3] region ({name}, {k}): alg4 done in {iters} iter(s); "
@@ -966,6 +1009,7 @@ def run_proof(
     # the goal branch above refuses to report feasibility without a path.
     n_unverified = sum(1 for d in decisions
                        if d["followed"] and not d["crossing_verified"])
+    n_stopped = sum(1 for c in certificate if str(c["note"]).startswith(_budget.STOP))
     return ProofResult(
         proven=all_ok,
         reason=("queue empty, goal never reached, every wall verified"
@@ -974,7 +1018,8 @@ def run_proof(
                    if n_unverified else "")
                 if all_ok else
                 "queue empty and goal never reached, but some wall failed "
-                "verification -- INCONCLUSIVE, not a proof"),
+                "verification" + (f" ({n_stopped} {_budget.STOP})" if n_stopped else "")
+                + " -- INCONCLUSIVE, not a proof"),
         regions_visited=visited_list, certificate=certificate,
         doors_followed=doors_followed,
         verdict=INFEASIBLE if all_ok else INCONCLUSIVE,
@@ -1012,3 +1057,37 @@ def write_certificate(result: ProofResult, sigma: dict, path) -> None:
         },
     }
     path.write_text(json.dumps(payload, indent=2))
+
+
+def prove_line_escalating(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+                          start_page: str = "++-", n_samples: int = 1200,
+                          verbose: bool = False, **run_kw) -> tuple:
+    """The grid-free 2-D proof, re-run on an escalation ladder (findings 44).
+
+    Each rung bootstraps its OWN roadmap (escalate_factor times the samples,
+    a new seed), seeds the regions of `start_page` touching the start edge,
+    and runs run_proof under that rung's budget. Every rung is a complete,
+    independent proof, so the first conclusive one is the answer; a rung
+    stopped by its budget is INCONCLUSIVE and only ever leads to the next
+    rung. Returns (ProofResult, log)."""
+    from .source import bootstrap_roadmap
+
+    def attempt(n, seed, bp):
+        c = dataclasses.replace(cfg, budget=bp,
+                                planner=dataclasses.replace(cfg.planner, rng_seed=seed))
+        try:
+            # One clock for the whole rung: the roadmap counts against it too.
+            with _budget.run_budget(bp, "rung"):
+                srcs, sig = bootstrap_roadmap(c, arm, weld, scene, n_samples=n)
+                src = srcs[start_page]
+                seeds = [(start_page, r.index) for r in src.regions() if r.reaches_start]
+                if not seeds:
+                    return ProofResult(proven=False, verdict=INCONCLUSIVE,
+                                       reason="no valid start-edge region on the start page")
+                return run_proof(c, arm, weld, scene, None, sig, sources=srcs,
+                                 seeds=seeds, verbose=verbose, **run_kw)
+        except _budget.BudgetExceeded as e:
+            return ProofResult(proven=False, reason=e.reason, verdict=INCONCLUSIVE)
+
+    return _budget.escalate(attempt, cfg.budget, n_samples, cfg.planner.rng_seed,
+                            verbose=True)

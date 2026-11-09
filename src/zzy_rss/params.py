@@ -592,6 +592,10 @@ class PlannerParams:
     # Samples per page for the roadmap backend. Separate from n_samples,
     # which the standalone PRM in prm.py uses.
     source_samples: int = 1500
+    # Vectorised validity (batch.py, findings 44): N states through IK,
+    # limits and collision in one numpy pass, tag-for-tag equal to the
+    # scalar classify (tests/test_batch.py). False restores the scalar loops.
+    batch_classify: bool = True
 
 
 @dataclass(frozen=True)
@@ -707,6 +711,39 @@ class WitnessParams:
 
 
 @dataclass(frozen=True)
+class BudgetParams:
+    """Fail-fast budgets and escalation (findings 44).
+
+    A wall attempt that is going nowhere is STOPPED instead of ground to its
+    caps: Algorithm 1 asking for gamma beyond gamma_stop, `max_unclosed`
+    reconstructions in a row that do not close, or more than wall_seconds of
+    wall-clock. The whole run has run_seconds.
+
+    A stop can only ever produce INCONCLUSIVE ("stopped by budget: ..."): the
+    stopped region has no verified wall, so the certificate is missing a
+    piece and INFEASIBLE is impossible; FEASIBLE needs a verified path and a
+    stop never supplies one. A stopped region is NEVER dropped from the
+    certificate. Escalation then re-runs the WHOLE proof with escalate_factor
+    times the samples, a new seed and escalate_factor times the per-wall
+    budgets, up to escalate_rungs runs and escalate_total_seconds; the first
+    conclusive verdict wins, and each rung is an independent proof.
+
+    enabled=False makes every hook a no-op (the pre-44 behaviour).
+    """
+
+    enabled: bool = True
+    gamma_stop: float = 100.0         # Alg 1 needs a narrower kernel -> stop
+    max_unclosed: int = 3             # consecutive non-closed reconstructions
+    wall_seconds: float = 300.0       # one wall attempt (Alg 1-4 of one region)
+    run_seconds: float = 1800.0       # one whole proof run
+    escalate_rungs: int = 3
+    escalate_factor: float = 3.0      # samples x3 per rung
+    escalate_budget_factor: float = 2.0   # gamma_stop, wall_seconds x2 per rung
+    escalate_seed_step: int = 1009
+    escalate_total_seconds: float = 3600.0
+
+
+@dataclass(frozen=True)
 class Config:
     arm: ArmParams = field(default_factory=ArmParams)
     weld: WeldParams = field(default_factory=WeldParams)
@@ -719,6 +756,7 @@ class Config:
     flood: FloodParams = field(default_factory=FloodParams)
     crossing: CrossingParams = field(default_factory=CrossingParams)
     witness: WitnessParams = field(default_factory=WitnessParams)
+    budget: BudgetParams = field(default_factory=BudgetParams)
 
 
 DEFAULT = Config()

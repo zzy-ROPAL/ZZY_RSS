@@ -207,17 +207,17 @@ class RoadmapSource:
         pts, inv = [], []
         # Injected first so their indices are stable and they are never
         # thinned away: the start posture, then every door anchor.
-        for extra in ([start_yt] if start_yt is not None else []) + list(anchors or []):
-            e = np.asarray(extra, dtype=float)
-            ok, _ = classify(cfg, arm, weld, scene, float(e[0]), float(e[1]), signs)
+        heads = [np.asarray(e, dtype=float)
+                 for e in ([start_yt] if start_yt is not None else []) + list(anchors or [])]
+        for e, ok in zip(heads, self._valid_many(np.asarray(heads).reshape(-1, 2))):
             (pts if ok else inv).append(e)
         self.n_injected = len(pts)
 
         ys = rng.uniform(pm.y_min, pm.y_max, n)
         ths = rng.uniform(pm.theta_min, pm.theta_max, n)
-        for y, th in zip(ys, ths):
-            ok, _ = classify(cfg, arm, weld, scene, float(y), float(th), signs)
-            (pts if ok else inv).append(np.array([y, th]))
+        P = np.column_stack([ys, ths])
+        for x, ok in zip(P, self._valid_many(P)):
+            (pts if ok else inv).append(x)
 
         self.valid = np.asarray(pts, dtype=float).reshape(-1, 2)
         self.invalid = np.asarray(inv, dtype=float).reshape(-1, 2)
@@ -272,17 +272,26 @@ class RoadmapSource:
             comp[i] = roots[r]
         return comp
 
+    def _valid_many(self, P: np.ndarray) -> np.ndarray:
+        """classify for N (y, theta) states; batched unless
+        planner.batch_classify is off (findings 44: tag-for-tag equal)."""
+        P = np.asarray(P, dtype=float).reshape(-1, 2)
+        if len(P) == 0:
+            return np.zeros(0, dtype=bool)
+        if not self.cfg.planner.batch_classify:
+            return np.array([classify(self.cfg, self.arm, self.weld, self.scene,
+                                      float(p[0]), float(p[1]), self.signs)[0]
+                             for p in P], dtype=bool)
+        from .batch import classify_line_batch
+        return classify_line_batch(self.cfg, self.arm, self.weld, self.scene, P,
+                                   self.signs)[0]
+
     def _edge(self, a: np.ndarray, b: np.ndarray) -> bool:
         step = self.cfg.planner.edge_resolution
         dist = float(np.linalg.norm((b - a) * self.scale))
         m = max(2, int(np.ceil(dist / step)))
-        for t in np.linspace(0.0, 1.0, m + 1):
-            p = a + t * (b - a)
-            ok, _ = classify(self.cfg, self.arm, self.weld, self.scene,
-                             float(p[0]), float(p[1]), self.signs)
-            if not ok:
-                return False
-        return True
+        ts = np.linspace(0.0, 1.0, m + 1)
+        return bool(self._valid_many(a[None, :] + ts[:, None] * (b - a)[None, :]).all())
 
     def _build_regions(self) -> list:
         out = []
@@ -560,11 +569,21 @@ def build_all_roadmaps_shared(
                                 rng.uniform(pm.theta_min, pm.theta_max, n)]))
 
     per_page = {page_name(sg): ([], []) for sg in SIGN_BRANCHES}
-    for p in pts:
-        verdicts = classify_all_pages(cfg, arm, weld, scene,
-                                      float(p[0]), float(p[1]))
-        for sg, (ok, _q) in verdicts.items():
-            per_page[page_name(sg)][0 if ok else 1].append(p)
+    if cfg.planner.batch_classify:
+        if geometry_is_page_dependent(cfg):
+            classify_all_pages(cfg, arm, weld, scene, 0.0, 0.0)   # raises, with the reason
+        from .batch import classify_all_pages_line_batch
+        P = np.asarray(pts, dtype=float).reshape(-1, 2)
+        verdicts = classify_all_pages_line_batch(cfg, arm, weld, scene, P)
+        for sg, ok in verdicts.items():
+            for p, o in zip(P, ok):
+                per_page[page_name(sg)][0 if o else 1].append(p)
+    else:
+        for p in pts:
+            verdicts = classify_all_pages(cfg, arm, weld, scene,
+                                          float(p[0]), float(p[1]))
+            for sg, (ok, _q) in verdicts.items():
+                per_page[page_name(sg)][0 if ok else 1].append(p)
 
     out = {}
     for sg in SIGN_BRANCHES:

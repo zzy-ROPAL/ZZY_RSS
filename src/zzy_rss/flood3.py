@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import budget as _budget
 from .arm import SrsArm
 from .doors3 import certify_curve, door_curves, patch_singularities
 from .page3 import (FEASIBLE, INCONCLUSIVE, INFEASIBLE, Page3, choose_start_theta,
@@ -149,7 +150,23 @@ def run_flood3(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
     blacklists its bad roadmap edges, the pages are rebuilt, and the flood
     runs again (Page3Params.lazy_rounds). Walls are only ever built for
     regions of the CURRENT graphs, so a certificate never rests on an edge a
-    witness has refuted."""
+    witness has refuted.
+
+    Runs under cfg.budget (findings 44): exhausting it gives INCONCLUSIVE
+    "stopped by budget: ...", and a region whose wall was stopped ends the
+    flood the same way any unverified wall does."""
+    try:
+        with _budget.run_budget(cfg.budget, "flood3"):
+            return _run_flood3(cfg, arm, surf, scene, start_signs, p3, start_theta,
+                               max_regions, verbose)
+    except _budget.BudgetExceeded as e:
+        if verbose:
+            print(f"[budget] {e.reason}")
+        return FloodResult3(INCONCLUSIVE, e.reason, stats={"budget_stop": e.reason})
+
+
+def _run_flood3(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions,
+                verbose) -> FloodResult3:
     state: dict = {}
     res = None
     for attempt in range(int(p3.lazy_rounds) + 1):

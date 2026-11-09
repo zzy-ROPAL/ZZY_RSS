@@ -30,6 +30,8 @@ from typing import Callable
 
 import numpy as np
 
+from . import budget as _budget
+
 
 @dataclass
 class FacetResult:
@@ -59,6 +61,10 @@ class FacetOracle:
     virtual: Callable[[np.ndarray], bool]
     valid: Callable[[np.ndarray], bool]
     depth: Callable[[np.ndarray], tuple]
+    # Optional batched forms (batch.py): valid_many(C) -> bool (N,), and
+    # depth_many(C, R) -> pd (N,) with the same pd >= r verdicts as depth.
+    valid_many: Callable | None = None
+    depth_many: Callable | None = None
 
 
 # --------------------------------------------------------------------------
@@ -296,3 +302,56 @@ def tube_guard(tubes: list) -> Callable[[np.ndarray], str | None]:
                 return f"crosses Sigma tube ({tb.kind})"
         return None
     return guard
+
+
+def check_many(oracle: FacetOracle, simplices: list, max_depth: int) -> list:
+    """check_simplex over many facets, with depth 0 done in ONE batch.
+
+    Most facets pass at depth 0 (findings 19: 66 of 73), so their whole check
+    is one guard, one ball, one validity test and one depth march -- which is
+    exactly what batches. Every facet that does not PASS at depth 0 (a guard
+    hit, a valid centre, pd < r) goes through check_simplex unchanged, so
+    failures, their reasons and every subdivision are the scalar path's.
+    Without valid_many on the oracle this is a plain loop."""
+    if oracle.valid_many is None or not simplices:
+        out = []
+        for v in simplices:
+            _budget.check_time()
+            out.append(check_simplex(oracle, v, max_depth))
+        return out
+    scale = np.asarray(oracle.scale, dtype=float)
+    n = len(simplices)
+    out: list = [None] * n
+    centres, radii, todo = [], [], []
+    for i, v in enumerate(simplices):
+        v = np.asarray(v, dtype=float)
+        if oracle.guard(v):
+            out[i] = check_simplex(oracle, v, max_depth)
+            continue
+        cs, r = enclosing_ball(v * scale)
+        c = cs / scale
+        if oracle.virtual(c):
+            out[i] = FacetResult(True, "virtual boundary band", radius=r)
+            continue
+        centres.append(c)
+        radii.append(r)
+        todo.append(i)
+    if todo:
+        C, R = np.asarray(centres), np.asarray(radii)
+        ok = oracle.valid_many(C)
+        cand = np.flatnonzero(~ok)
+        pd = np.full(len(todo), -np.inf)
+        if len(cand):
+            if oracle.depth_many is not None:
+                pd[cand] = oracle.depth_many(C[cand], R[cand])
+            else:
+                pd[cand] = [oracle.depth(C[j], R[j])[0] for j in cand]
+        for j, i in enumerate(todo):
+            if not ok[j] and pd[j] >= R[j]:
+                out[i] = FacetResult(True, "IJRR march (batched)",
+                                     depth_used=float(pd[j]), radius=float(R[j]))
+            else:
+                _budget.check_time()
+                out[i] = check_simplex(oracle, np.asarray(simplices[i], dtype=float),
+                                       max_depth)
+    return out

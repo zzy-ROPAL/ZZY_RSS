@@ -34,6 +34,7 @@ from scipy.optimize import minimize
 from sklearn.svm import SVC
 
 from .arm import INVALID_COLLISION, INVALID_JOINT_LIMIT, INVALID_NO_IK, SrsArm
+from . import budget as _budget
 from .facets import FacetOracle, FacetResult, check_simplex  # noqa: F401
 from .params import Config
 from .prm import classify
@@ -146,6 +147,7 @@ def train_wall(cfg: Config, seed_pts: np.ndarray, rest_pts: np.ndarray,
     acc = 0.0
     capped = False
     while True:
+        _budget.check_gamma(gamma)          # no-op without an active budget
         svm = SVC(kernel="rbf", gamma=gamma, C=wp.svm_C)
         svm.fit(x, y)
         acc = float(svm.score(x, y))
@@ -517,7 +519,7 @@ def sample_wall(
     wall: WallModel, invalid_pts: np.ndarray,
     seed_pts: np.ndarray, rest_pts: np.ndarray,
     max_rounds: int = 8, verbose: bool = True, labeller=None,
-    valid_fn=None, gamma_warm: float | None = None,
+    valid_fn=None, gamma_warm: float | None = None, valid_many=None,
 ) -> tuple[WallModel, np.ndarray, np.ndarray, np.ndarray, int]:
     """IJRR Algorithm 2: project invalid seeds onto the wall and retrain if any
     projection lands in the valid region.
@@ -531,19 +533,22 @@ def sample_wall(
     if valid_fn is None:
         def valid_fn(m):
             return classify(cfg, arm, weld, scene, float(m[0]), float(m[1]), signs)[0]
+        if valid_many is None and cfg.planner.batch_classify and dim == 2:
+            from .batch import classify_line_batch
+
+            def valid_many(M):
+                return classify_line_batch(cfg, arm, weld, scene, M, signs)[0]
+    if valid_many is None:
+        def valid_many(M):
+            return np.array([bool(valid_fn(m)) for m in M], dtype=bool)
     rounds = 0
     for rounds in range(1, max_rounds + 1):
-        wall_pts = []
-        free_hits = []
-        for q in invalid_pts:
-            m = project_to_wall(wall, q)
-            if m is None:
-                continue
-            if valid_fn(m):
-                free_hits.append(m)
-            else:
-                wall_pts.append(m)
-        wall_pts = np.asarray(wall_pts, dtype=float).reshape(-1, dim)
+        _budget.check_time()
+        proj = [project_to_wall(wall, q) for q in invalid_pts]
+        proj = np.asarray([m for m in proj if m is not None], dtype=float).reshape(-1, dim)
+        okp = valid_many(proj) if len(proj) else np.zeros(0, dtype=bool)
+        free_hits = list(proj[okp])
+        wall_pts = proj[~okp]
 
         if not free_hits:
             if verbose:
@@ -1050,13 +1055,46 @@ def robot_facet_oracle(
         ok, _tag = classify(cfg, arm, weld, scene, float(c[0]), float(c[1]), signs)
         return bool(ok)
 
+    from .arm import INVALID_NO_IK
+    from .batch import classify_line_batch, pd_march_batch
+    scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
+
+    def valid_many(C):
+        return classify_line_batch(cfg, arm, weld, scene, C, signs)[0]
+
+    depth_many = None
+    if not cfg.planner.batch_classify:
+        valid_many = None
+    elif (cfg.wall.pd_mode == PD_IJRR and getattr(cfg.wall, "pd_search", "march") == "march"
+            and len(valid_seeds)):
+        def depth_many(C, R):
+            # Same as y_plus_penetration: the analytic margin where there is
+            # no IK, the uncapped IJRR march everywhere else.
+            tags = classify_line_batch(cfg, arm, weld, scene, C, signs)[1]
+            pd = np.zeros(len(C))
+            noik = tags == INVALID_NO_IK
+            for j in np.flatnonzero(noik):
+                pd[j] = y_plus_penetration(cfg, arm, weld, scene, signs, C[j],
+                                           valid_seeds)[0]
+            rest = np.flatnonzero(~noik)
+            if len(rest):
+                pd[rest] = pd_march_batch(
+                    C[rest], valid_seeds, valid_many, scale,
+                    step=float(cfg.planner.edge_resolution),
+                    attempts=int(cfg.wall.pd_seed_attempts),
+                    bisect_iters=int(cfg.wall.pd_bisect_iters),
+                    caps=np.full(len(rest), np.inf))
+            return pd
+
     return FacetOracle(
-        scale=np.array([cfg.wall.scale_y, cfg.wall.scale_theta]),
+        scale=scale,
         guard=guard,
         virtual=lambda c: bool(in_virtual_invalid(cfg, c[None, :])[0]),
         valid=valid,
         depth=lambda c, _r: y_plus_penetration(cfg, arm, weld, scene, signs, c,
                                                valid_seeds),
+        valid_many=valid_many,
+        depth_many=depth_many,
     )
 
 
@@ -1114,11 +1152,15 @@ def check_polytope(
     failures = []
     failure_points = []
     max_rec = 0
+    from .facets import check_many
+    oracle2 = robot_facet_oracle(cfg, arm, weld, scene, signs, discs, valid_seeds)
+    segs = [(loop, i) for loop in poly.loops for i in range(len(loop) - 1)]
+    results = iter(check_many(oracle2, [np.array([lp[i], lp[i + 1]]) for lp, i in segs],
+                              cfg.wall.facet_max_depth))
     for loop in poly.loops:
         for i in range(len(loop) - 1):
             n_facets += 1
-            r = check_facet(cfg, arm, weld, scene, signs, loop[i], loop[i + 1],
-                            discs, valid_seeds)
+            r = next(results)
             max_rec = max(max_rec, r.recursions)
             if r.ok:
                 n_passed += 1
@@ -1145,9 +1187,10 @@ def _check_simplices(cfg: Config, poly: Polytope, oracle: FacetOracle,
     verts = np.asarray(poly.vertices, dtype=float)
     simp = np.asarray(poly.simplices, dtype=int)
     scale = np.asarray(oracle.scale, dtype=float)
-    for i, s_ in enumerate(simp):
-        r = check_simplex(oracle, verts[s_],
-                          getattr(cfg.wall, "facet_max_depth_tri", 5))
+    from .facets import check_many
+    results = check_many(oracle, [verts[s_] for s_ in simp],
+                         getattr(cfg.wall, "facet_max_depth_tri", 5))
+    for i, (s_, r) in enumerate(zip(simp, results)):
         max_rec = max(max_rec, r.recursions)
         if r.ok:
             n_passed += 1
