@@ -524,7 +524,8 @@ def in_box_tubes(page: "Page3", curves: list) -> list:
 
 def tube_samples(curves: list, region_pts: np.ndarray, scale: np.ndarray,
                  tol: float, lo: np.ndarray | None = None,
-                 hi: np.ndarray | None = None, side: str = "proximity") -> tuple:
+                 hi: np.ndarray | None = None, side: str = "proximity",
+                 far_pts: np.ndarray | None = None) -> tuple:
     """Training points that keep the wall off the door tubes (invariant 7).
 
     A curve that comes near the start region goes WHOLE into the seed class
@@ -532,7 +533,11 @@ def tube_samples(curves: list, region_pts: np.ndarray, scale: np.ndarray,
     per point: a curve split between the classes would put the wall across
     its own tube. side="enclose" (WallParams.sigma_side, findings 47c) puts
     every curve in the seed class: wall 1 then separates start from goal
-    only, and each door is left to a second wall."""
+    only, and each door is left to a second wall. side="nearer" (findings
+    48) puts a curve in the seed class when it is closer to the region than
+    to `far_pts` (the goal components), else in the rest class: each door
+    goes with the side it is nearer, so wall 1 never has to pass between a
+    door and the region it is pressed against."""
     seed, rest = [], []
     tree = cKDTree(region_pts * scale) if len(region_pts) else None
     for c in curves:
@@ -553,8 +558,14 @@ def tube_samples(curves: list, region_pts: np.ndarray, scale: np.ndarray,
         if lo is not None:                       # (findings 45) on the patch only
             keep = np.all((pts[:, :2] >= lo[:2]) & (pts[:, :2] <= hi[:2]), axis=1)
             pts = pts[keep]
-        near = side == "enclose" or (tree is not None and float(
-            tree.query(c.pts * scale, k=1)[0].min()) <= max(tol, float(np.max(r * scale))))
+        if side == "nearer":
+            d_reg = float(tree.query(c.pts * scale, k=1)[0].min()) if tree is not None else np.inf
+            d_far = (float(cKDTree(far_pts * scale).query(c.pts * scale, k=1)[0].min())
+                     if far_pts is not None and len(far_pts) else np.inf)
+            near = d_reg <= d_far
+        else:
+            near = side == "enclose" or (tree is not None and float(
+                tree.query(c.pts * scale, k=1)[0].min()) <= max(tol, float(np.max(r * scale))))
         (seed if near else rest).append(pts)
     return (np.vstack(seed) if seed else np.zeros((0, 3)),
             np.vstack(rest) if rest else np.zeros((0, 3)))
@@ -736,7 +747,7 @@ def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
 
 
 def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
-                verbose: bool = True) -> dict:
+                verbose: bool = True, absorb_dead: bool | str = False) -> dict:
     """Build and check the wall around the page's FOCUS component.
 
     The training set is the d = 3 recipe of findings 42: the focus
@@ -782,6 +793,34 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
                     if cj != page.start_comp and cj not in goal_comps:
                         page.inside.add(cj)
     st["door_pockets"] = len(page.inside)
+    if absorb_dead:
+        # Every component that reaches neither the goal nor this region goes
+        # on the seed side too (findings 48). Enclosing a component that
+        # cannot reach the goal costs the certificate nothing (invariant 15),
+        # and it stops wall 1 from cutting through dead pockets next to the
+        # region, whose fed-back centres land on both sides and drive gamma
+        # past the budget. Goal components are never absorbed.
+        #
+        # absorb_dead="near" (findings 48) takes only the dead components that
+        # are closer to this region than to any goal component: a dead
+        # component pressed against the goal would just move the hard
+        # separation there (3-D EXP 2 page +++: absorbing all of them fails
+        # in 11 s, absorbing the near one verifies).
+        dead = set(int(c) for c in np.unique(page.comp)) - goal_comps - {page.start_comp}
+        if absorb_dead == "near" and dead:
+            reg = cKDTree(page.valid[page.comp == page.start_comp] * page.scale)
+            gpts = page.valid[np.isin(page.comp, sorted(goal_comps))]
+            gtree = cKDTree(gpts * page.scale) if len(gpts) else None
+            keep = set()
+            for c in dead:
+                X = page.valid[page.comp == c] * page.scale
+                d_reg = float(reg.query(X)[0].min())
+                d_goal = float(gtree.query(X)[0].min()) if gtree is not None else np.inf
+                if d_reg < d_goal:
+                    keep.add(c)
+            dead = keep
+        page.inside |= dead
+        st["dead_absorbed"] = sorted(dead)
     region = page.seed_points()
     seed = region
     if len(seed) > p3.n_train_max:
@@ -802,7 +841,7 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
     rest = np.vstack([rest0, a_rest, gface,
                       virtual_ring3(cfg, page, int(p3.ring_per_face), rng)])
     s_extra, r_extra = tube_samples(live, region, page.scale, 0.03, page.lo, page.hi,
-                                    side=cfg.wall.sigma_side)
+                                    side=cfg.wall.sigma_side, far_pts=page.rest_points())
     if len(s_extra):
         seed = np.vstack([seed, s_extra])
     if len(r_extra):
@@ -1145,3 +1184,201 @@ def _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose,
                        f"(flood3.run_flood3)", st, doors, [w["wall"]], poly=w["poly"])
     return Result3(INFEASIBLE, "closed wall, every triangle in C_obs, start inside, goal "
                    "slab and every live door outside", st, doors, [w["wall"]], poly=w["poly"])
+
+
+# --------------------------------------------------------------------------
+# a start given as a TORCH POSE, not a posture (findings 48)
+# --------------------------------------------------------------------------
+
+
+def start_states(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
+                 signs: tuple, p3: Page3Params, n: int) -> np.ndarray:
+    """Every valid posture of the start pose on this page, sampled: the
+    states (start_u, start_v, theta) for n theta values in the page's range
+    that are valid. The task fixes the torch pose; the arm angle and the
+    sign branch are the robot's to choose, so each of these is a start."""
+    th = np.linspace(p3.theta_min, p3.theta_max, int(n))
+    P = np.column_stack([np.full(n, p3.start_u), np.full(n, p3.start_v), th])
+    ok = classify_surface_batch(cfg, arm, surf, scene, P, signs)[0]
+    return P[ok]
+
+
+def _arcs(states: np.ndarray, n: int, p3: Page3Params) -> list:
+    """Runs of consecutive theta samples, as (theta_lo, theta_hi) pairs."""
+    if not len(states):
+        return []
+    step = (p3.theta_max - p3.theta_min) / (int(n) - 1)
+    th = np.sort(states[:, 2])
+    cut = np.flatnonzero(np.diff(th) > 1.5 * step)
+    lo = np.concatenate([[0], cut + 1])
+    hi = np.concatenate([cut, [len(th) - 1]])
+    return [(float(th[a]), float(th[b])) for a, b in zip(lo, hi)]
+
+
+def prove3_starts(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
+                  signs: tuple, p3: Page3Params, n_inject: int = 181,
+                  n_check: int = 3601, verbose: bool = True,
+                  wall1_sides: tuple = ("enclose", "nearer", "enclose+near",
+                                        "nearer+near")) -> dict:
+    """The single-page proof for EVERY posture of the start pose on one page.
+
+    The start set on this page is a set of theta arcs on the start line. A
+    subsample of it (n_inject theta values) is injected into the roadmap, so
+    each start posture is a vertex and the components holding them are the
+    page's START REGIONS. Then, per start region:
+
+        reaches the goal on the roadmap -> a verified path      => FEASIBLE
+        else wall 1 (start region | goal, every entry inside),
+             and every live door inside it excluded by a wall 2
+             (or, with doors_as_exits semantics off, INCONCLUSIVE)
+
+    COVERAGE. The verdict covers the start postures only if every one of
+    them lies inside a verified wall. That is checked on a DENSE sample
+    (n_check theta values): a valid posture inside no wall -- an arc the
+    injection missed, or a component no wall was built for -- makes the page
+    INCONCLUSIVE. Between dense samples nothing is evaluated: a valid arc
+    narrower than one dense step could still be missed (the same caveat as
+    the door-curve sampling of flood3), which is the one way this can be
+    wrong, and only on the INFEASIBLE side.
+
+    WALL 1 RECIPES. `wall1_sides` are tried in order per start region, and the
+    first verified wall 1 is used: "enclose" keeps every live door inside
+    (each then needs a wall 2), "proximity" keeps only the doors near the
+    region and makes wall 1 exclude the far ones itself, "nearer" sends each
+    door to the side whose region it is closer to, and a "+near" suffix also
+    puts every component that reaches neither the goal nor the region, and is
+    closer to the region than to the goal, on the seed side ("+dead": all of
+    them; region_wall absorb_dead). Each attempt is a
+    complete, independently verified proof object, so trying several cannot
+    produce a wrong verdict -- it only costs time. Measured on 3-D EXP 2
+    (findings 48): "enclose" verifies on the s6 = - pages but on the s6 = +
+    pages it must squeeze the far q2 door past the goal region (gamma > 100).
+
+    Returns a dict: verdict, reason, arcs (degrees), regions (one entry per
+    start region: comp, n_starts, wall, second_walls, polys), coverage."""
+    t0 = time.time()
+    name = "".join("+" if s > 0 else "-" for s in signs)
+    out = dict(page=name, verdict=INCONCLUSIVE, reason="", arcs=[], regions=[],
+               coverage=None, seconds=0.0)
+    dense = start_states(cfg, arm, surf, scene, signs, p3, n_check)
+    out["arcs"] = [[round(float(np.degrees(a)), 2), round(float(np.degrees(b)), 2)]
+                   for a, b in _arcs(dense, n_check, p3)]
+    if not len(dense):
+        out.update(verdict=INFEASIBLE, reason="no valid posture of the start pose on this page")
+        return out
+    inj = start_states(cfg, arm, surf, scene, signs, p3, n_inject)
+    # Every arc must be represented even if narrower than the injection step.
+    ends = []
+    for a, b in _arcs(dense, n_check, p3):
+        ends += [[p3.start_u, p3.start_v, a], [p3.start_u, p3.start_v, b]]
+    inj = np.vstack([inj, np.asarray(ends)]) if len(inj) else np.asarray(ends)
+    page = Page3(cfg, arm, surf, scene, signs, p3, None, inject=inj)
+    cut = theta_cut_check(page)
+    if not cut["ok"]:
+        out["reason"] = f"bounded theta not justified: {cut['reason']}"
+        return out
+    sing = patch_singularities(cfg, arm, surf)
+    if not sing["ok"]:
+        out["reason"] = f"unsupported singular set: {sing['reason']}"
+        return out
+    vin = page.inject_index[page.inject_index >= 0]
+    comps = sorted({int(page.comp[v]) for v in vin})
+    if verbose:
+        print(f"[starts-3d] page {name}: {len(dense)}/{n_check} start postures valid, arcs "
+              f"{out['arcs']} deg; {len(vin)} injected -> {len(comps)} start region(s)")
+
+    curves = door_curves(cfg, arm, surf, p3)
+    for c in curves:
+        certify_curve(cfg, arm, surf, scene, c, signs, p3)
+    live = [c for c in curves if not c.certified_blocked or not p3.discharge_doors]
+    walls = []                    # (verts scaled, simplices) of every verified wall 1
+    for comp in comps:
+        page.set_focus(comp)
+        mine = np.array([v for v in vin if int(page.comp[v]) == comp])
+        entries = page.valid[mine]
+        reg = dict(comp=comp, n_starts=int(len(mine)),
+                   theta_deg=[round(float(np.degrees(entries[:, 2].min())), 2),
+                              round(float(np.degrees(entries[:, 2].max())), 2)])
+        out["regions"].append(reg)
+        goal = page.goal_mask() & (page.comp == comp)
+        if goal.any():
+            idx = page.path(int(mine[0]), goal)
+            path = witness_path3(page, idx) if idx else None
+            rep = (verify_witness(cfg, arm, surf, scene, path, q_start=path.q_start, goal_y=1.0)
+                   if path is not None else None)
+            reg["witness"] = None if rep is None else rep.reason
+            if rep is not None and rep.ok:
+                out.update(verdict=FEASIBLE, reason=f"start region {comp} reaches the goal: "
+                           f"verified path", seconds=round(time.time() - t0, 1))
+                return out
+            out["reason"] = f"start region {comp} reaches the goal on the roadmap, but no " \
+                            f"verified path"
+            out["seconds"] = round(time.time() - t0, 1)
+            return out
+        reg["wall1_attempts"] = []
+        for side in wall1_sides:
+            base, _, extra = side.partition("+")
+            cfg_s = dataclasses.replace(cfg, wall=dataclasses.replace(cfg.wall, sigma_side=base))
+            w = region_wall(cfg_s, page, live, entries, verbose=verbose,
+                            absorb_dead={"dead": True, "near": "near"}.get(extra, False))
+            reg["wall1_attempts"].append(dict(sigma_side=side, ok=w["ok"],
+                                              facets=w["wall"].get("facets"),
+                                              gamma=w["wall"].get("gamma"),
+                                              reason=w["reason"]))
+            if verbose:
+                print(f"[starts-3d] {name}/{comp} wall 1 ({side}): "
+                      f"{'VERIFIED' if w['ok'] else 'failed'} {w['wall'].get('facets')} "
+                      f"{w['reason']}")
+            if w["ok"]:
+                reg["wall1_side"] = side
+                break
+        reg["wall"] = w["wall"]
+        reg["polys"] = [("wall 1", w["poly"])]
+        if not w["ok"]:
+            out["reason"] = f"start region {comp}: {w['reason']}"
+            out["seconds"] = round(time.time() - t0, 1)
+            return out
+        reg["second_walls"] = []
+        for c, ins in zip(live, w["live_inside"]):
+            if not ins:
+                continue
+            if not p3.second_wall:
+                out["reason"] = (f"start region {comp}: live q{c.joint} door curve inside the "
+                                 f"wall (second walls off; the cross-page flood would follow it)")
+                out["seconds"] = round(time.time() - t0, 1)
+                return out
+            others = [o for o in live if o is not c]
+            w2 = second_wall3(cfg, page, c, others, entries, verbose=verbose)
+            reg["second_walls"].append(dict(curve=f"q{c.joint}", excluded=w2["ok"],
+                                            reason=w2["reason"], wall=w2["wall"]))
+            reg["polys"].append((f"wall 2 q{c.joint}", w2["poly"]))
+            if verbose:
+                print(f"[exit2-3d] {name}/{comp} q{c.joint} curve: "
+                      f"{'EXCLUDED' if w2['ok'] else 'not excluded'} -- {w2['reason']}")
+            if not w2["ok"]:
+                out["reason"] = (f"start region {comp}: live q{c.joint} door curve inside the "
+                                 f"wall and no second wall excludes it")
+                out["seconds"] = round(time.time() - t0, 1)
+                return out
+        walls.append((w["poly"].vertices * page.scale, np.asarray(w["poly"].simplices)))
+
+    # Coverage: every dense start posture inside some verified wall 1.
+    covered = np.zeros(len(dense), dtype=bool)
+    for verts, simp in walls:
+        covered |= inside(dense * page.scale, verts, simp, 2)
+    out["coverage"] = f"{int(covered.sum())}/{len(dense)}"
+    if not covered.all():
+        miss = dense[~covered]
+        out["reason"] = (f"{int((~covered).sum())} valid start posture(s) inside no verified "
+                         f"wall (theta {np.degrees(miss[:, 2].min()):.2f}.."
+                         f"{np.degrees(miss[:, 2].max()):.2f} deg)")
+        out["seconds"] = round(time.time() - t0, 1)
+        return out
+    out.update(verdict=INFEASIBLE,
+               reason=(f"every one of the {len(dense)} sampled start postures lies in one of "
+                       f"{len(comps)} start region(s), each closed by a verified wall with the "
+                       f"goal slab outside" + (" and every live door excluded by a second wall"
+                                               if any(r.get('second_walls') for r in
+                                                      out['regions']) else "")),
+               seconds=round(time.time() - t0, 1))
+    return out

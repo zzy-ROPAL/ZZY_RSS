@@ -30,6 +30,15 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### 🆕🆕🆕🆕🆕 2026-11-09(五):**起点是焊枪位姿,不是一个构型**(§48)
+>
+> 3 维 EXP 2 的起始位姿在**八页上都有效**(s6=+ 四页 θ∈[11.8°,50.5°],s6=− 四页 θ∈[11.8°,91.8°]);
+> 以前的证明只覆盖其中一个构型。`page3.prove3_starts` + `scripts/exp2_multistart_3d.py`:
+> 每页的起始弧注入路图 ⇒ 起始区域各建墙₁ ⇒ **3601 个稠密起始构型全部在已验证的墙内**(覆盖检查)。
+> **门卸载(已发表设定):八页全部 INFEASIBLE**,801/801 与 388/388 覆盖,墙₁ 2018/2018 与 1958/1958,墙钟 **74.5 s**。
+> 墙₁ 要多试配方(`enclose` / `nearer` / `+near` 并入近的死分量),s6=+ 页要 `enclose+near`。
+> 门全活时 s6=+ 四页的近门墙₂ 建不出(起始区域贴门 ~0.07)⇒ INCONCLUSIVE。图 `docs/figs/exp2_multistart_3d.png`。
+
 > ### 🆕🆕🆕🆕 2026-11-09(四):**第二道墙移植到 3 维**(§47)
 >
 > `Page3Params.second_wall`(默认关)/ `run_3d.py --second-wall`:墙₁ 内的每道活门曲线试一面**只为它**的墙
@@ -347,6 +356,7 @@ python3 tests/test_budget.py                               # 预算:停止 = 失
 python3 tests/test_second_wall3.py                         # 3 维墙₂ 的"门管整个在外"精确判据(§47)
 python3 scripts/exp2_two_walls.py                          # EXP 2 单页两类墙:墙₁ 起点|终点 + 墙₂ 起点|门(§47b)
 python3 scripts/exp2_two_walls_3d.py                       # 同上,3 维 ZGAP 面片,门曲线全活(§47c)
+python3 scripts/exp2_multistart_3d.py --discharge          # 起点 = 焊枪位姿:八页所有起始构型的不可行证明(§48)
 python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   # 稀疏起步,自动升级(§44)
 python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 \
     --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl   # 新 EXP 3(§45)
@@ -691,6 +701,10 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 55. **墙₂ 的种子不能含目标门自己的盘。**(§47b)墙₁ 把近门的圆心与环放进 seed,墙₂ 把同一个环放进 rest
     ⇒ 两类重合 ⇒ 永远分不开。墙₂ 种子 = 区域点 + **其他**门的盘样本。`sigma_side="enclose"` 时
     `run_proof` 要对**所有**门判出口,墙₁ 圈住的远门也是。
+
+56. **起点是焊枪位姿,不是一个构型。**(§48)任务只固定焊枪;每一页上每个有效臂角都是可能的起点。
+    不可行证明必须覆盖**全部**:每页起始弧注入路图、每个起始区域一面墙₁,且稠密起始样本**每一个**都在某面
+    已验证的墙内(覆盖检查),漏一个就 INCONCLUSIVE。只从一个构型出发证的是更弱的命题。
 
 54. **3 维墙₂ 排除一道门,必须整根门管在外,且没有三角形碰到它。**(§47)目标管被移出 Σ 守卫
     (否则贴管的三角形全被拒),所以墙₂ 可能穿过门;门有一段在内就是可用的逃生口,
