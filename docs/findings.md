@@ -2822,3 +2822,8 @@ s6 = + 四页墙₁ 能建(`nearer`,998/998,γ 2.5),但**近门的墙₂ 建不�
 
 复现:`python3 scripts/exp2_multistart_3d.py --discharge`(已发表设定,INFEASIBLE);
 不带 `--discharge` 为门全活(s6=+ 四页 INCONCLUSIVE)。
+
+**门全活时的三面墙图**(`docs/figs/exp2_multistart_3d_live.png`,v=0.5 切片,墙钟 200.9 s):
+s6 = − 四页每页**三面墙全部验证**——墙₁ 2314/2314(`enclose`,两条门都圈在内)、墙₂ #0 1794/1794、墙₂ #1 1752/1752,
+801/801 覆盖 ⇒ INFEASIBLE。s6 = + 四页只有墙₁(`nearer`,998/998:圈住近门 u≈0.2、排除远门 u≈0.8),
+近门的墙₂ 失败 ⇒ INCONCLUSIVE;远门已在墙₁ 外,不需要墙₂。所以那四页最多两面墙,而且第二面建不出来。

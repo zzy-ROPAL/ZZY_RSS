@@ -72,6 +72,7 @@ def figure(results, setup_args, path):
     import matplotlib.pyplot as plt
     from exp2_two_walls_3d import slice_segments
     from zzy_rss.batch import classify_surface_batch
+    from zzy_rss.doors3 import door_curves
     cfg, arm, scene, surf, p3 = E.setup(*setup_args)
     v = p3.start_v
     U, T = np.meshgrid(np.linspace(0, 1, 121), np.linspace(-np.pi, np.pi, 145), indexing="ij")
@@ -84,13 +85,33 @@ def figure(results, setup_args, path):
         ax.imshow(ok.T, origin="lower", aspect="auto", extent=[0, 1, -np.pi, np.pi],
                   cmap="Greys", vmin=-0.3, vmax=1.6)
         r = by.get(name, {})
+        w2_styles = [("#1d3557", "--"), ("#7b2cbf", "-.")]
+        notes = []
         for reg in r.get("regions", []):
+            k2 = 0
+            sw = reg.get("second_walls", [])
             for lab, pl in reg.get("polys", []):
+                if lab == "wall 1":
+                    col, ls, lw = "#9d0208", "-", 2.2
+                else:
+                    ok2 = sw[k2]["excluded"] if k2 < len(sw) else False
+                    col, ls = w2_styles[k2 % 2]
+                    lw = 1.8
+                    if not ok2:
+                        notes.append(f"wall 2 #{k2}: FAILED")
+                    k2 += 1
                 if pl is None:
                     continue
-                col, ls = ("#9d0208", "-") if lab == "wall 1" else ("#1d3557", "--")
                 for seg in slice_segments(pl["vertices"], pl["simplices"], v):
-                    ax.plot(seg[:, 0], seg[:, 1], color=col, ls=ls, lw=2.0 if lab == "wall 1" else 1.4)
+                    ax.plot(seg[:, 0], seg[:, 1], color=col, ls=ls, lw=lw)
+        for c in door_curves(cfg, arm, surf, p3):
+            near = np.abs(c.pts[:, 1] - v) < 0.02
+            if near.any():
+                ax.plot(c.pts[near, 0], c.pts[near, 2], "o", ms=7, mfc="none", mec="#ffb703",
+                        mew=2.2)
+        if notes:
+            ax.text(0.5, -2.85, "; ".join(notes), ha="center", color="#d62828", fontsize=9,
+                    fontweight="bold")
         for a, b in r.get("arcs", []):
             ax.plot([0, 0], np.radians([a, b]), color="#1d6fd8", lw=6, solid_capstyle="butt")
         ax.axvline(1 - p3.goal_tol, color="#2a9d8f", ls=":", lw=1.4)
@@ -104,12 +125,17 @@ def figure(results, setup_args, path):
     from matplotlib.lines import Line2D
     fig.legend(handles=[Line2D([], [], color="#1d6fd8", lw=6, label="valid start postures (u = 0)"),
                         Line2D([], [], color="#9d0208", lw=2, label="wall 1: start region | goal"),
-                        Line2D([], [], color="#1d3557", lw=1.4, ls="--",
-                               label="wall 2: start region | door"),
+                        Line2D([], [], color="#1d3557", lw=1.8, ls="--",
+                               label="wall 2 #0: start region | first door"),
+                        Line2D([], [], color="#7b2cbf", lw=1.8, ls="-.",
+                               label="wall 2 #1: start region | second door"),
+                        Line2D([], [], ls="", marker="o", ms=7, mfc="none", mec="#ffb703",
+                               mew=2.2, label="q2 door curves (live)"),
                         Line2D([], [], color="#2a9d8f", ls=":", label="goal u = 1")],
-               loc="lower center", ncol=4, fontsize=10)
+               loc="lower center", ncol=6, fontsize=10)
     verdict = combine(results)[0]
-    fig.suptitle(f"3-D EXP 2, start = torch pose (all postures on all 8 pages): {verdict} -- "
+    mode = "every door LIVE" if setup_args[4] else "doors discharged"
+    fig.suptitle(f"3-D EXP 2, start = torch pose (all postures on all 8 pages), {mode}: {verdict} -- "
                  f"slices at v = {v}, dark grey = valid", fontsize=13)
     fig.tight_layout(rect=(0, 0.05, 1, 0.95))
     fig.savefig(path, dpi=130)
