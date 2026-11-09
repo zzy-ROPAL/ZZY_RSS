@@ -30,6 +30,22 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### 🆕 2026-11-09:**批量判定 + 失败要快的预算/升级;EXP 3 为什么慢**(§44)
+>
+> | | 东西 | 效果 |
+> |---|---|---|
+> | **批量判定** | `batch.py`:IK/限位/碰撞向量化,接进路图、边、Alg 2、Alg 3 depth-0、pd 步进 | **逐态相等**(≈14 万个状态 0 处不同,pd 差 6e-17);2 维 EXP 2 16.4 → **3.9 s**,3 维 EXP 2 面片 24.2 → **10.2 s**,证书逐字不变 |
+> | **预算** | `BudgetParams`:γ > 100 / 连续 3 次不闭合 / 墙 300 s / 运行 1800 s ⇒ **停止 = 失败的墙**(留在证书里) | 只可能 INCONCLUSIVE `stopped by budget`;**不可能造出错误判定** |
+> | **升级** | INCONCLUSIVE ⇒ **整个证明重跑**:样本 ×3、换种子、预算 ×2,第一个确定判定为准 | `run_3d.py --escalate`,`flood.prove_line_escalating` |
+>
+> **EXP 3(2 维)从 1989 s 变成 58 s**,判定同为 INCONCLUSIVE,但现在写明 `stopped by budget`。
+> **剖析:99.2% 是 Alg 1 的线性 γ 扫描**(Δγ=0.1,IJRR 原文):50 665 次 SVM 拟合,24 次重训
+> 每次都从 γ=1 重扫,12 次扫到 400 精度仍 < 1;Alg 3 只占 1.5 s,TDC 1.1 s。
+> **分不开的原因**:1200 样本时稀疏路图把门所在小岛与起始区域分开(4000 样本时是同一分量),
+> 门盘的环进了 rest 类、离起始区域只有 0.034 ⇒ 要 γ≈870 > 400 ⇒ **墙不存在**。
+> 样本够多时间隙 0.06 ⇒ γ≈270,墙可能存在但贵;**下一个杠杆是 γ 搜索(倍增 + 二分),不是 IK**。
+> 测试:`tests/test_batch.py`、`tests/test_budget.py`。
+
 > ### ⛔🆕 2026-11-08(五):**门的"不可穿越"是假象;EXP 3 的不可行证书撤回**(§43)
 >
 > q2/q6 门处相邻两关节**轴重合**,IK 在**精确门点**给的 q_i 是 atan2(0,0) 的舍入
@@ -282,6 +298,9 @@ python3 tests/test_page3.py                                # d=3 面片:门曲�
 python3 scripts/run_3d.py --obstacle zgap                 # 第一个 d=3 实验(--obstacle none 为可行对照)
 python3 tests/test_crossing.py                             # 门直穿:假象、23/24 验证、只认姿态事实(§43)
 python3 tests/test_flood3.py                               # 3 维跨页路径:直穿 + 纤维旋转、整圈不匹配被拒(§43)
+python3 tests/test_batch.py                                # 批量判定逐态等于标量判定(§44)
+python3 tests/test_budget.py                               # 预算:停止 = 失败的墙,只会 INCONCLUSIVE;升级(§44)
+python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   # 稀疏起步,自动升级(§44)
 python3 scripts/run_3d.py --patch exp2 --flood             # 3 维跨页泛洪(--patch exp3/exp4,--tilt,--high-z,--start-page)
 python3 scripts/run_demo.py --res 61 --out out/demo        # 三个案例 + 视频 + 图
 python3 scripts/make_summary.py out/demo                   # 汇总 SUMMARY.md
@@ -356,6 +375,8 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | **门的卸载规则** | 只认姿态事实(碰撞 / 不动关节越限) | `posture_blocked()` in `doors.py`,`certify_curve()` in `doors3.py` |
 | **3 维跨页泛洪** | 注入过门端点 → 阶段 1 连通(配对 q_i+q_k 相等)→ 阶段 2 逐区域建墙,活门跟伙伴页与本页;懒惰 PRM | `run_flood3()` in `flood3.py` |
 | **过门腿** | 直穿或纤维反转,从不采样门点 | `door_crossing_leg()` in `flood3.py` |
+| **批量判定** | IK/限位/碰撞向量化,逐态等于 `classify`;`batch_classify=False` 退回标量 | `src/zzy_rss/batch.py`,`check_many()` in `facets.py` |
+| **预算与升级** | 墙/运行级预算;停止 = 失败的墙 ⇒ INCONCLUSIVE;整个证明按"样本 ×3、换种子"重跑 | `src/zzy_rss/budget.py`,`budgeted_alg4()` / `prove_line_escalating()` in `flood.py` |
 | **焊接面片** | `p(u,v)` 平面片,姿态固定;每个 v 切片是一条 `WeldLine` | `WeldSurface` in `weld.py` |
 | **d=3 页** | 路图(无网格)、θ 切口检查、面锚点、目标面样本、Alg 4、单页判定 | `src/zzy_rss/page3.py` |
 | **d=3 门曲线** | q2/q6 门 = 球 ∩ 腕心平面 = 圆(闭式);折叠/Σ_coord 碰到面片就拒绝;沿曲线 Lipschitz 守卫的认证 | `src/zzy_rss/doors3.py` |
@@ -580,6 +601,19 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 
 45. **2 维"区域含门"的结论也可能是网格假象。**(§43,不变量 8 的又一例)
     EXP 4 的起始边分量与门所在分量之间隔着 q3 越限薄条(连线关节跳 2π)。
+
+46. **批量判定必须逐态等于标量判定。**(§44)它进证明(路图边、面心、pd),
+    一处不同就可能翻掉一条边或一个面。改 `ik_branch`、`scene.check`、`within_limits`
+    后必须重跑 `tests/test_batch.py`。批量 pd 走得比标量远一点(到初始界),
+    这不改答案:多走那段上的命中点二分后 ≥ 已有最优。
+
+47. **预算停止 = 失败,永远不是跳过。**(§44)被停的区域留在证书里 `ok=False`,
+    整次运行只能 INCONCLUSIVE。把被停的区域**丢掉**会让队列变空 ⇒ 报 INFEASIBLE ⇒
+    **假证明**(正是 `regions_under` 那种"没有裁决者"的洞)。被停的第二道墙 = 没有分离墙 ⇒ 跟门。
+
+48. **升级重跑整个证明,不拼接不同级的部件。**(§44)每级有自己的路图、墙与面检查,
+    第一个确定的判定就是答案。把 A 级的墙和 B 级的路图拼起来,证书描述的就不是同一个对象
+    (不变量 16 的同类错误)。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,
