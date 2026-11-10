@@ -30,10 +30,15 @@ so each crossing endpoint is a REAL vertex in a real component -- the
 partner region is a lookup, not a footprint guess (the d = 3 version of
 findings 38's regions_under fix).
 
-Coverage caveat, stated once: the curve is sampled (every cert_stride-th
-point, eight directions across it). A partner component that touches the
-curve only between samples would be missed, which is the one direction that
-can make INFEASIBLE false. Denser injection shrinks that, nothing removes it.
+Coverage, and why it no longer decides anything (findings 47): the curve is
+sampled (every cert_stride-th point, eight directions across it), so a
+partner component that touches the curve only between samples is not found
+by the injected states. That used to be the one direction that could make
+INFEASIBLE false. Phase 2 now puts the WHOLE door piece into the partner
+region's seed class and requires the verified wall to enclose it; a free
+component touching the piece cannot cross a wall that lies in C_obs, so it
+is inside whether or not a sample found it. The injected states remain what
+phase 1 and the witness use to actually cross.
 """
 
 from __future__ import annotations
@@ -47,7 +52,8 @@ from . import budget as _budget
 from .arm import SrsArm
 from .doors3 import certify_curve, door_curves, patch_singularities
 from .page3 import (FEASIBLE, INCONCLUSIVE, INFEASIBLE, Page3, choose_start_theta,
-                    densify3, region_wall, theta_cut_check)
+                    clip_to_box, densify3, door_pieces, piece_vertices, theta_cut_check,
+                    wall_for_region)
 from .params import Config, Page3Params
 from .scene import Scene
 from .weld import WeldSurface
@@ -356,9 +362,44 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
             print(f"[flood3] phase 1 could not cash the route in ({why}); building walls")
 
     # ---- phase 2: walls, region by region -------------------------------
+    #
+    # A node is (page, component), or (page, ("door", curve, piece)) for a
+    # page entered through a door piece that touches no sampled component.
+    # Findings 47 changes three things here:
+    #
+    #   * every node entered through a door gets that WHOLE door piece in its
+    #     seed class, and its wall must enclose it -- so every component
+    #     touching the door is inside, whether or not an injected sample
+    #     happened to land in it (the coverage caveat in this module's
+    #     docstring is now a matter of efficiency only);
+    #   * every live piece is probed against the verified wall, and a piece
+    #     already enclosed by a verified wall on the page it leads to is not
+    #     followed again;
+    #   * the door is no longer followed back onto its OWN page: the piece is
+    #     wholly inside this wall, so every own-page component touching it is
+    #     inside this wall too.
+    if "sample_piece" not in state:
+        lo = np.array([0.0, 0.0, p3.theta_min])
+        hi = np.array([1.0, 1.0, p3.theta_max])
+        scale = np.asarray(p3.scale, dtype=float)
+        polys = {ci: clip_to_box(np.asarray(g.tube.polyline, dtype=float), lo, hi)
+                 for ci, g in enumerate(geometry)}
+        sp = []
+        for n, (ci, _si, _k) in enumerate(ds.key):
+            best, best_d = None, 1e-6
+            for j, poly in enumerate(polys[ci]):
+                d_ = float(np.min(np.linalg.norm((poly - ds.p[n]) * scale, axis=1)))
+                if d_ <= best_d:
+                    best, best_d = (ci, j), d_
+            sp.append(best)
+        state["sample_piece"] = sp
+    sample_piece = state["sample_piece"]
+
     queue = [root]
     entries = {root: [0]}                 # vertex indices that enter the region
+    node_entry: dict = {root: set()}      # door pieces the region was entered through
     parent: dict = {root: None}           # region -> (prev region, n_from, n_to)
+    walled: dict = {}                     # signs -> piece keys inside a verified wall there
     visited, regions, certificate, crossings = set(), [], [], []
 
     while queue:
@@ -371,18 +412,30 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
         visited.add(node)
         signs, comp = node
         page = get_page(signs)
-        page.set_focus(comp)
-        n_pts = int((page.comp == comp).sum())
-        regions.append(dict(page=page_name(signs), comp=comp, vertices=n_pts))
+        is_comp = isinstance(comp, (int, np.integer))
+        page.set_focus(comp if is_comp else None)
+        ekeys = set(node_entry.get(node, set()))
+        n_pts = int((page.comp == comp).sum()) if is_comp else 0
+        cid = int(comp) if is_comp else f"door{comp[1]}.{comp[2]}"
+        if ekeys and ekeys <= walled.get(signs, set()):
+            regions.append(dict(page=page_name(signs), comp=cid, vertices=n_pts,
+                                skipped="every entry door is inside a verified wall here"))
+            if verbose:
+                print(f"\n[flood3] region {page_name(signs)}/{cid}: every entry door is "
+                      f"already inside a verified wall on this page -- no new wall")
+            continue
+        regions.append(dict(page=page_name(signs), comp=cid, vertices=n_pts,
+                            entry_doors=[list(k) for k in sorted(ekeys)]))
         if verbose:
-            print(f"\n[flood3] region {page_name(signs)}/{comp}: {n_pts} vertices, "
-                  f"entered via {len(entries[node])} state(s)")
+            print(f"\n[flood3] region {page_name(signs)}/{cid}: {n_pts} vertices, "
+                  f"entered via {len(entries.get(node, []))} state(s)"
+                  + (f" and {len(ekeys)} door piece(s)" if ekeys else ""))
         if not page.cut_ok:
             return FloodResult3(INCONCLUSIVE, f"bounded theta not justified on "
                                 f"{page_name(signs)}: {page.cut_reason}",
                                 regions, certificate, crossings, stats=st)
 
-        goal_here = page.goal_mask() & (page.comp == comp)
+        goal_here = (page.goal_mask() & (page.comp == comp)) if is_comp else np.zeros(1, bool)
         if goal_here.any():
             if verbose:
                 print(f"[flood3] goal reached in {page_name(signs)}/{comp}: splicing a path")
@@ -409,75 +462,98 @@ def _flood_once(cfg, arm, surf, scene, start_signs, p3, start_theta, max_regions
                                 witness=rep.as_dict(), stats=st, path=path)
 
         live = live_curves(signs)
-        entry_pts = page.valid[entries[node]]
-        w = region_wall(cfg, page, [c for _, c in live], entry_pts, verbose=verbose)
-        certificate.append(dict(page=page_name(signs), comp=comp, **w["wall"]))
-        state.setdefault("polys", []).append((page_name(signs), comp, w["poly"]))
+        pieces = door_pieces(page, live)
+        have = {pc.key for pc in pieces}
+        # An entry piece is guarded and seeded even where it is not live on
+        # this page (e.g. certified blocked in this spelling).
+        for ci in sorted({k[0] for k in ekeys}):
+            for pc in door_pieces(page, [(ci, geometry[ci])]):
+                if pc.key in ekeys and pc.key not in have:
+                    pieces.append(pc)
+                    have.add(pc.key)
+        entry_idx = [int(v) for v in entries.get(node, []) if int(v) >= 0]
+        entry_pts = page.valid[entry_idx] if entry_idx else np.zeros((0, 3))
+        ev = next((v for v in entry_idx if is_comp and int(page.comp[v]) == int(comp)), None)
+        w = wall_for_region(cfg, page, pieces, entry_pts, entry_keys=ekeys,
+                            entry_vertex=ev, verbose=verbose)
+        certificate.append(dict(page=page_name(signs), comp=cid, **w["wall"]))
+        state.setdefault("polys", []).append((page_name(signs), cid, w["poly"]))
         if not w["ok"]:
             st["seconds"] = round(time.time() - t0, 1)
-            return FloodResult3(INCONCLUSIVE, f"{page_name(signs)}/{comp}: {w['reason']}",
+            return FloodResult3(INCONCLUSIVE, f"{page_name(signs)}/{cid}: {w['reason']}",
                                 regions, certificate, crossings, stats=st)
+        inside_keys = {k for k, v in w["piece_inside"].items() if v}
+        walled.setdefault(signs, set()).update(inside_keys)
 
-        for (ci, c), ins in zip(live, w["live_inside"]):
-            if not ins:
-                crossings.append(dict(page=page_name(signs), comp=comp, curve=ci,
-                                      joint=f"q{c.joint}", followed=False,
+        for pc in pieces:
+            info = dict(page=page_name(signs), comp=cid, curve=pc.curve, piece=pc.piece,
+                        joint=f"q{pc.joint}")
+            if pc.key not in inside_keys:
+                crossings.append(dict(info, followed=False,
                                       why="outside the verified wall: unreachable"))
                 continue
-            # At the door posture the robot can also move along the fiber
-            # (the gimbal null motion) before it leaves, so it may depart in
-            # ANY direction -- onto the partner page, or back onto THIS page
-            # into a different component that touches the curve. Both are
-            # followed (2-D does the same: assign_pages lists the door's own
-            # page). Whether the fiber motion fits the joint limits is not
-            # decided here; following too much only costs walls.
-            partner = flip(signs, c.sign_index)
-            mine = [n for n, k in enumerate(ds.key) if k[0] == ci]
-            for tsigns in (partner, signs):
-                tp = get_page(tsigns)
-                targets: dict = {}
-                for n in mine:
-                    vb = tp.inject_index[n]
-                    if vb < 0:
-                        continue
-                    m = int(tp.comp[vb])
-                    if tsigns == signs and m == comp:
-                        continue
-                    va = page.inject_index[ds.mirror[n]]
-                    # Prefer a straight-through pair whose near end is in
-                    # THIS region: the witness can use exactly that crossing.
-                    usable = (tsigns == partner and va >= 0
-                              and int(page.comp[va]) == comp)
-                    if m not in targets or (usable and not targets[m][2]):
-                        targets[m] = (int(ds.mirror[n]), n, usable)
-                crossings.append(dict(page=page_name(signs), comp=comp, curve=ci,
-                                      joint=f"q{c.joint}", followed=True,
-                                      to_page=page_name(tsigns),
-                                      to_components=sorted(targets)))
-                if verbose:
-                    print(f"[flood3] live q{c.joint} curve INSIDE the wall -> "
-                          f"{page_name(tsigns)} components {sorted(targets) or 'none'}")
-                for m, (n_from, n_to, usable) in targets.items():
-                    nxt = (tsigns, m)
-                    entries.setdefault(nxt, [])
-                    vb = int(tp.inject_index[n_to])
-                    if vb not in entries[nxt]:
+            partner = flip(signs, pc.sign_index)
+            if pc.key in walled.get(partner, set()):
+                crossings.append(dict(info, followed=True, to_page=page_name(partner),
+                                      to_components=[],
+                                      why="already inside a verified wall on the partner page"))
+                continue
+            tp = get_page(partner)
+            # Which partner components to start from is a HINT: the injected
+            # crossing endpoints of this piece, and roadmap vertices inside its
+            # tube. The partner wall must enclose the whole piece anyway.
+            targets: dict = {}
+            for n, key in enumerate(sample_piece):
+                if key != pc.key:
+                    continue
+                vb = tp.inject_index[n]
+                if vb < 0:
+                    continue
+                m = int(tp.comp[vb])
+                va = page.inject_index[ds.mirror[n]]
+                # Prefer a straight-through pair whose near end is in THIS
+                # region: the witness can use exactly that crossing.
+                usable = bool(is_comp and va >= 0 and int(page.comp[va]) == int(comp))
+                if m not in targets or (usable and not targets[m][2]):
+                    targets[m] = (int(ds.mirror[n]), n, usable)
+            for j in piece_vertices(tp, pc):
+                targets.setdefault(int(tp.comp[j]), (None, int(j), False))
+            crossings.append(dict(info, followed=True, to_page=page_name(partner),
+                                  to_components=sorted(targets)))
+            if verbose:
+                print(f"[flood3] live q{pc.joint} piece {pc.key} INSIDE the wall -> "
+                      f"{page_name(partner)} components {sorted(targets) or 'none (door only)'}")
+            if not targets:
+                targets = {("door", pc.curve, pc.piece): (None, None, False)}
+            for m, (n_from, n_to, usable) in targets.items():
+                nxt = (partner, m)
+                if nxt in visited:
+                    continue
+                node_entry.setdefault(nxt, set()).add(pc.key)
+                entries.setdefault(nxt, [])
+                if n_to is not None:
+                    # an injected state (n_from given) or a tube vertex
+                    vb = int(tp.inject_index[n_to]) if n_from is not None else int(n_to)
+                    if vb >= 0 and vb not in entries[nxt]:
                         entries[nxt].append(vb)
-                    if nxt not in parent:
-                        parent[nxt] = (node, n_from, n_to) if usable else (node, None, n_to)
-                    if nxt not in visited:
-                        queue.append(nxt)
+                if nxt not in parent:
+                    parent[nxt] = ((node, n_from, n_to) if usable
+                                   else (node, None, n_to if n_from is not None else None))
+                if nxt not in queue:
+                    queue.append(nxt)
 
     st["seconds"] = round(time.time() - t0, 1)
     st["pages_built"] = [page_name(s) for s in pages]
+    n_walls = sum(1 for r in regions if "skipped" not in r)
     return FloodResult3(INFEASIBLE, f"queue empty: {len(certificate)} verified wall(s) over "
-                        f"{len({r['page'] for r in regions})} page(s), goal never reached",
+                        f"{len({r['page'] for r in regions if 'skipped' not in r})} page(s), "
+                        f"goal never reached, goal slab outside every wall",
                         regions, certificate, crossings,
                         doors={page_name(s): [dict(curve=ci, live=not c.certified_blocked,
                                                     reason=c.reason)
                                                for (s2, ci), c in certified.items() if s2 == s]
                                for s in pages},
-                        stats=st, polys=list(state.get("polys", [])))
+                        stats=dict(st, walls=n_walls), polys=list(state.get("polys", [])))
 
 
 # --------------------------------------------------------------------------

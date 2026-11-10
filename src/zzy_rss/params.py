@@ -166,6 +166,15 @@ class Page3Params:
     start_u: float = 0.0
     start_v: float = 0.5
     goal_tol: float = 0.02
+    # Clearance the wall must keep from the goal slab, in u (findings 47):
+    # the verdict needs every wall vertex at u < 1 - goal_tol - goal_margin.
+    # 0 reproduces the old test. Separate from goal_tol, which defines the
+    # task; this defines the check.
+    goal_margin: float = 0.0
+    # Experimental (findings 47, item 8): states on u = 1 - goal_tol/2 (v and
+    # theta uniform) injected into the roadmap so the goal slab is found
+    # without relying on random samples landing in it. 0 = off.
+    goal_inject: int = 0
     # Training budget per wall, as run_proof's n_train_max / n_invalid_max.
     n_train_max: int = 900
     n_invalid_max: int = 300
@@ -619,6 +628,47 @@ class FloodParams:
     # Anchor the per-page labels on the seed region (flood) or on the goal
     # component across all pages (the strictly IJRR-shaped variant).
     anchor: str = "seed"   # "seed" | "goal"
+
+    # ---- the goal as a GEOMETRIC set (findings 47) -----------------------
+    # The goal is the whole band y >= goal_y - goal_y_tol at every theta,
+    # valid or not. It is one connected piece per page, so a wall that keeps
+    # a margin from all of it, with one probe outside, has the whole band
+    # outside -- including goal components the roadmap never sampled. That
+    # is the advisor's "one manifold + goal distance" check, and it is what
+    # makes "every goal component was sampled" an efficiency matter instead
+    # of a soundness one. False reproduces the old, label-only behaviour.
+    goal_check: bool = True
+    # Extra clearance between the wall and the goal band, in y. 0 means
+    # "the wall may not reach the band" (strict inequality). Kept apart from
+    # goal_y_tol: the tolerance defines the TASK, the margin the CHECK.
+    goal_margin: float = 0.0
+    # Rest-class samples spread uniformly along theta ON the band's inner
+    # edge y = goal_y - goal_y_tol, valid or not. They only steer the SVM
+    # (the exact test is the check above); without them the wall is free to
+    # close past y = 1 wherever no goal component was sampled.
+    goal_line_samples: int = 120
+    # Experimental (findings 47, item 8): states on y = goal_y - goal_y_tol/2
+    # injected into the ROADMAP, so the goal band is found without relying on
+    # random samples landing in it. 0 = off. Not on y = goal_y itself:
+    # exact edge states in the roadmap stop the wall closing against the
+    # virtual band (invariant 18).
+    goal_inject: int = 0
+    # Experimental (item 9): how close to goal_y a witness path must end.
+    # None = goal_y_tol (the old behaviour). 0.0 demands the exact end.
+    witness_goal_tol: float | None = None
+
+    # ---- doors in the wall's training set (findings 47) ------------------
+    # "exclude_first": every live door starts in the REST class -- the wall
+    # tries to keep it out, since an excluded door is a page the flood never
+    # has to visit. A door moves to the SEED class (and is followed) only on
+    # evidence: a verified in-page path from the entry to it, or, after the
+    # wall failed, roadmap connectivity to the region (door_promotion_rounds
+    # retries). Distance to the region's samples decides nothing: a door
+    # next to the start can be sealed off by an obstacle.
+    # "legacy": the old proximity rule (a door near the region's samples is
+    # seed, any other rest), kept to reproduce earlier numbers.
+    door_policy: str = "exclude_first"
+    door_promotion_rounds: int = 1
 
 
 @dataclass(frozen=True)

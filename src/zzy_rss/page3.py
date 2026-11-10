@@ -105,6 +105,15 @@ class Page3:
         for i in np.flatnonzero(ok_inj):
             self.inject_index[i] = len(head)
             head.append(inject[i])
+        # Experimental (findings 47, item 8): goal states as vertices, a hair
+        # inside the goal slab (not on u = 1: invariant 18), so the slab is
+        # found without relying on random samples landing in it.
+        n_goal = int(getattr(p3, "goal_inject", 0))
+        if n_goal > 0:
+            grng = np.random.default_rng(p3.rng_seed + 7)
+            g = grng.uniform(self.lo, self.hi, size=(n_goal, 3))
+            g[:, 0] = 1.0 - 0.5 * float(p3.goal_tol)
+            head.extend(list(g[self.valid_many(g)]))
         rng = np.random.default_rng(p3.rng_seed)
         n = int(n_samples or p3.n_samples)
         pts = rng.uniform(self.lo, self.hi, size=(n, 3))
@@ -248,8 +257,8 @@ class Page3:
         the start page, whichever region the flood is on otherwise."""
         return self._focus
 
-    def set_focus(self, comp: int) -> None:
-        self._focus = int(comp)
+    def set_focus(self, comp: int | None) -> None:
+        self._focus = None if comp is None else int(comp)
 
     def path(self, a: int, targets: np.ndarray) -> list | None:
         """Vertex indices from vertex a to the first vertex with targets[j]
@@ -274,13 +283,19 @@ class Page3:
     def reaches_goal(self) -> bool:
         return bool(np.any(self.goal_mask() & (self.comp == self.start_comp)))
 
+    def focus_set(self) -> set:
+        """The components the current wall must enclose: the focus (None for
+        a region entered through a door that touches no sampled component)
+        and the door pockets."""
+        base = {int(self.start_comp)} if self.start_comp is not None else set()
+        return base | set(int(c) for c in self.inside)
+
     def seed_points(self) -> np.ndarray:
-        return self.valid[np.isin(self.comp, sorted({self.start_comp} | self.inside))]
+        return self.valid[np.isin(self.comp, sorted(self.focus_set()))]
 
     def rest_points(self) -> np.ndarray:
         """IJRR's split (invariant 15): the components that reach the goal."""
-        goal_comps = (set(int(c) for c in self.comp[self.goal_mask()])
-                      - {self.start_comp} - self.inside)
+        goal_comps = set(int(c) for c in self.comp[self.goal_mask()]) - self.focus_set()
         return self.valid[np.isin(self.comp, sorted(goal_comps))]
 
     def label_point(self, x: np.ndarray) -> int:
@@ -598,11 +613,15 @@ def face_anchors(page: Page3, rng) -> tuple:
     return (np.asarray(seed).reshape(-1, 3), np.asarray(rest).reshape(-1, 3))
 
 
-def robot_oracle3(cfg: Config, page: Page3, live_curves: list) -> FacetOracle:
+def robot_oracle3(cfg: Config, page: Page3, live_curves: list,
+                  tubes: list | None = None) -> FacetOracle:
     """Algorithm 3's view of the 3-D page. Penetration depth by the capped
     march toward the nearest VALID roadmap samples of either class (closer
-    valid points only tighten the bound)."""
-    tubes = in_box_tubes(page, live_curves) if live_curves else []
+    valid points only tighten the bound). `tubes`, when given, is the guard
+    (one SigmaTube per door piece); otherwise the on-patch parts of
+    `live_curves`."""
+    if tubes is None:
+        tubes = in_box_tubes(page, live_curves) if live_curves else []
     guard = tube_guard(tubes) if tubes else (lambda v: None)
     valid_all = page.valid
     wp = cfg.wall
@@ -636,9 +655,34 @@ class _PageLabeller:
         return self.page.label_point(np.asarray(m, dtype=float))
 
 
+def goal_feedback3(poly: Polytope, u_limit: float, u_goal: float, lo: np.ndarray,
+                   hi: np.ndarray, n_max: int = 60) -> np.ndarray:
+    """Wall vertices at u >= u_limit, projected onto the goal slab's inner
+    face (u_goal, v, theta), clipped to the patch: REST-class feedback for the
+    goal-distance check (findings 47, item 4). They are goal states (or
+    obstacle states on the goal face), so the label is not a guess."""
+    v = np.asarray(poly.vertices, dtype=float)
+    hot = v[v[:, 0] >= u_limit].copy()
+    if not len(hot):
+        return np.zeros((0, 3))
+    hot[:, 0] = u_goal
+    hot[:, 1:] = np.clip(hot[:, 1:], lo[1:], hi[1:])
+    hot = np.unique(np.round(hot, 6), axis=0)
+    if len(hot) > n_max:
+        hot = hot[np.linspace(0, len(hot) - 1, n_max).astype(int)]
+    return hot
+
+
 def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
-               inv: np.ndarray, oracle: FacetOracle, verbose: bool = True) -> tuple:
-    """IJRR Algorithm 4 on the 3-D page. Returns (poly, report, wall, log)."""
+               inv: np.ndarray, oracle: FacetOracle, verbose: bool = True,
+               goal_limit: float | None = None,
+               goal_feed: float | None = None) -> tuple:
+    """IJRR Algorithm 4 on the 3-D page. Returns (poly, report, wall, log).
+
+    With goal_limit, a wall whose every triangle passed but whose u reaches
+    goal_limit is not accepted: its offending vertices, projected onto the
+    goal face (goal_feed), go into the rest class and the wall is retrained
+    (findings 47). The caller still re-checks u_max on what comes back."""
     p3 = page.p3
     rng = np.random.default_rng(p3.rng_seed + 2)
     scale = page.scale
@@ -694,6 +738,27 @@ def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
             print(f"[stage3-3d] alg4 iter {it}: gamma {wall.gamma:.2f}, "
                   f"{len(rec.simplices)} triangles, facets {rep.n_passed}/{rep.n_facets} "
                   f"({time.time() - t0:.1f} s)")
+        if rep.ok and goal_limit is not None:
+            u_hi = float(poly.vertices[:, 0].max())
+            if u_hi >= goal_limit:
+                feed_g = goal_feedback3(poly, goal_limit,
+                                        goal_feed if goal_feed is not None else goal_limit,
+                                        page.lo, page.hi)
+                entry["goal_feedback"] = int(len(feed_g))
+                entry["u_max"] = round(u_hi, 4)
+                if verbose:
+                    print(f"[stage3-3d] alg4 iter {it}: wall reaches u={u_hi:.4f} >= "
+                          f"{goal_limit:.4f} -> {len(feed_g)} goal-face point(s) into the "
+                          f"rest class, retrain")
+                if len(feed_g):
+                    rest = np.vstack([rest, feed_g])
+                    wall = train_wall(cfg, seed, rest, scale=scale,
+                                      gamma_start=(None if p3.gamma_warm is None
+                                                   else p3.gamma_warm * wall.gamma))
+                    continue
+                # nothing to feed: report the wall as it is; the caller's
+                # u_max check refuses it
+                return poly, rep, checked_wall, log
         if rep.ok:
             return poly, rep, checked_wall, log
         # IJRR Algorithm 4: a facet that fails because the free space is
@@ -731,53 +796,204 @@ def find_wall3(cfg: Config, page: Page3, seed: np.ndarray, rest: np.ndarray,
     return poly, rep, checked_wall, log
 
 
-def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
-                verbose: bool = True) -> dict:
+@dataclass
+class DoorPiece:
+    """One ON-PATCH piece of a door curve -- the unit the wall reasons about.
+
+    A curve can leave the patch and come back, so it may have several
+    pieces. Each is guarded on its own (its tube may not touch a triangle),
+    hence lies wholly on one side of a verified wall, and needs its OWN probe:
+    probing only the first piece of a curve would miss a second piece inside
+    the wall (findings 47). Indices are page-independent -- the curves come
+    from the patch geometry, not from the sign branch -- so (curve, piece)
+    names the same door on both pages it joins."""
+
+    curve: int
+    piece: int
+    joint: int
+    sign_index: int
+    polyline: np.ndarray
+    radii: np.ndarray
+
+    @property
+    def key(self) -> tuple:
+        return (int(self.curve), int(self.piece))
+
+    def probe(self) -> np.ndarray:
+        return np.asarray(self.polyline[len(self.polyline) // 2], dtype=float)
+
+    def tube(self):
+        from .facets import SigmaTube
+        return SigmaTube(polyline=np.asarray(self.polyline, dtype=float),
+                         radii=np.asarray(self.radii, dtype=float),
+                         kind=f"q{self.joint} door piece")
+
+
+def door_pieces(page: Page3, curves) -> list:
+    """The on-patch pieces of `curves`, an iterable of (index, DoorCurve)."""
+    out = []
+    for ci, c in curves:
+        polys = clip_to_box(np.asarray(c.tube.polyline, dtype=float), page.lo, page.hi)
+        for j, poly in enumerate(polys):
+            out.append(DoorPiece(curve=int(ci), piece=j, joint=int(c.joint),
+                                 sign_index=int(c.sign_index), polyline=poly,
+                                 radii=np.asarray(c.tube.radii, dtype=float)))
+    return out
+
+
+def piece_samples(page: Page3, pc: DoorPiece) -> np.ndarray:
+    """Training points covering a WHOLE piece's tube: the polyline and its
+    offsets by one tube radius along each axis, kept on the patch. The same
+    set serves the seed class (a door the wall must enclose) and the rest
+    class (a door it tries to keep out); a piece is never split between the
+    classes, which would put the wall across its own tube."""
+    base = np.asarray(pc.polyline, dtype=float)
+    pts = [base]
+    for ax in range(3):
+        for sgn in (-1.0, 1.0):
+            off = np.zeros(3)
+            off[ax] = sgn * pc.radii[ax]
+            pts.append(base + off)
+    pts = np.vstack(pts)
+    keep = np.all((pts[:, :2] >= page.lo[:2]) & (pts[:, :2] <= page.hi[:2]), axis=1)
+    return pts[keep]
+
+
+def piece_vertices(page: Page3, pc: DoorPiece) -> np.ndarray:
+    """Roadmap vertices inside the piece's tube -- a TRAINING / EVIDENCE hint.
+    No verdict rests on this list: sampling can miss a component that
+    touches the door between vertices."""
+    if not len(page.valid):
+        return np.zeros(0, dtype=int)
+    r = np.asarray(pc.radii, dtype=float)
+    tree = cKDTree(page.valid / r)
+    hits = set()
+    for js in tree.query_ball_point(np.asarray(pc.polyline, dtype=float) / r, 1.0):
+        hits.update(int(j) for j in js)
+    return np.array(sorted(hits), dtype=int)
+
+
+def piece_near_vertices(page: Page3, pc: DoorPiece, comps: set, k: int = 6,
+                        reach: float = 0.25) -> list:
+    """Up to k vertices of `comps` nearest to the piece (scaled distance <=
+    reach), nearest first -- candidate stepping stones for the evidence path.
+    A hint: nothing is concluded from proximity itself."""
+    if not len(page.valid) or not comps:
+        return []
+    mask = np.isin(page.comp, sorted(comps))
+    if not mask.any():
+        return []
+    idx = np.flatnonzero(mask)
+    tree = cKDTree(np.asarray(pc.polyline, dtype=float) * page.scale)
+    d, _ = tree.query(page.valid[idx] * page.scale, k=1)
+    order = np.argsort(d)
+    return [int(idx[i]) for i in order[:k] if d[i] <= reach]
+
+
+def piece_reach_evidence(page: Page3, entry_vertex: int | None, pc: DoorPiece,
+                         comps: set) -> bool:
+    """A VERIFIED path from `entry_vertex` to a state INSIDE the piece's tube:
+    the roadmap path to a nearby vertex of the region, then one straight step
+    to a point half a tube radius from the door, all densified and checked by
+    verify_witness (findings 47).
+
+    True promotes the door to the seed class: a reachable state inside the
+    tube means the wall cannot keep the tube outside without cutting free
+    space, so trying would only burn a wall. False is not a proof of
+    anything -- the door stays in the rest class, where the wall either
+    excludes it (a proof) or fails (and the fallback promotes it).
+
+    The step stops short of the door point on purpose: its IK spelling is an
+    atan2(0, 0) artifact (invariant 42)."""
+    if entry_vertex is None:
+        return False
+    poly = np.asarray(pc.polyline, dtype=float)
+    r_min = float(np.min(pc.radii * page.scale))
+    for v in piece_near_vertices(page, pc, comps):
+        x0 = page.valid[v]
+        j = int(np.argmin(np.linalg.norm((poly - x0) * page.scale, axis=1)))
+        p = poly[j]
+        gap = float(np.linalg.norm((x0 - p) * page.scale))
+        if gap <= 1e-9:
+            continue
+        x = p + min(1.0, 0.5 * r_min / gap) * (x0 - p)
+        if not page.valid_task(x):
+            continue
+        mask = np.zeros(len(page.valid), dtype=bool)
+        mask[v] = True
+        idx = page.path(int(entry_vertex), mask) if v != entry_vertex else [v]
+        if idx is None:
+            continue
+        way = np.vstack([page.valid[idx], x])
+        q, uv = densify3(page.arm, page.surf, page.cfg.witness, page.scale, way,
+                         lambda _i, _t: page.signs)
+        if q is None:
+            continue
+        path = WitnessPath(legs=[Leg(kind=LEG_PAGE, page=page.signs, q=q, y=uv,
+                                     waypoints=way)])
+        if verify_witness(page.cfg, page.arm, page.surf, page.scene, path).ok:
+            return True
+    return False
+
+
+def region_wall(cfg: Config, page: Page3, pieces: list, entries: np.ndarray,
+                seed_keys=(), verbose: bool = True,
+                policy: str = "exclude_first") -> dict:
     """Build and check the wall around the page's FOCUS component.
 
     The training set is the d = 3 recipe of findings 42: the focus
     component (seed) vs the goal components (rest), eta-separated; face
-    anchors; goal-face samples; the outside ring; the live door tubes (a
-    curve near the region goes in the seed class, others in the rest).
+    anchors; goal-face samples; the outside ring. Door pieces (findings 47):
+    a piece in `seed_keys` (an entry door, or one promoted on evidence) goes
+    WHOLE into the seed class; every other piece WHOLE into the rest class.
+    policy "legacy" reproduces the old proximity rule instead.
 
     ok means a usable certificate for THIS region: closed, every triangle in
-    C_obs, every entry state inside, and the whole goal slab outside (the
-    wall's u-range ends before it). `live_inside[i]` says whether live
-    curve i lies inside -- the guard keeps every tube wholly on one side, so
-    one point decides.
+    C_obs and off every door tube, every entry state and every seed-side
+    piece inside, and the whole goal slab outside (every vertex at
+    u < 1 - goal_tol - goal_margin; u is linear on a triangle, so this is
+    exact). `piece_inside[key]` says on which side each piece lies -- the
+    guard keeps every tube wholly on one side, so its probe decides.
     """
     p3 = page.p3
     st: dict = {}
     rng = np.random.default_rng(p3.rng_seed + 3)
-    # Door pockets (findings 45). A live door curve next to the region goes
-    # into the seed class, so its tube must end up INSIDE the wall. Any other
-    # region reaching into that tube -- on a q6 door, the sector between the
-    # q7 band and the q5 sliver that meets the start region only at the door
-    # point -- must then be inside too: the wall cannot pass between the tube
-    # and states that are valid right up to it. Enclosing a non-goal region
-    # only strengthens the certificate (invariant 15); a goal region is never
-    # added, so a pocket that reaches the goal makes the wall fail instead.
+    seed_keys = set(seed_keys)
+    entries = np.asarray(entries, dtype=float).reshape(-1, 3)
     page.inside = set()
-    region0 = page.valid[page.comp == page.start_comp]
-    goal_comps = set(int(c) for c in page.comp[page.goal_mask()]) - {page.start_comp}
-    if len(region0) and live:
+    region0 = (page.valid[page.comp == page.start_comp] if page.start_comp is not None
+               else np.zeros((0, 3)))
+    goal_comps = set(int(c) for c in page.comp[page.goal_mask()]) - page.focus_set()
+    if policy == "legacy" and len(region0):
+        # The old rule: a piece near the region's samples is seed side.
         tree0 = cKDTree(region0 * page.scale)
+        for pc in pieces:
+            r = float(np.max(pc.radii * page.scale))
+            if float(tree0.query(pc.polyline * page.scale, k=1)[0].min()) <= max(0.03, r):
+                seed_keys.add(pc.key)
+    seed_pieces = [pc for pc in pieces if pc.key in seed_keys]
+    rest_pieces = [pc for pc in pieces if pc.key not in seed_keys]
+    # Door pockets (findings 45). A seed-side piece must end up INSIDE the
+    # wall. Any other region reaching into its tube -- on a q6 door, the
+    # sector between the q7 band and the q5 sliver that meets the start
+    # region only at the door point -- must then be inside too: the wall
+    # cannot pass between the tube and states that are valid right up to it.
+    # Enclosing a non-goal region only strengthens the certificate (invariant
+    # 15); a goal region is never added, so a pocket that reaches the goal
+    # makes the wall fail instead. (Training only: the proof is the probe.)
+    if seed_pieces and len(page.valid):
         vtree = cKDTree(page.valid * page.scale)
-        for c in live:
-            pieces = clip_to_box(np.asarray(c.tube.polyline, dtype=float), page.lo, page.hi)
-            if not pieces:
-                continue
-            P = np.vstack(pieces) * page.scale
-            r = float(np.max(np.asarray(c.tube.radii) * page.scale))
-            if float(tree0.query(P, k=1)[0].min()) > max(0.03, r):
-                continue                         # a rest-side door: not ours
+        for pc in seed_pieces:
+            r = float(np.max(pc.radii * page.scale))
             reach = max(0.08, 2.0 * r)
-            for js in vtree.query_ball_point(P, reach):
+            for js in vtree.query_ball_point(pc.polyline * page.scale, reach):
                 for j in js:
                     cj = int(page.comp[j])
-                    if cj != page.start_comp and cj not in goal_comps:
+                    if cj not in page.focus_set() and cj not in goal_comps:
                         page.inside.add(cj)
     st["door_pockets"] = len(page.inside)
+    st["door_pieces"] = dict(seed=[pc.key for pc in seed_pieces],
+                             rest=[pc.key for pc in rest_pieces])
     region = page.seed_points()
     seed = region
     if len(seed) > p3.n_train_max:
@@ -786,7 +1002,7 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
     rest0 = page.rest_points()
     if len(rest0) > p3.n_train_max:
         rest0 = rest0[rng.choice(len(rest0), p3.n_train_max, replace=False)]
-    if cfg.wall.eta_separation > 0.0:
+    if cfg.wall.eta_separation > 0.0 and len(seed):
         seed, rest0, n_cut = eta_separate(seed, rest0, cfg.wall.eta_separation, page.scale)
         st["eta_cut"] = int(n_cut)
     a_seed, a_rest = face_anchors(page, rng)
@@ -797,20 +1013,23 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
     gface[:, 0] = 1.0 - p3.goal_tol
     rest = np.vstack([rest0, a_rest, gface,
                       virtual_ring3(cfg, page, int(p3.ring_per_face), rng)])
-    s_extra, r_extra = tube_samples(live, region, page.scale, 0.03, page.lo, page.hi)
-    if len(s_extra):
-        seed = np.vstack([seed, s_extra])
-    if len(r_extra):
-        rest = np.vstack([rest, r_extra])
+    for pc in seed_pieces:
+        seed = np.vstack([seed, piece_samples(page, pc)])
+    for pc in rest_pieces:
+        rest = np.vstack([rest, piece_samples(page, pc)])
     inv = page.invalid
     if len(inv) > p3.n_invalid_max:
         inv = inv[rng.choice(len(inv), p3.n_invalid_max, replace=False)]
 
-    oracle = robot_oracle3(cfg, page, live)
-    label = f"{''.join('+' if s > 0 else '-' for s in page.signs)}/{page.start_comp}"
+    oracle = robot_oracle3(cfg, page, [], tubes=[pc.tube() for pc in pieces])
+    label = (f"{''.join('+' if s > 0 else '-' for s in page.signs)}/"
+             f"{page.start_comp if page.start_comp is not None else 'door'}")
+    goal_limit = 1.0 - float(p3.goal_tol) - float(getattr(p3, "goal_margin", 0.0))
     try:
         with _budget.wall_attempt(cfg.budget, label):
-            poly, rep, wall, log = find_wall3(cfg, page, seed, rest, inv, oracle, verbose)
+            poly, rep, wall, log = find_wall3(cfg, page, seed, rest, inv, oracle, verbose,
+                                              goal_limit=goal_limit,
+                                              goal_feed=1.0 - float(p3.goal_tol))
     except _budget.BudgetExceeded as e:
         if e.scope != "wall":
             raise
@@ -821,34 +1040,105 @@ def region_wall(cfg: Config, page: Page3, live: list, entries: np.ndarray,
         st["budget_stop"] = e.reason
         info = dict(closed=False, facets="0/0", ok=False,
                     gamma=None if e.gamma is None else round(float(e.gamma), 2))
-        return dict(ok=False, poly=Polytope(), wall=info, stats=st, live_inside=[],
+        return dict(ok=False, poly=Polytope(), wall=info, stats=st, piece_inside={},
                     reason=e.reason)
     st["alg4"] = log
     info = dict(closed=poly.closed, facets=f"{rep.n_passed}/{rep.n_facets}",
-                gamma=round(float(wall.gamma), 2), ok=bool(rep.ok and poly.closed))
-    out = dict(ok=False, poly=poly, wall=info, stats=st, live_inside=[], reason="")
+                gamma=round(float(wall.gamma), 2), ok=bool(rep.ok and poly.closed),
+                goal_limit=round(goal_limit, 4))
+    out = dict(ok=False, poly=poly, wall=info, stats=st, piece_inside={}, reason="")
     if not info["ok"]:
         why = rep.failures[0][1] if rep.failures else (poly.note or "not closed")
         out["reason"] = f"no verified wall ({info['facets']} facets; {why})"
         return out
     verts, simp = poly.vertices * page.scale, poly.simplices
-    if not np.all(inside(np.asarray(entries) * page.scale, verts, simp, 2)):
+    if len(entries) and not np.all(inside(entries * page.scale, verts, simp, 2)):
+        info["ok"] = False
         out["reason"] = "verified wall does not enclose every entry state"
         return out
     u_max = float(poly.vertices[:, 0].max())
     st["wall_u_max"] = u_max
     info["u_max"] = round(u_max, 4)
-    if u_max >= 1.0 - p3.goal_tol:
-        out["reason"] = (f"wall reaches u={u_max:.4f}: the goal slab is not provably "
-                         f"outside")
+    if u_max >= goal_limit:
+        info["ok"] = False
+        out["reason"] = (f"wall reaches u={u_max:.4f} >= {goal_limit:.4f}: the goal slab "
+                         f"is not provably outside")
         return out
-    def _probe(c):
-        pieces = clip_to_box(np.asarray(c.tube.polyline, dtype=float), page.lo, page.hi)
-        return pieces[0][:1] if pieces else c.pts[:1]
-    out["live_inside"] = [bool(inside(_probe(c) * page.scale, verts, simp, 2)[0])
-                          for c in live]
+    side = {pc.key: bool(inside(pc.probe()[None, :] * page.scale, verts, simp, 2)[0])
+            for pc in pieces}
+    bad = [k for k in seed_keys if k in side and not side[k]]
+    if bad:
+        info["ok"] = False
+        out["reason"] = (f"door piece(s) {bad} that must be inside the wall are outside")
+        return out
+    out["piece_inside"] = side
     out["ok"] = True
     return out
+
+
+def wall_for_region(cfg: Config, page: Page3, pieces: list, entries: np.ndarray,
+                    entry_keys=(), entry_vertex: int | None = None,
+                    verbose: bool = True) -> dict:
+    """region_wall with the door policy of findings 47 around it.
+
+    Every live door piece starts in the REST class: the wall tries to keep
+    it out, since an excluded door is a page the flood never visits. A piece
+    moves to the SEED class only on evidence --
+
+      1. a VERIFIED in-page path from the entry to a vertex in its tube
+         (checked before the first wall: a reachable door cannot be excluded,
+         so trying would only burn a wall), or
+      2. the wall failed with it excluded, and the roadmap connects the
+         region to its tube (door_promotion_rounds retries).
+
+    Distance to the region decides nothing: a door beside the start can be
+    sealed off by an obstacle. Promoting a door that is in fact unreachable
+    costs walls, never soundness. Entry pieces are always seed side.
+    """
+    fp = cfg.flood
+    policy = getattr(fp, "door_policy", "exclude_first")
+    rounds = int(getattr(fp, "door_promotion_rounds", 1))
+    seed_keys = set(entry_keys)
+    promoted: dict = {}
+    page.inside = set()          # pockets of an earlier region are not ours
+    comps = page.focus_set()
+    if policy != "legacy":
+        for pc in pieces:
+            if pc.key in seed_keys:
+                continue
+            if piece_reach_evidence(page, entry_vertex, pc, comps):
+                promoted[pc.key] = "verified path into the door tube"
+                seed_keys.add(pc.key)
+    attempts = []
+    w = None
+    for attempt in range(rounds + 1):
+        w = region_wall(cfg, page, pieces, entries, seed_keys, verbose, policy)
+        attempts.append(dict(attempt=attempt, seed=sorted(seed_keys), ok=w["ok"],
+                             facets=w["wall"].get("facets"), reason=w["reason"][:120]))
+        if w["ok"] or policy == "legacy" or attempt == rounds or "budget_stop" in w["stats"]:
+            break
+        # The fallback hint: the region's roadmap reaches next to the tube
+        # (Page3Params-free reach of the door-pocket rule), and the wall
+        # could not be built with the piece outside. Unverified -- following
+        # an unreachable door costs a wall, never soundness.
+        new = [pc for pc in pieces if pc.key not in seed_keys
+               and piece_near_vertices(page, pc, page.focus_set(), k=1,
+                                       reach=max(0.08, 2.0 * float(np.max(pc.radii * page.scale))))]
+        if not new:
+            break
+        for pc in new:
+            promoted[pc.key] = "could not be excluded (roadmap-connected)"
+            seed_keys.add(pc.key)
+        if verbose:
+            print(f"[doors-3d] wall failed with {len(new)} roadmap-connected door "
+                  f"piece(s) excluded -> promoting them to the seed class, retrying")
+    w["promoted"] = promoted
+    w["seed_keys"] = sorted(seed_keys)
+    w["wall"]["seed_doors"] = [dict(door=list(k), why=v) for k, v in promoted.items()]
+    w["wall"]["entry_doors"] = [list(k) for k in sorted(set(entry_keys))]
+    w["wall"]["attempts"] = len(attempts)
+    w["stats"]["door_attempts"] = attempts
+    return w
 
 
 # --------------------------------------------------------------------------
@@ -957,22 +1247,25 @@ def _prove3(cfg, arm, surf, scene, signs, p3, start_theta, verbose,
                   f"{d['u_range'][1]:.3f}]: {'LIVE' if d['live'] else 'discharged'} "
                   f"-- {d['reason']}")
 
-    w = region_wall(cfg, page, live, page.start[None, :], verbose=verbose)
+    pieces = door_pieces(page, enumerate(live))
+    w = wall_for_region(cfg, page, pieces, page.start[None, :], entry_keys=(),
+                        entry_vertex=0, verbose=verbose)
     st.update(w["stats"])
     st["seconds"] = round(time.time() - t0, 1)
     if not w["ok"]:
         return Result3(INCONCLUSIVE, w["reason"], st, doors, [w["wall"]], poly=w["poly"])
-    inside_live = [c for c, ins in zip(live, w["live_inside"]) if ins]
-    st["live_inside"] = [f"q{c.joint}" for c in inside_live]
+    # Every piece is probed (findings 47) -- not only each curve's first one.
+    inside_pcs = [pc for pc in pieces if w["piece_inside"].get(pc.key)]
+    st["live_inside"] = [f"q{pc.joint}#{pc.curve}.{pc.piece}" for pc in inside_pcs]
     if doors_as_exits:
         return Result3(INFEASIBLE, "on this page alone: closed wall, every triangle in "
                        "C_obs, start inside, goal slab outside"
-                       + (f"; the only exits are {len(inside_live)} live door curve(s) "
+                       + (f"; the only exits are {len(inside_pcs)} live door piece(s) "
                           f"inside the wall ({', '.join(st['live_inside'])}), i.e. page "
-                          f"changes" if inside_live else ""),
+                          f"changes" if inside_pcs else ""),
                        st, doors, [w["wall"]], poly=w["poly"])
-    if inside_live:
-        return Result3(INCONCLUSIVE, f"live q{inside_live[0].joint} door curve is INSIDE "
+    if inside_pcs:
+        return Result3(INCONCLUSIVE, f"live q{inside_pcs[0].joint} door piece is INSIDE "
                        f"the wall: following it needs the cross-page flood "
                        f"(flood3.run_flood3)", st, doors, [w["wall"]], poly=w["poly"])
     return Result3(INFEASIBLE, "closed wall, every triangle in C_obs, start inside, goal "

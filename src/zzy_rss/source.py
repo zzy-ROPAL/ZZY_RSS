@@ -108,6 +108,20 @@ def eta_separate(seed: np.ndarray, rest: np.ndarray, eta: float,
     return seed[~bad_s], rest[~bad_r], n
 
 
+def goal_states(cfg: Config) -> list:
+    """Experimental (findings 47, item 8; FloodParams.goal_inject): states a
+    hair inside the goal band, y = goal_y - goal_y_tol / 2, evenly spread in
+    theta, to be injected as roadmap vertices. Not ON y = goal_y: exact edge
+    states in the roadmap stop the wall closing against the virtual band
+    (invariant 18). Empty when goal_inject is 0 (the default)."""
+    n = int(getattr(cfg.flood, "goal_inject", 0))
+    if n <= 0:
+        return []
+    pm = cfg.pagemap
+    y = cfg.flood.goal_y - 0.5 * cfg.flood.goal_y_tol
+    return [np.array([y, th]) for th in np.linspace(pm.theta_min, pm.theta_max, n)]
+
+
 # --------------------------------------------------------------------------
 # Grid
 # --------------------------------------------------------------------------
@@ -209,6 +223,7 @@ class RoadmapSource:
         # thinned away: the start posture, then every door anchor.
         heads = [np.asarray(e, dtype=float)
                  for e in ([start_yt] if start_yt is not None else []) + list(anchors or [])]
+        heads += goal_states(cfg)
         for e, ok in zip(heads, self._valid_many(np.asarray(heads).reshape(-1, 2))):
             (pts if ok else inv).append(e)
         self.n_injected = len(pts)
@@ -564,6 +579,7 @@ def build_all_roadmaps_shared(
         pts.extend([np.asarray(e, dtype=float) for e in lst])
     if start_yt is not None:
         pts.append(np.asarray(start_yt, dtype=float))
+    pts.extend(goal_states(cfg))
     n_inject = len(pts)
     pts.extend(np.column_stack([rng.uniform(pm.y_min, pm.y_max, n),
                                 rng.uniform(pm.theta_min, pm.theta_max, n)]))

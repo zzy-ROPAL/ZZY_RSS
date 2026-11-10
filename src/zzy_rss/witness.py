@@ -550,7 +550,13 @@ def verify_witness(
                                           f"{gap:.3e} rad"))
     if goal_y is not None:
         reached = float(np.atleast_1d(path.legs[-1].y[-1])[0])
-        if reached < goal_y - cfg.flood.goal_y_tol:
+        # witness_goal_tol None = the task tolerance (old behaviour); set it
+        # smaller to demand that a FEASIBLE path really ends at goal_y
+        # (findings 47, item 9: with the default, FEASIBLE only says "ended
+        # within goal_y_tol of the end of the weld").
+        wtol = getattr(cfg.flood, "witness_goal_tol", None)
+        wtol = cfg.flood.goal_y_tol if wtol is None else float(wtol)
+        if reached < goal_y - wtol - 1e-12:
             rep.failures.append(("goal", f"path ends at y={reached:.4f}, "
                                          f"short of goal_y={goal_y}"))
 

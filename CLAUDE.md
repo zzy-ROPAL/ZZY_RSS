@@ -30,6 +30,21 @@
 > 页对称性支线在 `b9605f1` 被整体 revert,但其中的
 > **`geometry_is_page_dependent()` 守卫已在 §38e 重新加回**(`source.py`)。
 
+> ### 🆕🆕🆕🆕 2026-11-10:**目标与门作为几何对象**(§47,与 Dantam 老师讨论后的改动)
+>
+> 采样无法确认"已经找全所有目标分量",所以正确性不能依赖它。现在:
+>
+> | | 东西 | 效果 |
+> |---|---|---|
+> | **目标距离检查** | 墙的每个顶点 y < goal_y − goal_y_tol − goal_margin(3 维 u 同理),查顶点即精确;**2 维以前没有** | 整条目标带(含无效部分)在墙外 ⇒ 漏采目标分量**只影响效率** |
+> | **反馈重训** | 越线顶点投影到目标带,进"墙外"类(2 维、3 维都是) | 不再一越线就 INCONCLUSIVE |
+> | **门默认排除** | 活门先进"墙外"类;**验证过的路径**到门、或墙失败后路图连通,才提升为跟进;**距离不参与** | EXP 2 门全留活:旧规则 INCONCLUSIVE,新规则 **INFEASIBLE 120/120** |
+> | **整块门进伙伴页** | 跟进的门整块进伙伴页"墙内"类,墙必须包住它;分量列表只是提示 | 3 维两面墙场景 **4 面墙 → 2 面墙**,86 → 73 s,结论不变 |
+> | **每道门都探测** | 2 维对每道活门探测(不再按离采样点远近挑);3 维每个**片段**各自探测 | 堵住两处可能造假 INFEASIBLE 的口子 |
+>
+> 一个区域只建一道墙(第二道墙默认关)。回归:2 维 EXP 1/2、3 维 EXP 3 判定不变。
+> 测试 `python3 tests/test_goal_doors.py`(`--slow` 加跑 3 维两面墙)。
+
 > ### 🆕🆕🆕 2026-11-09(三):**3 维两面墙不可行证明**(§46)
 >
 > §45 场景 + 第二个盒子 (0.30, 0.20, 0.30) ⇒ 页 2 也被堵:**INFEASIBLE**,墙 1(`+++` 起始区域)**2552/2552**,
@@ -323,6 +338,7 @@ python3 tests/test_crossing.py                             # 门直穿:假象、
 python3 tests/test_flood3.py                               # 3 维跨页路径:直穿 + 纤维旋转、整圈不匹配被拒(§43)
 python3 tests/test_batch.py                                # 批量判定逐态等于标量判定(§44)
 python3 tests/test_budget.py                               # 预算:停止 = 失败的墙,只会 INCONCLUSIVE;升级(§44)
+python3 tests/test_goal_doors.py                           # 目标距离检查、门默认排除、门片段逐段探测(§47;--slow 加跑 3 维两面墙)
 python3 scripts/run_3d.py --obstacle zgap --samples 2000 --seed 1 --escalate   # 稀疏起步,自动升级(§44)
 python3 scripts/run_3d.py --scene 0.40,0.21,45,305 --box 0.2,0.0,0.34,0.06,0.06,0.06 \
     --start-page +++ --two-page --gamma-search gallop --alg4-iters 8 --save out/exp3_two_page.pkl   # 新 EXP 3(§45)
@@ -421,7 +437,10 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 | **三值门判定** | `certified_blocked` / `unknown` / `passable`,**只有正面证明才卸载** | `door_passable()` in `doors.py` |
 | **见证路径** | 页内段 PRM+Dijkstra,过门段 δ 扫掠,拼接成**一个**对象 | `src/zzy_rss/witness.py` |
 | **路径验证器** | FK + 限位 + 精确 clearance + 步长 + 接缝 + 端点;**无 SVM 无拓扑无分辨率** | `verify_witness()` in `witness.py` |
-| **第二道墙** | 只为排除**一道门**;`others` 必须去掉它自己 | `second_wall()` in `flood.py` |
+| **第二道墙** | 只为排除**一道门**;`others` 必须去掉它自己(§47 起默认关) | `second_wall()` in `flood.py` |
+| **目标距离检查 + 反馈** | 墙顶点 y/u 上限(精确);越线顶点投影到目标带进"墙外"类重训 | `wall_y_max()`、`goal_feedback_points()`、`find_inf_proof_region(goal_y_limit=)` in `flood.py`;`goal_feedback3()`、`find_wall3(goal_limit=)` in `page3.py` |
+| **门的类别(默认排除)** | 活门先"墙外";验证过的路径或失败后路图连通才提升;整块门进伙伴页"墙内" | `door_reach_evidence()`、`touching_regions()` in `flood.py`;`wall_for_region()`、`piece_reach_evidence()` in `page3.py` |
+| **3 维门片段** | 曲线在面片上的每一段各自守卫、各自探测;`(curve, piece)` 跨页同名 | `DoorPiece`、`door_pieces()` in `page3.py` |
 | **四个出口** | 1 墙₁ 免费 → **3 见证路径** → 2 墙₂ → 4 未知(按**代价**排序,见不变量 26) | `run_proof()` in `flood.py` |
 | **页数据来源(五问)** | `GridSource` / `RoadmapSource` 同一接口;`run_proof` 不再读格子 | `src/zzy_rss/source.py` |
 | **无网格 Stage 2** | 解析求根 + **顶点局部极小**兜底 + 顶点上的 Σ_coord/Σ_kin | `build_sigma_roadmap()` in `doors.py` |
@@ -626,6 +645,8 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 
 43. **墙内的活门要同时跟进伙伴页和本页。**(§43)门处可以转纤维从任意方向离开,
     包括回到**本页另一个分量**。只跟伙伴页会漏区域 ⇒ 可能假 INFEASIBLE。
+    **§47 起本页一侧由墙本身覆盖**:门片段被守卫、整个在本墙内,本页碰到它的分量必在本墙内,
+    不必再入队(见不变量 57);伙伴页一侧照旧跟进,而且整块门进伙伴页的"墙内"类。
 
 44. **路图边按见证标准校验。**(§43)固定页步长会跨过奇异点附近的越限薄条,
     造出不存在的连通(EXP 4:3515 → 254 顶点)。关节步长 > `step_max` 处二分;
@@ -662,6 +683,38 @@ res = run_proof(cfg, arm, weld, scene, pms, sig, seeds=[(page, k)])
 
 53. **碰到种子侧门管的非终点区域必须在墙内。**(§45)门管整个在墙内,而贴着管的有效状态
     让墙无处可走;并入种子类只让证书更强。终点分量永不并入。
+    (§47 起"种子侧"指入口门 + 有证据提升的门,不再按离区域远近判定。)
+
+54. **目标是整个几何集合,判 INFEASIBLE 要求墙离它有距离。**(§47,老师的"一个流形 + 目标距离")
+    目标 = 整条 `y ≥ goal_y − goal_y_tol`(3 维:`u ≥ 1 − goal_tol`),**有效无效都算**,每页连通的一块。
+    判据:墙的每个顶点 `y < goal_y − goal_y_tol − goal_margin`(面是直线/平面三角形,y/u 线性 ⇒ 查顶点即精确),
+    目标带在墙"y 大"的一侧 ⇒ 探测点自动在墙外 ⇒ 整条带在墙外,**包括路图从没采到的目标分量**。
+    ⇒ "每个目标分量都采到"**只影响效率,不影响正确性**。2 维以前**没有这个检查**(只靠标签)。
+    沿目标线撒的"墙外"点(`goal_line_samples`、3 维 `gface`)只是引导,判据才是把关。
+
+55. **墙离目标太近 ⇒ 反馈重训,不是直接 INCONCLUSIVE。**(§47)越线的顶点投影到目标带内边缘,
+    进"墙外"类(它们就是目标状态,标签不是猜的),在 Alg 4 循环和预算内重训。
+    `find_inf_proof_region(goal_y_limit=...)`、`find_wall3(goal_limit=...)`。
+
+56. **门默认排除,有证据才跟进;距离不参与决定。**(§47,`FloodParams.door_policy="exclude_first"`)
+    活门一开始全进"墙外"类(排除一道门 = 少走一页)。提升到"墙内"类只有两种依据:
+    ① **验证过的路径**到门(2 维:到门锚点;3 维:路图路径 + 一步走进门管,都过 `verify_witness`);
+    ② 墙建不出来时,**路图连通**到门的(只在失败后、只重试 `door_promotion_rounds` 次)。
+    门离起点再近也可能被障碍封住:EXP 2 把门都留活,按距离 ⇒ INCONCLUSIVE,按证据 ⇒ **INFEASIBLE 120/120**。
+    提升了一道其实到不了的门只多建墙,不会出错;`"legacy"` 只为复现旧数字。
+
+57. **跟进的门整块进伙伴页的"墙内"类,伙伴页的墙必须包住它(探测点验证)。**(§47)
+    伙伴页上"门碰到哪些分量"(`regions_under`、注入端点、门管内顶点)**只是提示**:
+    自由分量穿不过在 `C_obs` 里的墙,碰到门就必在墙内,采没采到都一样。
+    一道门若已在某页一面**已验证**的墙内(在该墙守卫里、探测点在内),就不再跟进到那页。
+    **3 维不再跟进回本页**:门片段整个在本墙内 ⇒ 本页碰到它的分量也在本墙内。**不变量 43 由此收窄。**
+
+58. **每一道活门(3 维:每个片段)都用探测点判断,不按采样点远近挑。**(§47)
+    2 维 `discs_in_region` 只在墙**失败**时用于为可行侧探路(那时本来就 INCONCLUSIVE)。
+    一条曲线可能出面片再回来 ⇒ 多个片段,**每个片段各自守卫、各自探测**(以前只探第一段)。
+
+59. **每个区域只建一道墙;第二道墙(exit 2)默认关闭。**(§47)门已在"墙外"类里,
+    一道墙同时排除{目标 + 门};`run_proof(use_second_wall=True)` 只为复现旧数字。
 
 23. **不要用网格连通性筛场景 —— 它会给假阳性。**(§34e,不变量 8 的现场)
     EXP 4 的局部细化在 res 41 上给出 13 个"四条全满足"的摆放,

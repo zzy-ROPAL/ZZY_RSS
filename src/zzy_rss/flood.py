@@ -60,6 +60,16 @@ class CertificateEntry:
     alg2_rounds: int
     ok: bool
     note: str = ""
+    # The goal-distance check (findings 47): the wall's largest y, and the
+    # limit it had to stay below (None = check off).
+    y_max: float | None = None
+    goal_limit: float | None = None
+    # Doors: entered through (whole disc in the seed class), promoted to the
+    # seed class on evidence, and kept in the rest class.
+    entry_doors: list = field(default_factory=list)
+    seed_doors: list = field(default_factory=list)
+    excluded_doors: list = field(default_factory=list)
+    attempts: list = field(default_factory=list)
 
 
 @dataclass
@@ -271,10 +281,123 @@ def live_discs(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
     return live, discharged
 
 
+# --------------------------------------------------------------------------
+# doors as geometric objects of the wall (findings 47)
+# --------------------------------------------------------------------------
+
+
+def same_door(a: SigmaDisc, b: SigmaDisc, tol: float = 1.0e-6) -> bool:
+    """One physical door seen from two pages. The anchor is the exact,
+    page-independent door point (the posture is the same on both pages), so
+    the anchors coincide; the discs' covering radii may not."""
+    (ay, at), (by, bt) = a.anchor, b.anchor
+    return abs(ay - by) <= tol and abs(at - bt) <= tol
+
+
+def door_key(d: SigmaDisc) -> tuple:
+    ay, at = d.anchor
+    return (round(float(ay), 6), round(float(at), 6))
+
+
+def door_disc_samples(d: SigmaDisc, n_ring: int = 16) -> np.ndarray:
+    """Training points covering a WHOLE door disc: the centre and two
+    elliptical rings (on the boundary and 1.5x outside it). Elliptical
+    because y and theta differ in units (invariant 6). Used for the seed
+    class (a door the wall must enclose) and the rest class (a door it
+    tries to exclude) alike: a disc split between the classes would put the
+    wall across its own door, which the Sigma guard then rejects."""
+    c = np.array([d.y, d.theta], dtype=float)
+    out = [c]
+    for s in (1.0, 1.5):
+        for a in np.linspace(0.0, 2.0 * np.pi, n_ring, endpoint=False):
+            out.append(c + s * np.array([d.radius * np.cos(a), d.r_theta * np.sin(a)]))
+    return np.asarray(out, dtype=float)
+
+
+def touching_regions(src, d: SigmaDisc) -> list:
+    """Components of `src` that touch door `d` -- a TRAINING HINT only.
+
+    On a roadmap: the component the injected anchor joined (regions_under)
+    plus every component with a vertex inside the disc. Sampling can miss a
+    component that touches the door between samples; that is why no proof
+    step relies on this list (findings 47): a followed door goes WHOLE into
+    the partner page's seed class, and the verified wall must enclose it, so
+    every component touching it is inside whether it was listed here or not.
+    """
+    out = set(int(k) for k in src.regions_under(d.y, d.theta, d.radius))
+    if getattr(src, "kind", "grid") == "roadmap" and len(src.valid):
+        for p, c in zip(src.valid, src.comp):
+            if d.contains(float(p[0]), float(p[1])):
+                out.add(int(c))
+    return sorted(out)
+
+
+def door_reach_evidence(cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene,
+                        signs: tuple, entry, d: SigmaDisc):
+    """A VERIFIED in-page path from `entry` to door `d`'s anchor, or None.
+
+    This is the evidence that moves a door from the rest class to the seed
+    class (door_policy "exclude_first"): a door the robot provably reaches
+    cannot be walled off, so trying to exclude it would only burn a wall.
+    None is NOT a proof of unreachability -- the PRM is probabilistically
+    complete -- and the door simply stays in the rest class, where the wall
+    either excludes it (a proof) or fails (and the fallback promotes it).
+    """
+    if entry is None:
+        return None
+    pleg = plan_in_page(cfg, arm, weld, scene, signs, entry, target_yt=d.anchor)
+    if pleg is None:
+        return None
+    rep = verify_witness(cfg, arm, weld, scene, WitnessPath(legs=[pleg]))
+    return pleg if rep.ok else None
+
+
+def goal_line_samples(cfg: Config) -> np.ndarray:
+    """Rest-class points ON the goal band's inner edge, uniform in theta,
+    valid or not (FloodParams.goal_line_samples): the whole geometric goal,
+    not just the components the roadmap happened to sample."""
+    n = int(getattr(cfg.flood, "goal_line_samples", 0))
+    if n <= 0 or not getattr(cfg.flood, "goal_check", True):
+        return np.zeros((0, 2))
+    pm = cfg.pagemap
+    th = np.linspace(pm.theta_min, pm.theta_max, n)
+    return np.column_stack([np.full(n, cfg.flood.goal_y - cfg.flood.goal_y_tol), th])
+
+
+def wall_y_max(poly: Polytope) -> float:
+    """Largest y over the wall. A d = 2 facet is a straight segment, so y is
+    linear along it and the maximum over the whole wall is attained at a
+    vertex: checking the vertices is EXACT, not a sample."""
+    ys = [float(np.max(np.asarray(lp, dtype=float)[:, 0])) for lp in poly.loops if len(lp)]
+    return max(ys) if ys else float("-inf")
+
+
+def goal_feedback_points(poly: Polytope, y_limit: float, y_goal: float,
+                         n_max: int = 24) -> np.ndarray:
+    """The goal-distance check's feedback (findings 47, item 4): every wall
+    vertex at y >= y_limit, projected onto the goal band's inner edge
+    (y_goal, theta). These go into the REST class -- they ARE goal states
+    (or obstacle states on the goal band), so labelling them is not a guess.
+    """
+    pts = []
+    for lp in poly.loops:
+        v = np.asarray(lp, dtype=float)
+        hot = v[v[:, 0] >= y_limit]
+        for th in hot[:, 1]:
+            pts.append((y_goal, float(th)))
+    if not pts:
+        return np.zeros((0, 2))
+    pts = np.unique(np.round(np.asarray(pts), 6), axis=0)
+    if len(pts) > n_max:
+        pts = pts[np.linspace(0, len(pts) - 1, n_max).astype(int)]
+    return pts
+
+
 def find_inf_proof_region(
     cfg: Config, arm: SrsArm, weld: WeldLine, scene: Scene, signs: tuple,
     seed_pts: np.ndarray, rest_pts: np.ndarray, inv_pts: np.ndarray,
     discs: list, max_iters: int = 4, verbose: bool = True, labeller=None,
+    goal_y_limit: float | None = None, goal_y_feed: float | None = None,
 ):
     """IJRR Algorithm 4: the loop that ties Algorithms 1-3 together.
 
@@ -290,6 +413,12 @@ def find_inf_proof_region(
       reconstruction not closed    -> densify, retry
       facet failed, centre valid   -> add it to the training data, retrain
       facet failed otherwise       -> shrink facets (generate-mpoints branch)
+    plus the goal-distance check (findings 47), when goal_y_limit is given:
+      every facet passed, but the wall reaches y >= goal_y_limit
+                                   -> feed the offending vertices, projected
+                                      onto the goal band (goal_y_feed), into
+                                      the REST class and retrain
+    The returned report is ok only when Algorithm 3 AND the goal check pass.
     """
     from .wall import train_wall
 
@@ -335,6 +464,24 @@ def find_inf_proof_region(
         if verbose:
             print(f"[stage3] alg4 iter {it}: facets {rep.n_passed}/{rep.n_facets} "
                   f"passed (max recursion {rep.max_recursion})")
+        if rep.ok and goal_y_limit is not None:
+            y_hi = wall_y_max(poly)
+            if y_hi >= goal_y_limit:
+                why = (f"wall reaches y={y_hi:.4f} >= {goal_y_limit:.4f}: the goal "
+                       f"band is not provably outside")
+                rep = CheckReport(False, rep.n_facets, rep.n_passed,
+                                  failures=[(-1, why)], max_recursion=rep.max_recursion)
+                feed = goal_feedback_points(
+                    poly, goal_y_limit,
+                    goal_y_feed if goal_y_feed is not None else goal_y_limit)
+                if len(feed):
+                    rest_pts = np.vstack([rest_pts, feed])
+                    wall = train_wall(cfg, seed_pts, rest_pts)
+                    tc_ok = False
+                if verbose:
+                    print(f"[stage3] alg4 iter {it}: {why} -> fed {len(feed)} goal-band "
+                          f"point(s) into the rest class, retrain (gamma={wall.gamma:.2f})")
+                continue
         if rep.ok:
             return poly, rep, wall, it, alg2_total
 
@@ -626,7 +773,7 @@ def _run_proof(
     pages: dict | None, sigma: dict, n_train_max: int = 900,
     n_invalid_max: int = 160,
     verbose: bool = True, alg4_iters: int = 4, seeds: list | None = None,
-    use_second_wall: bool = True, use_witness: bool = True,
+    use_second_wall: bool = False, use_witness: bool = True,
     start_yt: tuple | None = None, sources: dict | None = None,
 ) -> ProofResult:
     """IJRR Algorithm 4 wrapped in the page/door flood fill.
@@ -639,6 +786,23 @@ def _run_proof(
     is enough for the easy regions and not enough for the ones that graze a
     valid band, so callers that want a verdict rather than a picture should
     raise it.
+
+    What a wall must show (findings 47). For the region it is built for:
+
+      closed, every facet in C_obs, no facet touching a live door disc
+        (Algorithm 3, Sigma guard first)
+      every ENTRY inside: the start region, or -- on a page entered through
+        a door -- the WHOLE door disc (probe), so every component touching
+        the door is inside whether the roadmap saw it or not
+      the WHOLE goal band y >= goal_y - goal_y_tol outside (wall y_max below
+        it, exact at the vertices) -- not just the goal components sampled
+      every live door on the page probed: outside -> excluded, inside (or
+        undecidable) -> followed
+
+    Doors enter the training set as REST by default (door_policy
+    "exclude_first") and move to SEED only on evidence; see FloodParams.
+    use_second_wall (exit 2) is off by default: with doors already in the
+    rest class, the one wall per region does that job.
     """
     rng = np.random.default_rng(cfg.planner.rng_seed)
     # The five questions go through a SOURCE. GridSource is the behaviour that
@@ -666,6 +830,12 @@ def _run_proof(
     regions_by_page = {n: src.regions() for n, src in sources.items()}
     on_roadmap = any(getattr(s_, "kind", "grid") == "roadmap"
                      for s_ in sources.values())
+    fp = cfg.flood
+    goal_on = bool(getattr(fp, "goal_check", True))
+    goal_edge = fp.goal_y - fp.goal_y_tol
+    goal_limit = goal_edge - float(getattr(fp, "goal_margin", 0.0)) if goal_on else None
+    policy = getattr(fp, "door_policy", "exclude_first")
+    n_rounds = int(getattr(fp, "door_promotion_rounds", 1))
 
     # Seed the queue. By default: every region that touches the start of the
     # weld, on every page -- which proves the STRONGER claim that no posture
@@ -700,6 +870,18 @@ def _run_proof(
     # crossing_verified). The seed regions have no parent.
     parent: dict = {}
     entry_point: dict = {}
+    # The doors a node was entered through. Each goes WHOLE into that node's
+    # seed class, and the wall must enclose it (findings 47).
+    node_entry: dict = {}
+    # Per page: the doors a VERIFIED wall there encloses (they were in its
+    # Sigma guard, so wholly on one side, and the probe says inside). Every
+    # component touching such a door is inside that wall, so following the
+    # door onto this page again needs no new wall.
+    walled: dict = {}
+
+    def enclosed_on(page_name_: str, d: SigmaDisc) -> bool:
+        return any(same_door(d, e) for e in walled.get(page_name_, []))
+
     for n_, k_ in queue:
         if start_yt is not None:
             entry_point[(n_, k_)] = tuple(start_yt)
@@ -717,21 +899,46 @@ def _run_proof(
             q_start_cfg = r0.q if r0.ok else None
 
     while queue:
-        name, k = queue.pop(0)
-        if (name, k) in visited:
+        node = queue.pop(0)
+        if node in visited:
             continue
-        visited.add((name, k))
+        visited.add(node)
+        name, k = node
         src = sources[name]
         pm = pages.get(name) if pages else None
-        reg = next(r for r in regions_by_page[name] if r.index == k)
-        visited_list.append(asdict(reg))
+        entries = list(node_entry.get(node, []))
+        is_comp = isinstance(k, (int, np.integer))
+        if is_comp:
+            reg = next(r for r in regions_by_page[name] if r.index == k)
+            pts = src.seed_pool(k)
+            k_lab = int(k)
+        else:
+            # Entered through a door that touches no sampled component: the
+            # wall is built around the door alone. Something valid may touch
+            # it between samples -- enclosing the door encloses that too.
+            d0 = entries[0]
+            reg = Region(page=name, index=-1, n_cells=0, y_min=float(d0.y),
+                         y_max=float(d0.y), reaches_start=False, reaches_goal=False)
+            pts = np.zeros((0, 2))
+            k_lab = -1
+        visited_list.append(dict(asdict(reg), node=str(k),
+                                 entry_doors=[door_key(e) for e in entries]))
 
-        pts = src.seed_pool(k)
         if verbose:
             print(f"\n[stage4] region ({name}, {k}): {reg.n_cells} cells, "
-                  f"y in [{reg.y_min:.3f}, {reg.y_max:.3f}]")
+                  f"y in [{reg.y_min:.3f}, {reg.y_max:.3f}]"
+                  + (f", entered through {len(entries)} door(s)" if entries else ""))
 
-        if reg.reaches_goal:
+        # A door node whose every entry door is already inside a verified
+        # wall on this page adds nothing: the components touching those doors
+        # are inside that wall, and its doors were resolved there.
+        if entries and all(enclosed_on(name, e) for e in entries):
+            if verbose:
+                print(f"[stage4] region ({name}, {k}): every entry door is inside a "
+                      f"verified wall on this page already -- no new wall")
+            continue
+
+        if is_comp and reg.reaches_goal:
             # The goal is reachable ACCORDING TO THE REGION LABELS. That is a
             # chain of local guesses, not a path: every door on the route here
             # may have been followed on exit 4, i.e. without any proof that
@@ -743,11 +950,11 @@ def _run_proof(
             if verbose:
                 print(f"[stage4] goal set reached in region ({name}, {k}); "
                       f"building a witness path")
-            route, chain, node = [], [], (name, k)
-            while node is not None and len(chain) <= len(visited) + 1:
-                chain.append(node)
-                p = parent.get(node)
-                node = (p[0], p[1]) if p is not None else None
+            route, chain, cur = [], [], (name, k)
+            while cur is not None and len(chain) <= len(visited) + 1:
+                chain.append(cur)
+                p = parent.get(cur)
+                cur = (p[0], p[1]) if p is not None else None
             chain.reverse()
             for idx, (pn, pk) in enumerate(chain):
                 signs_i = sources[pn].signs
@@ -805,21 +1012,25 @@ def _run_proof(
                 witness_report=wrep.as_dict(), door_decisions=decisions,
                 second_walls=second_walls)
 
-        seed_pts = thin(pts, n_train_max, rng)
-        rest = src.rest_pool(k, cfg.wall.rest_mode)
+        # ---- the training set ------------------------------------------
+        seed_base = thin(pts, n_train_max, rng)
+        rest = src.rest_pool(k_lab, cfg.wall.rest_mode)
         rest_pts0 = thin(rest, n_train_max, rng)
         # eta-separation, roadmap only. A grid already guarantees one cell of
         # vacuum between the classes; a roadmap does not, and the kernel width
         # Algorithm 1 must reach is 1/d^2 in that gap. See eta_separate.
-        if on_roadmap and cfg.wall.eta_separation > 0.0:
+        if on_roadmap and cfg.wall.eta_separation > 0.0 and len(seed_base):
             scale = np.array([cfg.wall.scale_y, cfg.wall.scale_theta])
-            seed_pts, rest_pts0, n_cut = eta_separate(
-                seed_pts, rest_pts0, cfg.wall.eta_separation, scale)
+            seed_base, rest_pts0, n_cut = eta_separate(
+                seed_base, rest_pts0, cfg.wall.eta_separation, scale)
             if verbose and n_cut:
                 print(f"[eta] region ({name}, {k}): dropped {n_cut} point(s) "
                       f"within {cfg.wall.eta_separation} of the other class")
         ring = virtual_boundary_samples(cfg, 80)
-        rest_pts = np.vstack([rest_pts0, ring])
+        # The whole goal band, valid or not (findings 47): it steers the wall
+        # off the goal where no goal component was sampled. The exact test is
+        # the y_max check inside find_inf_proof_region.
+        rest_base = np.vstack([rest_pts0, ring, goal_line_samples(cfg)])
         inv = thin(src.obstacle_points(), n_invalid_max, rng)
         # Discharge the doors that fiber certification has proved impassable,
         # exactly as the demo's prove() does. A disc exists to stop the wall
@@ -834,68 +1045,150 @@ def _run_proof(
         if verbose and discharged:
             print(f"[stage5-fiber] {len(discharged)} disc(s) discharged on "
                   f"{name}: their doors are certified blocked")
+        # The guard covers every live door AND every entry door: the wall may
+        # cut neither, so each lies wholly on one side and one probe decides.
+        guard = list(discs) + [e for e in entries
+                               if not any(same_door(e, d) for d in discs)]
+        candidates = [d for d in discs if not any(same_door(d, e) for e in entries)]
+        entry = entry_point.get(node)
+        comps = {int(k)} if is_comp else set()
 
-        # Teach the wall where the doors are, so it cannot route through one.
-        tol_d = src.tol()
-        s_extra, r_extra = sigma_disc_samples(discs, pts, tol_d)
-        if len(s_extra):
-            seed_pts = np.vstack([seed_pts, s_extra])
-        if len(r_extra):
-            rest_pts = np.vstack([rest_pts, r_extra])
+        # ---- which doors go in which class -------------------------------
+        promoted: dict = {}           # door_key -> (disc, how, in-page leg or None)
+        if policy == "legacy":
+            s_leg, r_leg = sigma_disc_samples(discs, pts, src.tol())
+        else:
+            # Evidence first: a door the roadmap connects to this region is
+            # worth a verified path; a door the robot provably reaches cannot
+            # be walled off. Connectivity alone decides nothing here.
+            for d in candidates:
+                if comps and comps & set(touching_regions(src, d)):
+                    pleg = door_reach_evidence(cfg, arm, weld, scene, src.signs, entry, d)
+                    if pleg is not None:
+                        promoted[door_key(d)] = (d, "verified in-page path", pleg)
 
-        labeller = (
-            RoadmapLabeller(cfg, arm, weld, scene, src, k)
-            if getattr(src, "kind", "grid") == "roadmap" else
-            PageLabeller(cfg, arm, weld, scene, src.signs, pm, src.lab, k,
-                         search_cells=cfg.wall.label_search_cells,
-                         motion_samples=cfg.wall.label_motion_samples)
-        )
-        poly, rep, wmodel, iters, rounds = budgeted_alg4(
-            cfg, f"{name}/{k}", verbose=verbose,
-            arm=arm, weld=weld, scene=scene, signs=src.signs, seed_pts=seed_pts,
-            rest_pts=rest_pts, inv_pts=inv, discs=discs, max_iters=alg4_iters,
-            labeller=labeller,
-        )
+        poly = Polytope()
+        rep = CheckReport(False, 0, 0)
+        wmodel = None
+        iters = rounds = 0
+        entry_ok, entry_why = False, ""
+        attempt_log = []
+        for attempt in range(n_rounds + 1):
+            seed_pts, rest_pts = seed_base, rest_base
+            if policy == "legacy":
+                if len(s_leg):
+                    seed_pts = np.vstack([seed_pts, s_leg])
+                if len(r_leg):
+                    rest_pts = np.vstack([rest_pts, r_leg])
+            else:
+                inside_doors = entries + [v[0] for v in promoted.values()]
+                excluded = [d for d in candidates if door_key(d) not in promoted]
+                if inside_doors:
+                    seed_pts = np.vstack([seed_pts] + [door_disc_samples(d)
+                                                       for d in inside_doors])
+                if excluded:
+                    rest_pts = np.vstack([rest_pts] + [door_disc_samples(d)
+                                                       for d in excluded])
+            if not len(seed_pts):
+                seed_pts = np.vstack([door_disc_samples(e) for e in entries])
+
+            labeller = (
+                RoadmapLabeller(cfg, arm, weld, scene, src, k_lab)
+                if getattr(src, "kind", "grid") == "roadmap" else
+                PageLabeller(cfg, arm, weld, scene, src.signs, pm, src.lab, k_lab,
+                             search_cells=cfg.wall.label_search_cells,
+                             motion_samples=cfg.wall.label_motion_samples)
+            )
+            poly, rep, wmodel, iters, rounds = budgeted_alg4(
+                cfg, f"{name}/{k}", verbose=verbose,
+                arm=arm, weld=weld, scene=scene, signs=src.signs, seed_pts=seed_pts,
+                rest_pts=rest_pts, inv_pts=inv, discs=guard, max_iters=alg4_iters,
+                labeller=labeller, goal_y_limit=goal_limit, goal_y_feed=goal_edge,
+            )
+            # Every entry -- and every promoted door -- must be INSIDE. The
+            # guard keeps each disc wholly on one side, so its centre decides.
+            entry_ok, entry_why = bool(rep.ok and poly.closed), ""
+            if entry_ok and policy != "legacy":
+                for e in entries + [v[0] for v in promoted.values()]:
+                    side = point_in_wall(cfg, poly, (e.y, e.theta))
+                    if side is not True:
+                        entry_ok = False
+                        entry_why = (f"door y={e.y:.4f} th={e.theta:+.4f} that must be "
+                                     f"inside is {'outside' if side is False else 'undecidable'}")
+                        break
+            attempt_log.append(dict(attempt=attempt, promoted=sorted(promoted),
+                                    facets=f"{rep.n_passed}/{rep.n_facets}",
+                                    ok=entry_ok, note=entry_why or (
+                                        rep.failures[0][1] if rep.failures else poly.note)))
+            if entry_ok or policy == "legacy" or attempt == n_rounds:
+                break
+            # The wall failed. "Cannot be excluded" is the second kind of
+            # evidence: promote the doors the roadmap connects to this region
+            # (and that the first pass could not prove reachable), retry once.
+            # Following an unreachable door costs walls, never soundness.
+            new = [d for d in candidates if door_key(d) not in promoted
+                   and comps and comps & set(touching_regions(src, d))]
+            if not new:
+                break
+            for d in new:
+                promoted[door_key(d)] = (d, "could not be excluded (roadmap-connected)", None)
+            if verbose:
+                print(f"[doors] region ({name}, {k}): wall failed with "
+                      f"{len(new)} roadmap-connected door(s) excluded -> promoting them "
+                      f"to the seed class and retrying")
+
+        wall_ok = bool(entry_ok)
+        y_hi = wall_y_max(poly) if poly.closed and poly.loops else None
         if verbose:
             print(f"[stage3] region ({name}, {k}): alg4 done in {iters} iter(s); "
-                  f"closed={poly.closed}, facets {rep.n_passed}/{rep.n_facets}")
+                  f"closed={poly.closed}, facets {rep.n_passed}/{rep.n_facets}"
+                  + (f", y_max {y_hi:.4f}" if y_hi is not None else "")
+                  + ("" if wall_ok else f" -- NOT verified ({entry_why or 'see note'})"))
 
         certificate.append(asdict(CertificateEntry(
-            page=name, region=k, n_facets=rep.n_facets, n_passed=rep.n_passed,
-            closed=poly.closed, gamma=wmodel.gamma, alg2_rounds=rounds,
-            ok=bool(rep.ok and poly.closed),
-            note=poly.note or (rep.failures[0][1] if rep.failures else ""),
+            page=name, region=int(k_lab), n_facets=rep.n_facets, n_passed=rep.n_passed,
+            closed=poly.closed, gamma=float(getattr(wmodel, "gamma", float("nan"))),
+            alg2_rounds=rounds, ok=wall_ok,
+            note=entry_why or poly.note or (rep.failures[0][1] if rep.failures else ""),
+            y_max=y_hi, goal_limit=goal_limit,
+            entry_doors=[door_key(e) for e in entries],
+            seed_doors=[{"door": kk, "why": v[1]} for kk, v in promoted.items()],
+            excluded_doors=[door_key(d) for d in candidates if door_key(d) not in promoted],
+            attempts=attempt_log,
         )))
 
-        # --- resolve every door in this region: the four exits ---------------
+        # --- resolve the doors: the exits ------------------------------------
         #
-        # Exit 1  d outside wall1              -> PROVEN unreachable, free
-        # Exit 2  wall2 verifies, d outside it -> PROVEN unreachable, ~seconds
+        # Exit 1  d outside the wall           -> PROVEN unreachable, free
+        # Exit 2  wall2 verifies, d outside it -> PROVEN unreachable (opt-in)
         # Exit 3  path to d AND crossing leg   -> PROVEN reachable, follow
         # Exit 4  none of the above            -> UNKNOWN, follow anyway
         #
-        # Exits 1 and 2 reach the same conclusion by the same theorem and
-        # differ only in which wall; exit 3 reaches the opposite one. They are
-        # four independent proof ATTEMPTS, not a decision tree: falling
-        # through them means nothing was proved, which is exit 4, not a
-        # verdict. Both exits 3 and 4 follow the door -- only the tag differs,
-        # and the tag is what decides whether a goal reached beyond it may be
-        # called FEASIBLE.
-        here = discs_in_region(discs, pts, src.tol())
+        # With a VERIFIED wall every door in the guard is probed -- not only
+        # the doors near the region's samples (findings 47): a door inside
+        # the wall but far from every sample is one the robot may reach
+        # through space the roadmap never saw, and skipping it is the one way
+        # this loop could end in a false INFEASIBLE. With a failed wall the
+        # run is INCONCLUSIVE anyway; the doors near the region are followed
+        # only to give the FEASIBLE side a chance.
+        if wall_ok:
+            here = guard
+        else:
+            here = discs_in_region(discs, pts, src.tol()) + [
+                v[0] for v in promoted.values()]
+        _seen: set = set()
+        here = [d for d in here if not (door_key(d) in _seen or _seen.add(door_key(d)))]
         for d in here:
             ex, follow, verified, why = "4-unknown", True, False, ""
 
-            # Exit 1 -- the wall we already built may have done the job.
-            # The centre speaks for the whole disc here: the Sigma guard runs
-            # first in Algorithm 3, so a VERIFIED wall has no facet touching a
-            # LIVE disc, and `discs` holds only live ones. The disc therefore
-            # lies wholly on one side. (wall2 cannot rely on this -- see
-            # second_wall, which must probe the entire ring.)
-            side = point_in_wall(cfg, poly, (d.y, d.theta)) if rep.ok else None
+            side = point_in_wall(cfg, poly, (d.y, d.theta)) if wall_ok else None
             if side is False:
                 ex, follow, why = "1-wall1", False, (
                     "outside the verified wall for this region: Definition 1 "
                     "with X = this door proves the start cannot reach it")
+            if wall_ok and side is True:
+                walled.setdefault(name, []).append(d)
+            is_entry = any(same_door(d, e) for e in entries)
 
             # Exit 3 runs BEFORE exit 2 although it is numbered after it. The
             # two conclusions are mutually exclusive, and exit 3 is far
@@ -909,7 +1202,7 @@ def _run_proof(
             # it is closed form and costs microseconds, while the PRM costs
             # seconds, and a door that cannot be crossed makes the path to it
             # pointless.
-            if follow and use_witness and cfg.witness.enable:
+            if follow and use_witness and cfg.witness.enable and not is_entry:
                 target = [o for o in d.pages if o != name and o in sources]
                 partner = sources[target[0]].signs if target else None
                 if partner is None:
@@ -920,10 +1213,11 @@ def _run_proof(
                     if dleg is None:
                         why = f"not crossable -- {cert.reason}"
                     else:
-                        entry = entry_point.get((name, k))
-                        pleg = (plan_in_page(cfg, arm, weld, scene, src.signs,
-                                             entry, target_yt=d.anchor)
-                                if entry is not None else None)
+                        pv = promoted.get(door_key(d))
+                        pleg = pv[2] if pv is not None and pv[2] is not None else (
+                            plan_in_page(cfg, arm, weld, scene, src.signs,
+                                         entry, target_yt=d.anchor)
+                            if entry is not None else None)
                         if pleg is not None:
                             ex, verified, why = "3-witness", True, (
                                 f"reachable (PRM path, {len(pleg.waypoints)} "
@@ -933,17 +1227,16 @@ def _run_proof(
                             why = ("crossable, but no in-page path to it was "
                                    "found -- INCONCLUSIVE, not unreachable")
 
-            # Exit 2 -- pay for a wall whose only job is this door. Reached
-            # only when exit 3 produced nothing, so the door may genuinely be
-            # unreachable. Budgeted well below wall1's: failing is expected
-            # and costs only time, because exit 4 follows the door anyway.
-            if follow and not verified and use_second_wall:
-                others = [o for o in discs if o is not d]
+            # Exit 2 -- opt-in (use_second_wall). Retired by default: the
+            # region's one wall already tries to exclude every door.
+            if follow and not verified and use_second_wall and not is_entry:
+                others = [o for o in guard if o is not d]
                 p2, r2, w2, ok2 = second_wall(
-                    cfg, arm, weld, scene, src.signs, seed_pts, inv, d, others,
+                    cfg, arm, weld, scene, src.signs, seed_base if len(seed_base)
+                    else door_disc_samples(d), inv, d, others,
                     alg4_iters=max(1, alg4_iters // 3), verbose=False)
                 second_walls.append({
-                    "page": name, "region": k, "door_y": float(d.y),
+                    "page": name, "region": int(k_lab), "door_y": float(d.y),
                     "door_theta": float(d.theta),
                     "n_facets": r2.n_facets, "n_passed": r2.n_passed,
                     "closed": bool(p2.closed), "gamma": float(w2.gamma),
@@ -961,10 +1254,10 @@ def _run_proof(
 
             if not follow:
                 decisions.append(asdict(DoorDecision(
-                    page=name, region=k, y=float(d.y), theta=float(d.theta),
+                    page=name, region=int(k_lab), y=float(d.y), theta=float(d.theta),
                     kind=d.kind, exit=ex, followed=False,
                     crossing_verified=False, reason=why)))
-                if verbose:
+                if verbose and d in discs_in_region(discs, pts, src.tol()):
                     print(f"[exit{ex[0]}] door y={d.y:.4f} th={d.theta:+.4f}: "
                           f"SKIPPED -- {why}")
                 continue
@@ -973,26 +1266,42 @@ def _run_proof(
                 if other == name or other not in sources:
                     continue
                 osrc = sources[other]
-                # The one question with no adjudicator downstream. On a grid
-                # it is a footprint guess over a label array; on a roadmap the
-                # anchor was injected as a vertex, so it is a lookup of the
-                # component it actually joined.
-                for kk in osrc.regions_under(d.y, d.theta, d.radius):
+                if enclosed_on(other, d):
+                    # Already inside a verified wall over there: every
+                    # component touching it is inside that wall.
+                    decisions.append(asdict(DoorDecision(
+                        page=name, region=int(k_lab), y=float(d.y),
+                        theta=float(d.theta), kind=d.kind, exit=ex, followed=True,
+                        crossing_verified=verified,
+                        reason=why + ("; " if why else "") + f"already enclosed by a "
+                               f"verified wall on {other}",
+                        to=f"{other}/enclosed")))
+                    continue
+                # Which components to start from is a HINT (touching_regions):
+                # the partner wall gets the whole door in its seed class and
+                # must enclose it, so a component missed here is still inside.
+                targets = touching_regions(osrc, d) or [("door", door_key(d))]
+                for kk in targets:
+                    nxt = (other, kk)
                     doors_followed.append({
                         "from": f"{name}/{k}", "to": f"{other}/{kk}",
                         "y": d.y, "theta": d.theta, "kind": d.kind,
                         "exit": ex, "crossing_verified": verified,
                     })
                     decisions.append(asdict(DoorDecision(
-                        page=name, region=k, y=float(d.y), theta=float(d.theta),
+                        page=name, region=int(k_lab), y=float(d.y), theta=float(d.theta),
                         kind=d.kind, exit=ex, followed=True,
                         crossing_verified=verified, reason=why,
                         to=f"{other}/{kk}")))
-                    if (other, kk) not in visited:
-                        queue.append((other, kk))
-                        parent[(other, kk)] = (name, k, d, osrc.signs,
-                                               d.anchor, verified)
-                        entry_point[(other, kk)] = tuple(d.anchor)
+                    if nxt in visited:
+                        continue
+                    lst = node_entry.setdefault(nxt, [])
+                    if not any(same_door(d, e) for e in lst):
+                        lst.append(d)
+                    if nxt not in queue:
+                        queue.append(nxt)
+                        parent[nxt] = (name, k, d, osrc.signs, d.anchor, verified)
+                        entry_point[nxt] = tuple(d.anchor)
                         if verbose:
                             print(f"[exit{ex[0]}] door ({d.kind}) at "
                                   f"(y={d.y:.4f}, th={d.theta:+.4f}): "
@@ -1013,6 +1322,7 @@ def _run_proof(
     return ProofResult(
         proven=all_ok,
         reason=("queue empty, goal never reached, every wall verified"
+                + (" (goal band outside every wall)" if goal_on else "")
                 + (f" ({n_unverified} door(s) followed without a crossing "
                    f"proof -- conservative, so the certificate still holds)"
                    if n_unverified else "")
