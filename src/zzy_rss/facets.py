@@ -65,6 +65,14 @@ class FacetOracle:
     # depth_many(C, R) -> pd (N,) with the same pd >= r verdicts as depth.
     valid_many: Callable | None = None
     depth_many: Callable | None = None
+    # Test (ii) of the recursive proof (docs/recursive_proof_design.md):
+    # sigma_many(C, R) -> bool (N,), True where the ball B(C_i, R_i) (scaled
+    # radius) is CERTIFIED free of zeros of the chart singularity function
+    # (chart.SrsChart.ball_test). With it set, a facet passes only if it is
+    # covered by sigma-clear pieces down to sigma_max_depth subdivisions.
+    # This replaces the door-list guard: it needs no door list.
+    sigma_many: Callable | None = None
+    sigma_max_depth: int = 8
 
 
 # --------------------------------------------------------------------------
@@ -136,15 +144,45 @@ def subdivide(verts: np.ndarray) -> list:
 # --------------------------------------------------------------------------
 
 
+def sigma_clear_simplex(oracle: FacetOracle, verts: np.ndarray) -> tuple:
+    """Test (ii): is the facet covered by sigma-clear pieces?
+
+    Its own subdivision, separate from Algorithm 3's: it evaluates only the
+    chart's sigma and its bound (no collision), so it can afford to go deep,
+    and a facet is clear exactly when the union of its clear pieces is the
+    facet. Level by level, batched. Returns (ok, reason, depth reached)."""
+    scale = np.asarray(oracle.scale, dtype=float)
+    pieces = [np.asarray(verts, dtype=float)]
+    for depth in range(int(oracle.sigma_max_depth) + 1):
+        balls = [enclosing_ball(p * scale) for p in pieces]
+        C = np.array([cs / scale for cs, _ in balls])
+        R = np.array([r for _, r in balls])
+        clear = np.asarray(oracle.sigma_many(C, R), dtype=bool)
+        bad = [p for p, ok in zip(pieces, clear) if not ok]
+        if not bad:
+            return True, "", depth
+        if depth == int(oracle.sigma_max_depth):
+            return False, (f"near sigma = 0: {len(bad)} piece(s) not certified clear "
+                           f"at sigma depth {depth}"), depth
+        pieces = [q for p in bad for q in subdivide(p)]
+    return False, "unreachable", -1
+
+
 def check_simplex(oracle: FacetOracle, verts: np.ndarray, max_depth: int,
-                  depth: int = 0) -> FacetResult:
+                  depth: int = 0, sigma_done: bool = False) -> FacetResult:
     """IJRR Algorithm 3 on one facet, with the Sigma guard checked FIRST.
 
     The guard must precede the ball test: a facet that touches a door lets a
     path hop pages inside the door and bypass the wall, and no depth of C_obs
-    around it changes that.
+    around it changes that. With oracle.sigma_many set, test (ii) -- the
+    certified sigma margin -- runs once, on the whole facet, before anything
+    else (its pieces are then clear too, so the recursion below skips it).
     """
     verts = np.asarray(verts, dtype=float)
+    if oracle.sigma_many is not None and depth == 0 and not sigma_done:
+        ok, why, _ = sigma_clear_simplex(oracle, verts)
+        if not ok:
+            return FacetResult(False, why, recursions=0)
     why = oracle.guard(verts)
     if why:
         return FacetResult(False, why, recursions=depth)
@@ -312,12 +350,28 @@ def check_many(oracle: FacetOracle, simplices: list, max_depth: int) -> list:
     exactly what batches. Every facet that does not PASS at depth 0 (a guard
     hit, a valid centre, pd < r) goes through check_simplex unchanged, so
     failures, their reasons and every subdivision are the scalar path's.
-    Without valid_many on the oracle this is a plain loop."""
+    Without valid_many on the oracle this is a plain loop.
+
+    Test (ii) (oracle.sigma_many) runs first for every facet: one batched
+    call for all facets at depth 0, then sigma_clear_simplex for the few
+    that are not clear at once."""
+    sig_fail: dict = {}
+    if oracle.sigma_many is not None and simplices:
+        scale = np.asarray(oracle.scale, dtype=float)
+        balls = [enclosing_ball(np.asarray(v, dtype=float) * scale) for v in simplices]
+        C = np.array([cs / scale for cs, _ in balls])
+        R = np.array([r for _, r in balls])
+        clear0 = np.asarray(oracle.sigma_many(C, R), dtype=bool)
+        for i in np.flatnonzero(~clear0):
+            ok, why, _ = sigma_clear_simplex(oracle, np.asarray(simplices[i], dtype=float))
+            if not ok:
+                sig_fail[int(i)] = FacetResult(False, why)
     if oracle.valid_many is None or not simplices:
         out = []
-        for v in simplices:
+        for i, v in enumerate(simplices):
             _budget.check_time()
-            out.append(check_simplex(oracle, v, max_depth))
+            out.append(sig_fail[i] if i in sig_fail else
+                       check_simplex(oracle, v, max_depth, sigma_done=True))
         return out
     scale = np.asarray(oracle.scale, dtype=float)
     n = len(simplices)
@@ -325,8 +379,11 @@ def check_many(oracle: FacetOracle, simplices: list, max_depth: int) -> list:
     centres, radii, todo = [], [], []
     for i, v in enumerate(simplices):
         v = np.asarray(v, dtype=float)
+        if i in sig_fail:
+            out[i] = sig_fail[i]
+            continue
         if oracle.guard(v):
-            out[i] = check_simplex(oracle, v, max_depth)
+            out[i] = check_simplex(oracle, v, max_depth, sigma_done=True)
             continue
         cs, r = enclosing_ball(v * scale)
         c = cs / scale
@@ -353,5 +410,5 @@ def check_many(oracle: FacetOracle, simplices: list, max_depth: int) -> list:
             else:
                 _budget.check_time()
                 out[i] = check_simplex(oracle, np.asarray(simplices[i], dtype=float),
-                                       max_depth)
+                                       max_depth, sigma_done=True)
     return out

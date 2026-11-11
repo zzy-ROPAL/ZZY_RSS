@@ -322,6 +322,7 @@ pip install numpy scipy scikit-learn matplotlib   # 另需 ffmpeg 出视频
 export PYTHONPATH=src
 
 python3 tests/test_ik.py                                   # IK 验收(必须全过)
+python3 tests/test_chart.py                                # 递归证明步骤 1/2a:σ = 页坐标奇异、保证界、墙内门搜索完备
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
 python3 tests/test_facets.py                               # Alg 3 的三角形面:球壳合成页 + 门的管守卫(§41)
