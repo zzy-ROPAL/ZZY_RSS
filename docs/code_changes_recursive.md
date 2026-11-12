@@ -109,3 +109,13 @@
 | `docs/fig_sigma_doors.png` | 用新界重画 |
 
 结果见 `docs/recursive_proof_design.md` §10.3。
+
+### 6.3 方法 C(2026-11-12)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/interval.py`(新) | 向量化区间算术(向外舍入;求和按 γ_n 加宽;sin/cos/sqrt 加宽 4 ulp) |
+| `src/zzy_rss/krawczyk.py`(新) | `SerialChain`(通用串联链)、`interval_fk`、`SrsSystem`(F 与 J_q 的区间求值)、`KrawczykCertifier`(批量 Krawczyk + ε-膨胀、`box_test`/`ball_test`/`clear_many` 接口、`collision_certified`) |
+| `tests/test_krawczyk.py`(新) | 区间算术与区间 FK 的包含性、含门点的格从不被认证、认证率随格大小(钉住"只适合小格") |
+
+**未接入证明**(见设计文档 §10.4)。

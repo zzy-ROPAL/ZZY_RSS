@@ -24,6 +24,8 @@
 > 于是证 `门 ↛ 终点`(两页两面墙),共三面墙(旧泛洪四面)。
 > **§10.3**:σ 的界收紧 ~2.9×(门区域格数 ÷7–10);**碰撞卸载已认证**(区域上,八页通用);
 > 通用 σ = σ_min(∂(pose,θ)/∂q) 能找门,但**没有保证界**,还不能进证明。图 `docs/fig_sigma_doors.png`。
+> **§10.4 方法 C(Krawczyk)已实现并验证可靠,但不实用**:通用证书的认证半径 ~ σ_min²,
+> 门搜索的格(1e-2)上认证率 0%,要 ≤3e-4 才行(格子多 ~10⁴ 倍)。**未接入证明**;证明仍用 SRS 专用界。
 > 运行 `python3 scripts/run_recursive.py --case {exp2-none,exp2-zgap,exp3-new,two-wall}`;
 > 改动记录 `docs/code_changes_recursive.md`。
 
@@ -333,6 +335,7 @@ export PYTHONPATH=src
 python3 tests/test_ik.py                                   # IK 验收(必须全过)
 python3 tests/test_chart.py                                # 递归证明步骤 1/2a:σ = 页坐标奇异、保证界、墙内门搜索完备
 python3 tests/test_recursive.py                            # 递归逻辑、无门列表找门、检查 (ii)、端到端 EXP 2(约 70 s)
+python3 tests/test_krawczyk.py                             # 方法 C:区间算术/FK 包含性、从不认证门格、只适合小格(§10.4)
 python3 scripts/run_recursive.py --case two-wall --save out/rec_two_wall.json   # 在门处分裂的证明(§46 场景,约 210 s)
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
