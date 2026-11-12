@@ -239,6 +239,11 @@ class Page3Params:
     lazy_rounds: int = 6
     # Crossing pairs tried per door hop before phase 1 gives up on a route.
     cross_tries: int = 400
+    # Recursive proof (docs/recursive_proof_design.md). Test (ii)'s own
+    # subdivision depth: it evaluates sigma only (no collision), so it can go
+    # deeper than Algorithm 3 (facet_max_depth_tri). The cost is 4^depth
+    # sigma evaluations for a triangle that hugs a door, batched per level.
+    sigma_max_depth: int = 8
 
 
 @dataclass(frozen=True)

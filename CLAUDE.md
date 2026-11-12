@@ -17,6 +17,13 @@
 > `check` 三项:(i) 面在 `C_obs`;(ii) 面离 `σ=0` 有认证余量;(iii) 墙内无 `σ` 的活零点(否则返回分裂点)。
 > **`σ` 是页坐标的奇异,不是任务的奇异**:q2/q6 门处 6×7 雅可比满秩,`det(JJᵀ)` 找不到它们。
 > 开发在 `claude/focused-ramanujan-w0714i` 上进行,**不直接推 main**。
+>
+> **已实现并复现(§10.2)**:`doorset.py`(门只从 σ 找,不用门列表)、`check.py`、`proof.py`。
+> 3 维 EXP 2 无障碍 FEASIBLE / ZGAP INFEASIBLE(一个叶 2006/2006)/ 新 EXP 3 FEASIBLE /
+> §46 两面墙 INFEASIBLE —— **第一个在门处分裂的证明**:`+++` 墙内有 q6 门,起点到得了门,
+> 于是证 `门 ↛ 终点`(两页两面墙),共三面墙(旧泛洪四面)。
+> 运行 `python3 scripts/run_recursive.py --case {exp2-none,exp2-zgap,exp3-new,two-wall}`;
+> 改动记录 `docs/code_changes_recursive.md`。
 
 > ### 分支地图(2026-11-08)
 >
@@ -323,6 +330,8 @@ export PYTHONPATH=src
 
 python3 tests/test_ik.py                                   # IK 验收(必须全过)
 python3 tests/test_chart.py                                # 递归证明步骤 1/2a:σ = 页坐标奇异、保证界、墙内门搜索完备
+python3 tests/test_recursive.py                            # 递归逻辑、无门列表找门、检查 (ii)、端到端 EXP 2(约 70 s)
+python3 scripts/run_recursive.py --case two-wall --save out/rec_two_wall.json   # 在门处分裂的证明(§46 场景,约 210 s)
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
 python3 tests/test_facets.py                               # Alg 3 的三角形面:球壳合成页 + 门的管守卫(§41)

@@ -148,13 +148,14 @@ def polytope_region(poly, scale) -> Callable:
                 q = _closest_on_triangles(Pm, FA[js], FB[js], FC[js])
             if float(np.min(np.linalg.norm(q - Pm, axis=1))) <= r:
                 cross[i] = True
-        rest = ~cross
-        if rest.any():
-            if k == 2:
-                ins = inside(Cs[rest], V, T, 2)
-            else:
-                ins = inside(Cs[rest], V, T, 1)
-            code[np.flatnonzero(rest)] = np.where(ins, IN, OUT)
+        rest = np.flatnonzero(~cross)
+        # In chunks: the winding number holds (points x triangles x 3)
+        # arrays, which for tens of thousands of cells against a few
+        # thousand triangles is gigabytes at once.
+        for a in range(0, len(rest), 256):
+            idx = rest[a:a + 256]
+            ins = inside(Cs[idx], V, T, k)
+            code[idx] = np.where(ins, IN, OUT)
         code[cross] = CROSS
         return code
 

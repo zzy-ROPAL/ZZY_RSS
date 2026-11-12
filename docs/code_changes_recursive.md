@@ -82,3 +82,17 @@
 ## 6. 之后的改动
 
 见本文件后续小节(随实现追加)。
+
+### 6.1 步骤 2b + 3 + 4(2026-11-12)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/doorset.py`(新) | `find_doorset`:认证门区域 + `σ²` 的 Hessian-Newton 精化 + 链成曲线;`Door.check_coverage`(卸载前才算) |
+| `src/zzy_rss/check.py`(新) | `World`(页、门、过门状态、卸载、检查 (ii) 的 `sigma_clear`)、`StartSet`/`GoalSet`/`DoorNode`、`check(A, B)` → CONNECTED / WALLED / FAILED、`page_wall`、`_verify`、`_find_wall`(Alg 4,多一条"面靠近活门"的回灌) |
+| `src/zzy_rss/proof.py`(新) | `Prover.inf_proof`(递归、证明树、环、缓存)、`connect`(粘合路图上的可行路径 + 验证)、`prove_task`、`write_certificate` |
+| `src/zzy_rss/interior.py` | `polytope_region` 的绕数测试分块(3 万格 × 3 千三角形时原来要几 GB 内存,进程被杀) |
+| `src/zzy_rss/params.py` | `Page3Params.sigma_max_depth = 8` |
+| `scripts/run_recursive.py`(新) | 四个案例:`exp2-none`、`exp2-zgap`、`exp3-new`、`two-wall`;`--also-prove`、`--save` |
+| `tests/test_recursive.py`(新) | 递归逻辑(脚本化 check)、无门列表的门、检查 (ii) 只豁免已卸载的门、端到端(EXP 2 无障碍 FEASIBLE、ZGAP INFEASIBLE),约 70 s |
+
+结果见 `docs/recursive_proof_design.md` §10.2。
