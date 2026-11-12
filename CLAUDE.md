@@ -19,9 +19,11 @@
 > 开发在 `claude/focused-ramanujan-w0714i` 上进行,**不直接推 main**。
 >
 > **已实现并复现(§10.2)**:`doorset.py`(门只从 σ 找,不用门列表)、`check.py`、`proof.py`。
-> 3 维 EXP 2 无障碍 FEASIBLE / ZGAP INFEASIBLE(一个叶 2006/2006)/ 新 EXP 3 FEASIBLE /
-> §46 两面墙 INFEASIBLE —— **第一个在门处分裂的证明**:`+++` 墙内有 q6 门,起点到得了门,
+> 3 维 EXP 2 无障碍 FEASIBLE / ZGAP INFEASIBLE(一个叶 2006/2006,7.8 s)/ 新 EXP 3 FEASIBLE /
+> §46 两面墙 INFEASIBLE(90 s)—— **第一个在门处分裂的证明**:`+++` 墙内有 q6 门,起点到得了门,
 > 于是证 `门 ↛ 终点`(两页两面墙),共三面墙(旧泛洪四面)。
+> **§10.3**:σ 的界收紧 ~2.9×(门区域格数 ÷7–10);**碰撞卸载已认证**(区域上,八页通用);
+> 通用 σ = σ_min(∂(pose,θ)/∂q) 能找门,但**没有保证界**,还不能进证明。图 `docs/fig_sigma_doors.png`。
 > 运行 `python3 scripts/run_recursive.py --case {exp2-none,exp2-zgap,exp3-new,two-wall}`;
 > 改动记录 `docs/code_changes_recursive.md`。
 

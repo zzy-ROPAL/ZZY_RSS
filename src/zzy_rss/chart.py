@@ -141,7 +141,13 @@ class SrsChart:
     Page coordinates z = (x_1 .. x_n, theta); `scale` maps them to the scaled
     units the walls and facets live in (Page3Params.scale at d = 3)."""
 
-    def __init__(self, arm: SrsArm, task: AffineTask, scale, theta_range=(-np.pi, np.pi)):
+    def __init__(self, arm: SrsArm, task: AffineTask, scale, theta_range=(-np.pi, np.pi),
+                 bound: str = "frame"):
+        """bound: "frame" (default, the arm-angle frame's rotation bounded
+        exactly) or "triangle" (the first version, every term separately)."""
+        if bound not in ("frame", "triangle"):
+            raise ValueError(f"unknown bound {bound!r}")
+        self.bound = bound
         self.arm = arm
         self.task = task
         self.scale = np.asarray(scale, dtype=float)
@@ -255,21 +261,64 @@ class SrsChart:
         L_lo = Lc[ok] - G * Rk
         L_hi = Lc[ok] + G * Rk
         c = self.d_se ** 2 - self.d_ew ** 2
-        hmax = np.maximum(np.abs((c + L_lo ** 2) / (2.0 * L_lo)),
-                          np.abs((c + L_hi ** 2) / (2.0 * L_hi)))
+
+        def h_of(L):
+            return (c + L ** 2) / (2.0 * L)
+
+        # |h| is largest at an end of [L_lo, L_hi] (h is convex for c > 0 and
+        # increasing for c <= 0), so r = sqrt(d_se^2 - h^2) is smallest there.
+        hmax = np.maximum(np.abs(h_of(L_lo)), np.abs(h_of(L_hi)))
         r_min_sq = self.d_se ** 2 - hmax ** 2
         good = r_min_sq > 0.0
         r_min = np.sqrt(np.where(good, r_min_sq, 1.0))
-        hp = 0.5 + abs(c) / (2.0 * L_lo ** 2)                  # |dh/dL|
-        rp = hmax * hp / r_min                                 # |dr/dL|
+        hp = 0.5 + abs(c) / (2.0 * L_lo ** 2)                  # max |dh/dL|
         sin_min = (hc[ok] - Gc * Rk) / L_hi                    # angle(S-W, z)
-        d_u = 1.0 / L_lo                                       # |du/dW|
-        d_v0 = 2.0 / (L_lo * sin_min)                          # |dv0/dW|
-        d_w0 = d_u + d_v0                                      # |dw0/dW|
-        r_max = min(self.d_se, self.d_ew)
-        e_w = hp + hmax * d_u + rp + r_max * np.sqrt(d_v0 ** 2 + d_w0 ** 2)
+        if self.bound == "triangle":
+            # Findings of the first version: every term by its own triangle
+            # inequality. Sound, ~5-6x the true derivative (median).
+            rp = hmax * hp / r_min
+            d_u = 1.0 / L_lo
+            d_v0 = 2.0 / (L_lo * sin_min)
+            d_w0 = d_u + d_v0
+            r_max = np.full(len(Rk), min(self.d_se, self.d_ew))
+            e_w = hp + hmax * d_u + rp + r_max * np.sqrt(d_v0 ** 2 + d_w0 ** 2)
+            e_f = 1.0 + e_w
+        else:
+            # "frame" (default): the same quantities, combined exactly.
+            # Split a wrist step dW = p u + q (q _|_ u). Then dL = p,
+            # du = q / L, and with rho = cos(theta) v0 + sin(theta) w0:
+            #   dE = (h' u + r' rho) p + (h / L) q + r * dRho,
+            # where (u, v0, w0) is the arm-angle frame. Writing du = a v0 + b w0
+            # gives dv0 = -a u - b cot(alpha) w0 and dw0 = -b u + b cot(alpha) v0,
+            # so |dRho|^2 = (a cos + b sin)^2 + b^2 cot^2(alpha)
+            # <= |du|^2 / sin^2(alpha). With r' = -h h' / r and r^2 + h^2 = d_se^2,
+            # |h' u + r' rho| = |h'| d_se / r. Cauchy-Schwarz over (p, |q|):
+            #   |dE / dW| <= sqrt((h'_max d_se / r_min)^2
+            #                    + ((|h|_max + r_max / sin(alpha)_min) / L_lo)^2).
+            # The forearm W - E = (L - h) u - r rho gives the same form with
+            # 1 - h' and |L - h|.
+            hmin = np.minimum(np.abs(h_of(L_lo)), np.abs(h_of(L_hi)))
+            if c > 0.0:
+                Ls = np.sqrt(c)
+                inside = (L_lo <= Ls) & (Ls <= L_hi)
+                hmin = np.where(inside, np.minimum(hmin, abs(h_of(Ls))), hmin)
+            else:
+                hmin = np.where(h_of(L_lo) * h_of(L_hi) <= 0.0, 0.0, hmin)
+            r_max = np.sqrt(np.maximum(0.0, self.d_se ** 2 - hmin ** 2))
+            r_max = np.minimum(r_max, min(self.d_se, self.d_ew))
+            rp = hp * self.d_se / r_min                         # |(h', r')|
+            e_w = np.sqrt(rp ** 2 + ((hmax + r_max / sin_min) / L_lo) ** 2)
+            # h' is monotone in L (h'' = c / L^3 keeps its sign).
+            hp_lo = 0.5 - c / (2.0 * L_lo ** 2)
+            hp_hi = 0.5 - c / (2.0 * L_hi ** 2)
+            one_m = np.maximum(np.abs(1.0 - hp_lo), np.abs(1.0 - hp_hi))
+            rp_f = hmax * hp / r_min
+            g_lo = np.abs((L_lo ** 2 - c) / (2.0 * L_lo))       # |L - h|, extreme
+            g_hi = np.abs((L_hi ** 2 - c) / (2.0 * L_hi))       # at an end of the
+            e_f = np.sqrt(one_m ** 2 + rp_f ** 2                 # interval
+                          + ((np.maximum(g_lo, g_hi) + r_max / sin_min) / L_lo) ** 2)
         m_e = np.sqrt((e_w * G) ** 2 + (r_max / self.s_th) ** 2)
-        m_f = np.sqrt(((1.0 + e_w) * G) ** 2 + (r_max / self.s_th) ** 2)
+        m_f = np.sqrt((e_f * G) ** 2 + (r_max / self.s_th) ** 2)
         L2 = np.where(good, m_e / self.d_se, np.inf)
         L6 = np.where(good, m_f / self.d_ew, np.inf)
         idx = np.flatnonzero(ok)
@@ -321,3 +370,95 @@ class SrsChart:
     def facet_sigma_many(self, C: np.ndarray, R) -> list:
         t = self.ball_test(C, R)
         return [t.reasons(i) for i in range(len(t.clear))]
+
+
+# --------------------------------------------------------------------------
+# certified collision over a ball (posture facts are page-independent)
+# --------------------------------------------------------------------------
+
+
+def link_speed(chart: SrsChart, C: np.ndarray, R) -> np.ndarray:
+    """Guaranteed bound on how far any point of the arm's links can move per
+    scaled unit within B(C_i, R_i): the shoulder is fixed, the elbow moves at
+    most M_E = L_q2 * d_se (the chart's elbow bound), the wrist and the tool
+    at most G (theta does not move them; the orientation is fixed). Points
+    on a link segment move no more than its ends. inf where the elbow bound
+    does not exist (the ball reaches the fold or Sigma_coord)."""
+    lip = chart.lipschitz(C, R)
+    return np.maximum(lip[:, I_Q2] * chart.d_se, chart.G)
+
+
+def collision_certified(chart: SrsChart, scene, C: np.ndarray, R) -> np.ndarray:
+    """True where EVERY posture in B(C_i, R_i) collides.
+
+    scene.check's penetration is a sampled LOWER bound on the true overlap
+    (its distance samples can only overestimate the segment-box distance), and
+    a link's distance to a box changes no faster than its points move. So
+    pen(c) > link_speed * R puts every posture of the ball in collision. A
+    posture is the same on all eight pages (they differ only in joint
+    spelling), so this certificate holds on every page -- for rotationally
+    symmetric link geometry only (source.geometry_is_page_dependent)."""
+    C = np.atleast_2d(np.asarray(C, dtype=float))
+    R = np.broadcast_to(np.asarray(R, dtype=float), (len(C),))
+    E, ok = chart.elbow(C)
+    W = chart.wrist(C)
+    T = W + chart.d_wt * chart.t[None, :]
+    speed = link_speed(chart, C, R)
+    out = np.zeros(len(C), dtype=bool)
+    for i in np.flatnonzero(ok & np.isfinite(speed)):
+        frames = dict(shoulder=chart.S, elbow=E[i], wrist=W[i], tool=T[i])
+        pen = scene.check(frames).penetration
+        out[i] = pen > speed[i] * R[i]
+    return out
+
+
+# --------------------------------------------------------------------------
+# the general singularity function (detection only: no certified bound yet)
+# --------------------------------------------------------------------------
+
+
+def arm_angle(arm: SrsArm, q: np.ndarray) -> float:
+    """The arm angle theta of a configuration, as SrsArm.ik_branch defines it
+    (elbow position about the shoulder-wrist axis, from the world-z plane)."""
+    f = arm.frames(q)
+    S, E, W = f["shoulder"], f["elbow"], f["wrist"]
+    u = (W - S) / np.linalg.norm(W - S)
+    v0 = np.array([0.0, 0.0, 1.0]) - u[2] * u
+    v0 /= np.linalg.norm(v0)
+    w0 = np.cross(u, v0)
+    e = E - S - np.dot(E - S, u) * u
+    return float(np.arctan2(np.dot(e, w0), np.dot(e, v0)))
+
+
+def augmented_jacobian(arm: SrsArm, q: np.ndarray, h: float = 1e-6) -> np.ndarray:
+    """J_psi = d(pose, theta)/dq, 7 x 7: the 6 x 7 task Jacobian plus the
+    arm angle's gradient."""
+    J = np.zeros((7, 7))
+    J[:6] = arm.jacobian(q)
+    for i in range(7):
+        d = np.zeros(7)
+        d[i] = h
+        a, b = arm_angle(arm, q + d), arm_angle(arm, q - d)
+        J[6, i] = np.angle(np.exp(1j * (a - b))) / (2.0 * h)
+    return J
+
+
+def general_sigma(chart: SrsChart, Z: np.ndarray, signs=(1, 1, 1)) -> np.ndarray:
+    """sigma_general(z) = smallest singular value of J_psi at q(z).
+
+    By the inverse function theorem the IK is locally unique and smooth
+    wherever J_psi is invertible, so no branch label can change there: every
+    door lies where sigma_general = 0 or where theta(q) is undefined
+    (Sigma_coord). It needs no knowledge of WHICH joints make doors. It has
+    no guaranteed bound yet, so it can DETECT doors but cannot certify that a
+    region has none; the certified search uses SrsChart.sigma.
+    nan where there is no IK."""
+    Z = np.atleast_2d(np.asarray(Z, dtype=float))
+    out = np.full(len(Z), np.nan)
+    pos = chart.task.position(Z[:, :-1])
+    for i, z in enumerate(Z):
+        r = chart.arm.ik_branch(pos[i], chart.task.rot, float(z[-1]), signs)
+        if r.ok:
+            out[i] = float(np.linalg.svd(augmented_jacobian(chart.arm, r.q),
+                                         compute_uv=False)[-1])
+    return out

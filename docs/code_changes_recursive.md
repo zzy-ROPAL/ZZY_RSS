@@ -96,3 +96,16 @@
 | `tests/test_recursive.py`(新) | 递归逻辑(脚本化 check)、无门列表的门、检查 (ii) 只豁免已卸载的门、端到端(EXP 2 无障碍 FEASIBLE、ZGAP INFEASIBLE),约 70 s |
 
 结果见 `docs/recursive_proof_design.md` §10.2。
+
+### 6.2 门的下一步(2026-11-12)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/chart.py` | `SrsChart(bound="frame")` 新默认界(臂角参考系的转动精确推导,紧 ~2.9×);`link_speed`、`collision_certified`(认证的球内全碰撞);`arm_angle`、`augmented_jacobian`、`general_sigma`(通用 σ,只找门不认证) |
+| `src/zzy_rss/check.py` | `World.collision_blocked`(区域上的认证碰撞卸载,八页通用);`discharged` 先走认证路线 |
+| `src/zzy_rss/doorset.py` | 精化点只留在本区域内;起点桶 `start_factor` 3 → 1.5(区域变窄后曲线不再断开) |
+| `src/zzy_rss/params.py` | `Page3Params.door_cert_tol = 0.002` |
+| `tests/test_chart.py` | 新增:frame 界更紧且从不更大、碰撞认证可靠(25 300 个姿态)、通用 σ 在门与折叠上为零 |
+| `docs/fig_sigma_doors.png` | 用新界重画 |
+
+结果见 `docs/recursive_proof_design.md` §10.3。

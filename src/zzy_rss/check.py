@@ -133,6 +133,7 @@ class World:
         self.start_theta = start_theta
         self.pages: dict = {}
         self._discharge: dict = {}
+        self._collision: dict = {}
         self._live_index: dict = {}
         self.walls_built = 0
 
@@ -161,14 +162,19 @@ class World:
 
     def discharged(self, signs: tuple, k: int) -> tuple:
         """(blocked, reason) of door k as seen from page `signs`. Only a
-        posture fact discharges (invariant 41), only on a door whose curves
-        are certified to account for its whole region (Door.check_coverage),
-        and only if EVERY curve of it is blocked."""
+        posture fact discharges (invariant 41). First the CERTIFIED route:
+        every posture at the door collides (collision_blocked, rigorous, all
+        pages). Otherwise the EVIDENCE route of findings 42/43: every curve
+        blocked by certify_curve (joint limits allowed), on a door whose
+        curves cover its region (Door.check_coverage)."""
         key = (tuple(signs), k)
         if key in self._discharge:
             return self._discharge[key]
         d = self.door(k)
-        if not d.supported or not d.curves:
+        cert = self.collision_blocked(k)
+        if cert[0]:
+            out = (True, cert[1])
+        elif not d.supported or not d.curves:
             out = (False, "unsupported or no curve: live")
         else:
             why = []
@@ -185,6 +191,49 @@ class World:
             out = (blocked, "; ".join(why))
         self._discharge[key] = out
         return out
+
+    def collision_blocked(self, k: int) -> tuple:
+        """(certified, reason): is EVERY posture at door k in collision?
+
+        Rigorous, from the door REGION (not its sampled curves): each cell is
+        either certified free of zeros of sigma (no door there) or certified
+        in collision throughout (chart.collision_certified); cells that are
+        neither are split down to `door_cert_tol`. Collision is a posture
+        fact, so the answer holds on every page -- only for rotationally
+        symmetric link geometry, which is checked."""
+        if k in self._collision:
+            return self._collision[k]
+        from .chart import collision_certified
+        from .source import geometry_is_page_dependent
+        if geometry_is_page_dependent(self.cfg):
+            self._collision[k] = (False, "off-axis link geometry: collision is page-dependent")
+            return self._collision[k]
+        r = self.door(k).region
+        C, H = r.centres.copy(), r.half.copy()
+        d = C.shape[1]
+        signs = np.array(list(__import__("itertools").product((-1.0, 1.0), repeat=d)))
+        tol = float(self.p3.door_cert_tol)
+        n_eval = 0
+        while len(C):
+            R = np.linalg.norm(H * self.scale, axis=1)
+            n_eval += len(C)
+            done = self.chart.ball_test(C, R).clear
+            rest = ~done
+            if rest.any():
+                done[rest] = collision_certified(self.chart, self.scene, C[rest], R[rest])
+            C, H, R = C[~done], H[~done], R[~done]
+            if not len(C):
+                break
+            if np.any(R <= tol) or n_eval > 200_000:
+                self._collision[k] = (False, f"not certified in collision ({len(C)} cell(s) "
+                                             f"open at radius {float(R.max()):.4f})")
+                return self._collision[k]
+            Hc = H / 2.0
+            C = (C[:, None, :] + signs[None] * Hc[:, None, :]).reshape(-1, d)
+            H = np.repeat(Hc, len(signs), axis=0)
+        self._collision[k] = (True, f"CERTIFIED: every posture at the door collides "
+                                    f"({n_eval} cell tests, all pages)")
+        return self._collision[k]
 
     def live_doors(self, signs: tuple) -> list:
         return [d.index for d in self.doorset.doors if not self.discharged(signs, d.index)[0]]

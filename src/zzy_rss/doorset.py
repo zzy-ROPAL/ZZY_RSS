@@ -114,7 +114,7 @@ class DoorSet:
 
 def refine_points(chart: SrsChart, region: DoorRegion, comp: int, spacing: float,
                   tol_sigma: float = 1e-7, iters: int = 40,
-                  start_factor: float = 3.0) -> np.ndarray:
+                  start_factor: float = 1.5) -> np.ndarray:
     """Points where sigma_comp = 0, by vectorised Newton steps on f = sigma^2.
 
     f is smooth at a door (an angle squared). Near a door curve its Hessian
@@ -195,6 +195,10 @@ def refine_points(chart: SrsChart, region: DoorRegion, comp: int, spacing: float
             break
     sv = sig(Z)
     P = Z[sv < tol_sigma] / scale
+    # Keep only points in THIS region's cells. Every zero of sigma lies in the
+    # cells of some region, so a start that converged onto a neighbouring
+    # door's curve (they can be close) lands outside these cells.
+    P = P[region.contains(P, slack=1e-9)] if len(P) else P
     if not len(P):
         return np.zeros((0, d))
     keys = np.floor(P * scale / (0.5 * spacing)).astype(np.int64)

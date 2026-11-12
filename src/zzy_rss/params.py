@@ -244,6 +244,10 @@ class Page3Params:
     # deeper than Algorithm 3 (facet_max_depth_tri). The cost is 4^depth
     # sigma evaluations for a triangle that hugs a door, batched per level.
     sigma_max_depth: int = 8
+    # Certified collision discharge of a door (check.World.collision_blocked):
+    # cells neither sigma-clear nor certified in collision are split down to
+    # this scaled radius, then the door stays live.
+    door_cert_tol: float = 0.002
 
 
 @dataclass(frozen=True)

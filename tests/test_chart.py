@@ -16,6 +16,13 @@ What is pinned:
     encloses no door; one around a door point encloses it.
   * TEST (ii) ON FACETS. A triangle through a door curve is rejected, one
     far away passes; check_simplex reports the sigma reason.
+  * THE "frame" BOUND IS TIGHTER AND STILL SOUND: 0 violations, and at least
+    2x smaller than the first ("triangle") bound on the same balls.
+  * COLLISION CERTIFICATE IS SOUND: every posture sampled in a ball that
+    collision_certified accepts collides.
+  * THE GENERAL SIGMA (smallest singular value of d(pose, theta)/dq) vanishes
+    at every door point and at the fold, and nowhere near zero elsewhere --
+    without being told which joints make doors.
 """
 
 from __future__ import annotations
@@ -222,6 +229,68 @@ def test_facet_sigma() -> dict:
     return dict(hit=why_hit, far_depth=d_far)
 
 
+def test_frame_bound_is_tighter() -> dict:
+    surf, ch = _chart("exp2")
+    tri = SrsChart.for_surface(ARM, surf, P3)
+    tri.bound = "triangle"
+    rng = np.random.default_rng(5)
+    C = rng.uniform(ch.lo, ch.hi, (2000, 3))
+    R = np.full(len(C), 0.01)
+    a, b = ch.lipschitz(C, R)[:, :2], tri.lipschitz(C, R)[:, :2]
+    ok = np.isfinite(a) & np.isfinite(b)
+    assert np.all(a[ok] <= b[ok] + 1e-12), "frame bound must never exceed the triangle one"
+    ratio = float(np.median(b[ok] / a[ok]))
+    assert ratio > 2.0, ratio
+    return dict(ratio=ratio)
+
+
+def test_collision_certificate_is_sound() -> dict:
+    import dataclasses
+    from run_3d import ZGAP
+    from zzy_rss.chart import collision_certified
+    from zzy_rss.params import SceneParams
+    from zzy_rss.scene import Scene
+    cfg = dataclasses.replace(CFG, scene=SceneParams(gap_open=True, obstacles=ZGAP))
+    scene = Scene(cfg.arm, cfg.scene)
+    surf, ch = _chart("exp2")
+    rng = np.random.default_rng(6)
+    C = rng.uniform(ch.lo, ch.hi, (3000, 3))
+    R = 10 ** rng.uniform(-3, -1.5, len(C))
+    cert = collision_certified(ch, scene, C, R)
+    checked = 0
+    for c, r in zip(C[cert], R[cert]):
+        d = rng.normal(size=(20, 3))
+        d /= np.linalg.norm(d, axis=1)[:, None]
+        Z = c[None] + d * (rng.uniform(0, 1, (20, 1)) * r) / ch.scale
+        E, ok = ch.elbow(Z)
+        W = ch.wrist(Z)
+        for e, w, o in zip(E, W, ok):
+            if not o:
+                continue
+            fr = dict(shoulder=ch.S, elbow=e, wrist=w, tool=w + ch.d_wt * ch.t)
+            assert scene.check(fr).in_collision, "a certified ball holds a free posture"
+            checked += 1
+    assert int(cert.sum()) > 50 and checked > 500, (int(cert.sum()), checked)
+    return dict(balls=int(cert.sum()), postures=checked)
+
+
+def test_general_sigma() -> dict:
+    from zzy_rss.chart import augmented_jacobian, general_sigma
+    surf, ch = _chart("exp3-new")
+    at = []
+    for c in door_curves(CFG, ARM, surf, P3):
+        at.append(general_sigma(ch, _on_patch(c)[::15]))
+    at = np.concatenate(at)
+    at = at[np.isfinite(at)]
+    rnd = general_sigma(ch, np.random.default_rng(7).uniform(ch.lo, ch.hi, (300, 3)))
+    rnd = rnd[np.isfinite(rnd)]
+    fold = float(np.linalg.svd(augmented_jacobian(
+        ARM, np.array([0.3, 0.7, -0.2, 1e-7, 0.4, 0.9, 0.1])), compute_uv=False)[-1])
+    assert len(at) > 10 and at.max() < 1e-6, at.max()
+    assert np.median(rnd) > 0.05 and fold < 1e-6
+    return dict(at_doors=float(at.max()), median=float(np.median(rnd)), fold=fold)
+
+
 if __name__ == "__main__":
     r = test_sigma_is_the_chart_singularity()
     print(f"[chart] sigma = chart singularity: {r['n']} IK solutions, max error "
@@ -239,4 +308,13 @@ if __name__ == "__main__":
     r = test_facet_sigma()
     print(f"[chart] facet test (ii): through a door -> '{r['hit']}'; far facet clear "
           f"at sigma depth {r['far_depth']}")
+    r = test_frame_bound_is_tighter()
+    print(f"[chart] frame bound: {r['ratio']:.2f}x tighter than the triangle bound (median), "
+          f"never larger")
+    r = test_collision_certificate_is_sound()
+    print(f"[chart] collision certificate: {r['balls']} certified balls, {r['postures']} "
+          f"sampled postures inside them, all in collision")
+    r = test_general_sigma()
+    print(f"[chart] general sigma: <= {r['at_doors']:.1e} at door points, {r['fold']:.1e} at "
+          f"the fold, median {r['median']:.3f} elsewhere")
     print("[chart] ALL TESTS PASSED")
