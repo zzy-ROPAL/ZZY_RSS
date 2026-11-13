@@ -119,3 +119,13 @@
 | `tests/test_krawczyk.py`(新) | 区间算术与区间 FK 的包含性、含门点的格从不被认证、认证率随格大小(钉住"只适合小格") |
 
 **未接入证明**(见设计文档 §10.4)。
+
+### 6.4 代数路线(2026-11-13)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/algebraic.py`(新) | numpy 全次数同伦求解器(`solve_total_degree`);S-R-S 的 q2/q6 门方程组(姿态变量)与 `doors_on_slice` |
+| `tests/test_algebraic.py`(新) | 逐切片与闭式解一致、0 条路径失败、σ ≈ 0、落在认证区域内 |
+| `scripts/fig_facet_threshold.py`、`docs/fig_facet_threshold.png`(新) | 面检查为何需要与面大小挂钩的阈值(真实数据) |
+
+**未接入证明**(见设计文档 §10.5)。
