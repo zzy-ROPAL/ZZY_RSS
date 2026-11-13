@@ -244,3 +244,38 @@ def solve_instance(sys: DoorSystem, mono: MonodromyResult, P_real: dict, rng=Non
         if y is not None:
             out.append(y)
     return _dedupe(out)
+
+
+def task_instance(surf, v: float, ab=(0.37, 0.81)) -> dict:
+    """The real parameter instance of a weld-patch slice v (any fixed ab with
+    a, b != 0 picks one spin root; the other is q_k + pi, deduped below)."""
+    return dict(p0=(surf.p0 + v * surf.dv).astype(complex), A=surf.du.astype(complex),
+                Rt=surf.rot.astype(complex), ab=np.asarray(ab, dtype=complex))
+
+
+def real_doors(sys: DoorSystem, sols, P: dict, imag_tol=1e-6, rot_tol=1e-6) -> list:
+    """Door configurations among the endpoints of a real instance: real,
+    u in (0, 1), the tool rotation really equal to R_t (drops the isolated
+    half-turn solutions of the three orientation equations), q_label = 0 (not
+    pi). Returns (u, q) pairs, sorted by u. One door POINT of the page has
+    several joint spellings here (the other sign flips, and the two spin
+    roots q_k, q_k + pi): group them by (u, arm angle) to compare with a chart."""
+    n = sys.n
+    Rt = np.asarray(P["Rt"]).real
+    out = []
+    for x in sols:
+        if np.max(np.abs(x.imag)) > imag_tol:
+            continue
+        x = x.real
+        c, s, u = x[:n], x[n:2 * n], float(x[2 * n])
+        if not (0.0 < u < 1.0) or c[sys.label] < 0:
+            continue
+        _, R = fk_cs(sys.chain, c, s)
+        if np.linalg.norm(Rt.T @ R.real - np.eye(3)) > rot_tol:
+            continue
+        q = np.arctan2(s, c)
+        if any(abs(u - v) < 1e-7 and np.all(np.abs(np.angle(np.exp(1j * (q - p)))) < 1e-6)
+               for v, p in out):
+            continue
+        out.append((u, q))
+    return sorted(out, key=lambda t: t[0])
