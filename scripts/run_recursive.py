@@ -29,7 +29,7 @@ from search_scene3 import surface  # noqa: E402
 from zzy_rss.arm import SrsArm  # noqa: E402
 from zzy_rss.params import (BoxObstacle, Config, Page3Params, PageMapParams,  # noqa: E402
                             SceneParams)
-from zzy_rss.proof import prove_task, write_certificate  # noqa: E402
+from zzy_rss.proof import prove_task, write_certificate, write_geometry  # noqa: E402
 from zzy_rss.scene import Scene  # noqa: E402
 from zzy_rss.weld import WeldSurface  # noqa: E402
 
@@ -62,6 +62,8 @@ def main() -> None:
     ap.add_argument("--wall-seconds", type=float, default=1200.0)
     ap.add_argument("--run-seconds", type=float, default=7200.0)
     ap.add_argument("--save", default=None)
+    ap.add_argument("--save-geometry", default=None,
+                    help="pickle with every wall mesh and the verified path (for figures)")
     ap.add_argument("--quiet", action="store_true")
     ap.add_argument("--also-prove", action="store_true",
                     help="on a FEASIBLE task, run the recursion anyway to show where it "
@@ -92,6 +94,8 @@ def main() -> None:
             print(line)
     if args.save:
         write_certificate(res, args.save)
+    if args.save_geometry:
+        write_geometry(res, args.save_geometry)
     print(json.dumps(dict(case=args.case, verdict=res.verdict, reason=res.reason,
                           seconds=round(dt, 1), stats={k: v for k, v in res.stats.items()
                                                        if k != "connect"}),

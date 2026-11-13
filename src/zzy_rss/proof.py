@@ -59,12 +59,21 @@ class ProofNode:
     reason: str
     walls: list = field(default_factory=list)       # one dict per page
     children: list = field(default_factory=list)    # dict(door, cut, node)
+    geometry: list = field(default_factory=list, repr=False)   # wall meshes (not in the JSON)
 
     def as_dict(self) -> dict:
         return dict(A=self.A, B=self.B, status=self.status, reason=self.reason,
                     walls=self.walls,
                     children=[dict(door=c["door"], cut=c["cut"], node=c["node"].as_dict())
                               for c in self.children])
+
+    def wall_meshes(self) -> list:
+        """Every wall mesh of the tree: dict(node, page, ok, vertices, simplices),
+        vertices in page coordinates (u, v, theta)."""
+        out = [dict(node=f"{self.A} -/-> {self.B}", **g) for g in self.geometry]
+        for c in self.children:
+            out += c["node"].wall_meshes()
+        return out
 
     def count_walls(self) -> int:
         return len(self.walls) + sum(c["node"].count_walls() for c in self.children)
@@ -124,9 +133,14 @@ class Prover:
         if self.verbose:
             print(f"[proof]{pad}   -> {r.kind}: {r.reason}"
                   + (f"; doors inside: {[d.label() for d in r.doors]}" if r.doors else ""))
+        geom = [dict(page=page_name(w.signs), ok=w.ok,
+                     vertices=np.asarray(w.poly.vertices, dtype=float),
+                     simplices=np.asarray(w.poly.simplices, dtype=int))
+                for w in r.walls if w.poly is not None and w.poly.vertices is not None]
         if r.kind != WALLED:
-            return ProofNode(A.label(), B.label(), NOT_PROVEN, f"{r.kind}: {r.reason}", walls)
-        node = ProofNode(A.label(), B.label(), PROVEN, "walls verified", walls)
+            return ProofNode(A.label(), B.label(), NOT_PROVEN, f"{r.kind}: {r.reason}", walls,
+                             geometry=geom)
+        node = ProofNode(A.label(), B.label(), PROVEN, "walls verified", walls, geometry=geom)
         if not r.doors:
             node.reason = "walls verified, no live door inside"
             self.cache[key] = node
@@ -135,7 +149,7 @@ class Prover:
             if d in branch:
                 return ProofNode(A.label(), B.label(), NOT_PROVEN,
                                  f"cycle: {d.label()} is already being cut on this branch",
-                                 walls)
+                                 walls, geometry=geom)
             left = self.inf_proof(A, d, branch | {d}, depth + 1)
             if left.status == PROVEN:
                 node.children.append(dict(door=d.label(), cut=f"{A.label()} -/-> door",
@@ -148,7 +162,8 @@ class Prover:
                 continue
             return ProofNode(A.label(), B.label(), NOT_PROVEN,
                              f"{d.label()}: neither {A.label()} -/-> door ({left.reason}) "
-                             f"nor door -/-> {B.label()} ({right.reason})", walls)
+                             f"nor door -/-> {B.label()} ({right.reason})", walls,
+                             geometry=geom)
         node.reason = f"walls verified; all {len(r.doors)} door(s) inside cut"
         self.cache[key] = node
         return node
@@ -303,6 +318,19 @@ def prove_task(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
         if verbose:
             print(f"[budget] {e.reason}")
         return TaskResult(INCONCLUSIVE, e.reason, stats=dict(budget_stop=e.reason))
+
+
+def write_geometry(res: TaskResult, path) -> None:
+    """The pictures' data, next to the JSON certificate: every wall mesh of the
+    proof tree and the verified path's joint configurations (pickle)."""
+    import pickle
+    q = None
+    if res.path is not None and getattr(res.path, "legs", None):
+        q = np.concatenate([np.asarray(leg.q, dtype=float) for leg in res.path.legs])
+    with open(path, "wb") as f:
+        pickle.dump(dict(verdict=res.verdict, reason=res.reason,
+                         walls=[] if res.tree is None else res.tree.wall_meshes(),
+                         path_q=q), f)
 
 
 def write_certificate(res: TaskResult, path) -> None:

@@ -75,12 +75,46 @@ def classify_slice(cfg, arm, scene, surf, signs, U, T, v0):
     return code.reshape(U.shape)
 
 
+def slice_mesh(V, S, v0):
+    """Segments where the triangles of a wall mesh cross the plane v = v0."""
+    segs = []
+    d = V[:, 1] - v0
+    for tri in S:
+        pts = []
+        for i, j in ((0, 1), (1, 2), (2, 0)):
+            a, b = tri[i], tri[j]
+            if (d[a] < 0) != (d[b] < 0):
+                t = d[a] / (d[a] - d[b])
+                pts.append(V[a] + t * (V[b] - V[a]))
+        if len(pts) == 2:
+            segs.append(pts)
+    return segs
+
+
+def path_page_coords(arm, surf, Q):
+    """(u, v, theta, page) of every configuration of a path: the tool position
+    on the patch gives (u, v), the elbow gives theta, the joint signs the page."""
+    from zzy_rss.chart import arm_angle
+    M = np.column_stack([surf.du, surf.dv])
+    u, v, th, pg = [], [], [], []
+    for q in Q:
+        T, _ = arm.fk(q)
+        uv = np.linalg.lstsq(M, T - surf.p0, rcond=None)[0]
+        u.append(uv[0])
+        v.append(uv[1])
+        th.append(arm_angle(arm, q))
+        pg.append(page_name(np.where(q[[1, 3, 5]] >= 0, 1, -1)))
+    return dict(u=np.array(u), v=np.array(v), theta=np.array(th), page=np.array(pg))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--case", choices=sorted(CASES), default="exp3-new")
     ap.add_argument("--v0", type=float, default=None, help="slice (default: the start's v)")
     ap.add_argument("--grid", type=int, default=241)
     ap.add_argument("--out", default="docs/fig_eight_pages_exp3.png")
+    ap.add_argument("--geometry", default=None,
+                    help="pickle from run_recursive.py --save-geometry: draws the walls and the path")
     args = ap.parse_args()
 
     sp, obstacles, start_signs, _ = CASES[args.case]
@@ -98,6 +132,13 @@ def main() -> None:
           f"({t_doors:.1f} s)")
     th0 = choose_start_theta(cfg, arm, surf, scene, start_signs, p3)
 
+    walls, path = [], None
+    if args.geometry:
+        import pickle
+        g = pickle.load(open(args.geometry, "rb"))
+        walls = g["walls"]
+        if g.get("path_q") is not None:
+            path = path_page_coords(arm, surf, g["path_q"])
     U, T = np.meshgrid(np.linspace(0, 1, args.grid), np.linspace(-np.pi, np.pi, args.grid))
     fig, axs = plt.subplots(2, 4, figsize=(19, 9.6), sharex=True, sharey=True)
     cmap = ListedColormap(COLORS)
@@ -121,6 +162,15 @@ def main() -> None:
                     other[FLIP[k]] *= -1
                     partners.append(f"D{i}:{k}->{page_name(other)}")
         ax.axvline(1.0, color="#c1121f", lw=2.5)
+        for w in walls:
+            if w["page"] != page_name(sg):
+                continue
+            for a, b in slice_mesh(w["vertices"], w["simplices"], v0):
+                ax.plot([a[0], b[0]], np.degrees([a[2], b[2]]), "-", c="k", lw=1.6)
+        if path is not None:
+            on = path["page"] == page_name(sg)
+            if on.any():
+                ax.plot(path["u"][on], np.degrees(path["theta"][on]), ".", ms=1.2, c="#1d3557")
         is_start = tuple(sg) == tuple(start_signs)
         if is_start and th0 is not None:
             ax.plot([p3.start_u], [np.degrees(th0)], "*", ms=16, mfc="#ffd60a", mec="k")
@@ -139,6 +189,11 @@ def main() -> None:
                 plt.Line2D([], [], ls="", marker=".", c="#c1121f", ms=8, label="door curve (sigma = 0)"),
                 plt.Line2D([], [], ls="", marker="*", mfc="#ffd60a", mec="k", ms=12, label="start"),
                 plt.Line2D([], [], c="#c1121f", lw=2.5, label="goal edge u = 1")]
+    if walls:
+        handles.append(plt.Line2D([], [], c="k", lw=1.6, label="verified wall (cut at v)"))
+    if path is not None:
+        handles.append(plt.Line2D([], [], ls="", marker=".", c="#1d3557", ms=6,
+                                  label="verified path (all v, projected)"))
     fig.legend(handles=handles, loc="lower center", ncol=8, fontsize=9, frameon=False)
     fig.suptitle(f"{args.case}: the eight pages at v = {v0:.2f}  --  doors found by the sigma "
                  f"search with the guaranteed L ({len(ds.doors)} region(s), complete="
@@ -147,6 +202,46 @@ def main() -> None:
     Path(args.out).parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.out, dpi=130)
     print(f"[fig8] saved {args.out} ({time.time() - t0:.1f} s)")
+    if walls:
+        out3 = str(Path(args.out).with_name(Path(args.out).stem + "_wall3d.png"))
+        wall_3d(walls, path, ds, p3, th0, start_signs, out3)
+        print(f"[fig8] saved {out3}")
+
+
+def wall_3d(walls, path, ds, p3, th0, start_signs, out):
+    """Every wall of the proof tree in (u, v, theta), with the doors and the path."""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    fig = plt.figure(figsize=(7.5 * len(walls), 7))
+    for k, w in enumerate(walls):
+        ax = fig.add_subplot(1, len(walls), k + 1, projection="3d")
+        V = w["vertices"].copy()
+        V[:, 2] = np.degrees(V[:, 2])
+        ax.add_collection3d(Poly3DCollection(V[w["simplices"]], facecolor="#8ecae6", alpha=0.25,
+                                             edgecolor="#219ebc", lw=0.15))
+        for d in ds.doors:
+            for cv in d.curves:
+                ax.plot(cv.pts[:, 0], cv.pts[:, 1], np.degrees(cv.pts[:, 2]), ".", ms=2,
+                        c="#c1121f")
+        if path is not None:
+            on = path["page"] == w["page"]
+            ax.plot(path["u"][on], path["v"][on], np.degrees(path["theta"][on]), ".", ms=1,
+                    c="#1d3557")
+        if w["page"] == page_name(start_signs) and th0 is not None:
+            ax.scatter([p3.start_u], [p3.start_v], [np.degrees(th0)], marker="*", s=200,
+                       c="#ffd60a", edgecolors="k")
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_zlim(-180, 180)
+        ax.set_xlabel("u")
+        ax.set_ylabel("v")
+        ax.set_zlabel("theta (deg)")
+        ax.view_init(elev=22, azim=-60)
+        ax.set_title(f"wall on page {w['page']} ({'verified' if w['ok'] else 'FAILED'}): "
+                     f"{len(w['simplices'])} triangles\n{w['node']}\n"
+                     f"red: door curves (sigma = 0), dots: verified path on this page, star: start",
+                     fontsize=8)
+    fig.tight_layout()
+    fig.savefig(out, dpi=130)
 
 
 if __name__ == "__main__":
