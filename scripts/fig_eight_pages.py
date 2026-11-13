@@ -54,6 +54,7 @@ COLORS = ["#f4f4f4", "#e76f51", "#2a9d8f", "#e9c46a", "#b392d6"]
 NAMES = ["valid", "collision (box)", "q7 beyond limit", "q2/q4/q6 limit or no IK",
          "q1/q3/q5 limit only"]
 FLIP = {"q2": 0, "q4": 1, "q6": 2}
+WALL_COLORS = ["#000000", "#1d4ed8", "#be185d"]
 
 
 def page_name(sg) -> str:
@@ -139,6 +140,7 @@ def main() -> None:
         walls = g["walls"]
         if g.get("path_q") is not None:
             path = path_page_coords(arm, surf, g["path_q"])
+    nodes = list(dict.fromkeys(w["node"] for w in walls))
     U, T = np.meshgrid(np.linspace(0, 1, args.grid), np.linspace(-np.pi, np.pi, args.grid))
     fig, axs = plt.subplots(2, 4, figsize=(19, 9.6), sharex=True, sharey=True)
     cmap = ListedColormap(COLORS)
@@ -165,8 +167,9 @@ def main() -> None:
         for w in walls:
             if w["page"] != page_name(sg):
                 continue
+            col = WALL_COLORS[nodes.index(w["node"]) % len(WALL_COLORS)]
             for a, b in slice_mesh(w["vertices"], w["simplices"], v0):
-                ax.plot([a[0], b[0]], np.degrees([a[2], b[2]]), "-", c="k", lw=1.6)
+                ax.plot([a[0], b[0]], np.degrees([a[2], b[2]]), "-", c=col, lw=1.8)
         if path is not None:
             on = path["page"] == page_name(sg)
             if on.any():
@@ -189,12 +192,13 @@ def main() -> None:
                 plt.Line2D([], [], ls="", marker=".", c="#c1121f", ms=8, label="door curve (sigma = 0)"),
                 plt.Line2D([], [], ls="", marker="*", mfc="#ffd60a", mec="k", ms=12, label="start"),
                 plt.Line2D([], [], c="#c1121f", lw=2.5, label="goal edge u = 1")]
-    if walls:
-        handles.append(plt.Line2D([], [], c="k", lw=1.6, label="verified wall (cut at v)"))
+    for k, nd in enumerate(nodes):
+        handles.append(plt.Line2D([], [], c=WALL_COLORS[k % len(WALL_COLORS)], lw=1.8,
+                                  label=f"wall for {nd} (cut at v)"))
     if path is not None:
         handles.append(plt.Line2D([], [], ls="", marker=".", c="#1d3557", ms=6,
                                   label="verified path (all v, projected)"))
-    fig.legend(handles=handles, loc="lower center", ncol=8, fontsize=9, frameon=False)
+    fig.legend(handles=handles, loc="lower center", ncol=6, fontsize=9, frameon=False)
     fig.suptitle(f"{args.case}: the eight pages at v = {v0:.2f}  --  doors found by the sigma "
                  f"search with the guaranteed L ({len(ds.doors)} region(s), complete="
                  f"{ds.complete}, {t_doors:.1f} s)", fontsize=12)
