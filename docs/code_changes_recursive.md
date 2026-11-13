@@ -129,3 +129,13 @@
 | `scripts/fig_facet_threshold.py`、`docs/fig_facet_threshold.png`(新) | 面检查为何需要与面大小挂钩的阈值(真实数据) |
 
 **未接入证明**(见设计文档 §10.5)。
+
+### 6.5 关节变量版代数路线(2026-11-13)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/algebraic_joint.py`(新) | `DoorSystem`(关节变量 15×15 门方程组,通用串联链)、`track`(参数同伦)、`monodromy_solve`、`solve_instance`、`task_instance`、`real_doors`(实、面片内、姿态正确、q_j=0) |
+| `scripts/joint_monodromy.py`(新) | 求 q2/q6 两个系统的通用解(各 64 个)并缓存到 `tests/data/joint_monodromy.npz` |
+| `tests/test_algebraic_joint.py`(新) | 缓存真实性、q2/q6 各一个切片与闭式解一致、FK 复查 |
+
+**未接入证明**(见设计文档 §10.6)。

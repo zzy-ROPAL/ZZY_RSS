@@ -28,6 +28,7 @@
 > 门搜索的格(1e-2)上认证率 0%,要 ≤3e-4 才行(格子多 ~10⁴ 倍)。**未接入证明**;证明仍用 SRS 专用界。
 > **§10.5 代数路线**:门条件写成多项式(姿态变量,每切片 4 条同伦路径),同伦延拓**不用 L** 找全部门;
 > 四个面片逐切片与闭式解**完全一致**(差 ≤ 7e-16,0 条路径失败)。通用版(关节变量)需专用求解器。
+> **§10.6 关节变量版**(不用 S-R-S 几何,只用 FK):单值性求出 q2/q6 门系统各 64 个通用解,参数同伦到真实切片,**12/12 切片与闭式解一致(差 ≤ 4.2e-10)**;概率 1,未接入证明。
 > 运行 `python3 scripts/run_recursive.py --case {exp2-none,exp2-zgap,exp3-new,two-wall}`;
 > 改动记录 `docs/code_changes_recursive.md`。
 
@@ -339,6 +340,7 @@ python3 tests/test_chart.py                                # 递归证明步骤 
 python3 tests/test_recursive.py                            # 递归逻辑、无门列表找门、检查 (ii)、端到端 EXP 2(约 70 s)
 python3 tests/test_krawczyk.py                             # 方法 C:区间算术/FK 包含性、从不认证门格、只适合小格(§10.4)
 python3 tests/test_algebraic.py                            # 代数路线:同伦延拓逐切片找全部门,与闭式解逐点一致(§10.5)
+python3 tests/test_algebraic_joint.py                      # 关节变量版:通用串联臂的门方程组,单值性 64 解 → 12/12 切片与闭式解一致(§10.6,约 4 分钟;缓存由 scripts/joint_monodromy.py 生成)
 python3 scripts/run_recursive.py --case two-wall --save out/rec_two_wall.json   # 在门处分裂的证明(§46 场景,约 210 s)
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
