@@ -149,5 +149,6 @@
 | 方法 4(Krawczyk,§10.4) | `src/zzy_rss/interval.py`、`src/zzy_rss/krawczyk.py`、`tests/test_krawczyk.py` |
 | 方法 6(关节变量代数路线,§10.6) | `src/zzy_rss/algebraic_joint.py`、`tests/test_algebraic_joint.py`、`scripts/joint_monodromy.py` |
 
-保留:方法 5(`src/zzy_rss/algebraic.py`,姿态变量的代数找门,只作对照,未接入证明)。
-结论与实测数字留在设计文档 §10.4 / §10.6。代码可从提交 `7c00d48` 取回。
+同日又删除方法 5(姿态变量代数路线,§10.5):`src/zzy_rss/algebraic.py`、`tests/test_algebraic.py`。
+**找门现在只有方法 2**:`chart.py`(σ 与 L)、`interior.py`(盒子搜索)、`doorset.py`(门曲线)。
+结论与实测数字留在设计文档 §10.4 / §10.5 / §10.6。代码可从提交 `7c00d48` 取回。

@@ -25,10 +25,9 @@
 > **§10.3**:σ 的界收紧 ~2.9×(门区域格数 ÷7–10);**碰撞卸载已认证**(区域上,八页通用);
 > 通用 σ = σ_min(∂(pose,θ)/∂q) 能找门,但**没有保证界**,还不能进证明。图 `docs/fig_sigma_doors.png`。
 > **找门只用方法 2**(σ + 手推的保证界 L,`chart.py` + `interior.py` + `doorset.py`)。
-> §10.4 方法 C/4(Krawczyk)与 §10.6 方法 6(关节变量代数路线)**的代码已于 2026-11-15 删除**(不再需要;
-> 结论留在设计文档里:方法 4 认证半径 ~ σ_min²、不实用;方法 6 单值性停止规则不可靠、迹检验未通过)。
-> **§10.5 代数路线**:门条件写成多项式(姿态变量,每切片 4 条同伦路径),同伦延拓**不用 L** 找全部门;
-> 四个面片逐切片与闭式解**完全一致**(差 ≤ 7e-16,0 条路径失败)。通用版(关节变量)需专用求解器。
+> 其余找门方法的代码已于 2026-11-15 **全部删除**(不再需要;结论留在设计文档里):
+> §10.4 方法 4(Krawczyk,认证半径 ~ σ_min²、不实用)、§10.5 方法 5(姿态变量代数路线,
+> 逐切片与闭式解一致但只适用 S-R-S、未接入证明)、§10.6 方法 6(关节变量代数路线,迹检验未通过)。
 > 运行 `python3 scripts/run_recursive.py --case {exp2-none,exp2-zgap,exp3-new,two-wall}`;
 > 改动记录 `docs/code_changes_recursive.md`。
 
@@ -338,7 +337,6 @@ export PYTHONPATH=src
 python3 tests/test_ik.py                                   # IK 验收(必须全过)
 python3 tests/test_chart.py                                # 递归证明步骤 1/2a:σ = 页坐标奇异、保证界、墙内门搜索完备
 python3 tests/test_recursive.py                            # 递归逻辑、无门列表找门、检查 (ii)、端到端 EXP 2(约 70 s)
-python3 tests/test_algebraic.py                            # 代数路线:同伦延拓逐切片找全部门,与闭式解逐点一致(§10.5)
 python3 scripts/run_recursive.py --case two-wall --save out/rec_two_wall.json   # 在门处分裂的证明(§46 场景,约 210 s)
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
