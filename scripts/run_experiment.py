@@ -136,4 +136,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    from zzy_rss.legacy import notice as _legacy_notice
+    _legacy_notice(__file__)
     main()

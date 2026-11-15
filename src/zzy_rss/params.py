@@ -248,6 +248,21 @@ class Page3Params:
     # cells neither sigma-clear nor certified in collision are split down to
     # this scaled radius, then the door stays live.
     door_cert_tol: float = 0.002
+    # Certified JOINT-LIMIT discharge (check.World.posture_certified): a cell
+    # may also be certified because a joint that does not move along the
+    # door's spin is beyond its limit everywhere in it (chart.limit_certified).
+    # Page-dependent, unlike collision.
+    discharge_limits: bool = True
+    # Limit margins are thin (exp2-none: q5 0.6 deg past its limit), so the
+    # posture certificate may split further, down to this radius -- but it
+    # gives up at door_cert_tol as soon as an open cell's centre is a VALID
+    # posture (all constant joints within limits, no collision): that door is
+    # live in all likelihood, and giving up is always sound.
+    door_cert_tol_fine: float = 0.0005
+    # The old EVIDENCE route (doors3.certify_curve: sampled curve + Lipschitz
+    # guard, invariant 40). Off by default since 2026-11-15: every discharge
+    # in the proof is now certified. On only to reproduce older runs.
+    discharge_evidence: bool = False
 
 
 @dataclass(frozen=True)

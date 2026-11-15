@@ -152,3 +152,18 @@
 同日又删除方法 5(姿态变量代数路线,§10.5):`src/zzy_rss/algebraic.py`、`tests/test_algebraic.py`。
 **找门现在只有方法 2**:`chart.py`(σ 与 L)、`interior.py`(盒子搜索)、`doorset.py`(门曲线)。
 结论与实测数字留在设计文档 §10.4 / §10.5 / §10.6。代码可从提交 `7c00d48` 取回。
+
+### 6.7 认证的关节限位卸载 + 主方法软切换(2026-11-15)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/chart.py` | `CONSTANT_JOINTS`、`joint_rates`(七个关节角的保证界)、`limit_margins`、`limit_certified` |
+| `src/zzy_rss/check.py` | `World.posture_certified`(逐页:σ 无门 / 整格碰撞 / 不动关节整格越限)、`_certify_cells`(共用格子循环,限位在前,`door_cert_tol_fine` 细分 + 有效中心提前放弃)、`_valid_centre`;`discharged` 只认证书,证据路线放到开关后面;`collision_blocked` 保留 |
+| `src/zzy_rss/params.py` | `Page3Params.discharge_limits = True`、`discharge_evidence = False`、`door_cert_tol_fine = 0.0005` |
+| `src/zzy_rss/legacy.py`(新) | `notice()`:旧流水线脚本启动时打印 `[legacy]` |
+| 9 个旧脚本 | `run_3d/run_three/run_sampled/run_experiment/run_demo/run_stage12/run_e4/run_sweep/run_reachability`:`__main__` 开头调用 `notice` |
+| `tests/test_chart.py` | `test_joint_rates_are_guaranteed`(16 万对 × 8 页,0 违反)、`test_limit_certificate_is_sound` |
+| `tests/test_recursive.py` | `test_discharge_is_certified`(exp2-none 限位证书、exp2-zgap 碰撞证书、exp3-new 活;证据路线不出现) |
+| `CLAUDE.md` | 主方法说明;命令区分"主方法 / legacy" |
+
+结果见设计文档 §10.7。

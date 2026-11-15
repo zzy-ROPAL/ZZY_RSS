@@ -149,6 +149,28 @@ def test_sigma_test_exempts_only_discharged_doors() -> dict:
     return dict(on_door_live=bool(live[0]), on_door_discharged=bool(disch[0]))
 
 
+def test_discharge_is_certified() -> dict:
+    """Every door decision is a certificate; the evidence route is off."""
+    from run_recursive import CASES
+    from zzy_rss.flood3 import flip
+    from zzy_rss.params import SceneParams
+    assert P3.discharge_evidence is False and P3.discharge_limits is True
+    out = {}
+    for name, want in (("exp2-none", ("by limits", True)), ("exp2-zgap", ("collides", True)),
+                       ("exp3-new", ("valid posture", False))):
+        sp, obs, signs, _ = CASES[name]
+        cfg = Config(scene=SceneParams(gap_open=True, obstacles=tuple(obs)))
+        w = World(cfg, ARM, WeldSurface(sp), Scene(cfg.arm, cfg.scene), signs, P3,
+                  start_theta=0.0, verbose=False)
+        d = w.doorset.doors[0]
+        for pg in (tuple(signs), flip(tuple(signs), d.sign_index)):
+            blocked, why = w.discharged(pg, 0)
+            assert blocked == want[1] and want[0] in why, (name, pg, blocked, why)
+            assert "[evidence route]" not in why
+        out[name] = ("discharged" if want[1] else "live", why[:60])
+    return out
+
+
 def test_end_to_end() -> dict:
     import dataclasses
     from run_3d import ZGAP
@@ -180,6 +202,8 @@ if __name__ == "__main__":
     r = test_sigma_test_exempts_only_discharged_doors()
     print(f"[recursive] test (ii): ball on a door passes live={r['on_door_live']}, "
           f"discharged={r['on_door_discharged']}; far ball passes both")
+    for k, v in test_discharge_is_certified().items():
+        print(f"[recursive] certified discharge {k:9s}: {v[0]} ({v[1]}...)")
     for k, v in test_end_to_end().items():
         print(f"[recursive] end to end exp2/{k}: {v[0]} -- {v[1]} ({v[2]} s)")
     print("[recursive] ALL TESTS PASSED")

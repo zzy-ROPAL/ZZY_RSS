@@ -413,6 +413,127 @@ def collision_certified(chart: SrsChart, scene, C: np.ndarray, R) -> np.ndarray:
 
 
 # --------------------------------------------------------------------------
+# certified joint limits over a ball (page-dependent posture facts)
+# --------------------------------------------------------------------------
+
+# Joints that do NOT move along a door's spin: the spin turns (q1, q3) at a q2
+# door and (q5, q7) at a q6 door, and nothing else. Only these may discharge a
+# door by a limit (invariant 41); the spinning pair's values at the door are
+# the IK's arbitrary spelling.
+CONSTANT_JOINTS = {I_Q2: (3, 4, 5, 6), I_Q6: (0, 1, 2, 3)}
+
+
+def _sin_min(angle_c: np.ndarray, rate: np.ndarray, R: np.ndarray) -> np.ndarray:
+    """Smallest sin of an angle in [0, pi] that is within rate * R of angle_c
+    (sin is concave there: the minimum is at an end); 0 if the interval
+    reaches 0 or pi."""
+    lo = angle_c - rate * R
+    hi = angle_c + rate * R
+    out = np.minimum(np.sin(np.clip(lo, 0.0, np.pi)), np.sin(np.clip(hi, 0.0, np.pi)))
+    return np.where((lo > 0.0) & (hi < np.pi) & np.isfinite(rate), out, 0.0)
+
+
+def joint_rates(chart: SrsChart, C: np.ndarray, R) -> np.ndarray:
+    """(N, 7) guaranteed Lipschitz bounds of every joint angle (circle metric,
+    radians per scaled unit) over B(C_i, R_i), on every page; inf where none.
+
+    Built on the chart's two direction bounds: the upper arm d_u moves at most
+    L2 and the forearm d_f at most L6 (the sigma bounds, which are the speeds
+    of those unit vectors). The tool frame R_t is fixed. Then
+
+      |q2| = angle(e_z, d_u)          rate L2
+      |q4| = angle(d_u, d_f)          rate L2 + L6
+      |q6| = angle(d_f, t)            rate L6
+      q1   = azimuth of d_u about z   rate L2 / sin|q2|
+      n    = d_u x d_f / |d_u x d_f|  (joint-4 axis) speed (L2 + L6) / sin|q4|
+      q3   = azimuth of n in frame 2  rate (L2 + rate q1) + speed n
+                                      (frame 2 = (z: d_u, y: Rz(q1) e_y) turns
+                                      at most at the sum of its axes' speeds)
+      frame 4 = (z: d_f, y: n): its spin about z4 is at most speed n, its
+                                      tilt (the speed of z4) at most L6
+      q5   = azimuth of v = R04^T t   rate speed n + L6 |cot q6|
+                                      (with dv = v x w in frame 4 and
+                                      v = (sin b cos f, sin b sin f, cos b),
+                                      df = -w_z + cot b (cos f w_x + sin f w_y))
+      q7   = azimuth of R_t^T d_f     rate L6 / sin|q6|
+
+    (the speed of a normalised vector v / |v| is at most |dv| / |v|; an
+    azimuth changes at most at |dv| / |v_perp|; a frame's angular speed is at
+    most the sum of the speeds of two of its axes). The sign of every joint is
+    fixed on a page, and |q4|, |q2|, |q6| stay off 0 and pi wherever a rate
+    that divides by their sine is finite, so these bound the joint values of
+    every page. tests/test_chart.py checks them against random pairs."""
+    C = np.atleast_2d(np.asarray(C, dtype=float))
+    R = np.broadcast_to(np.asarray(R, dtype=float), (len(C),)).astype(float)
+    lip = chart.lipschitz(C, R)
+    L2, L6 = lip[:, I_Q2], lip[:, I_Q6]
+    sig = chart.sigma(C)
+    E, ok = chart.elbow(C)
+    W = chart.wrist(C)
+    du = (E - chart.S[None, :]) / chart.d_se
+    df = (W - E) / chart.d_ew
+    a4 = np.arccos(np.clip(np.sum(du * df, axis=1), -1.0, 1.0))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        r2 = L2
+        r6 = L6
+        r4 = L2 + L6
+        s2 = _sin_min(np.nan_to_num(sig[:, I_Q2], nan=0.0), r2, R)
+        s4 = _sin_min(a4, r4, R)
+        s6 = _sin_min(np.nan_to_num(sig[:, I_Q6], nan=0.0), r6, R)
+        r1 = np.where(s2 > 0.0, L2 / s2, np.inf)
+        n_speed = np.where(s4 > 0.0, (L2 + L6) / s4, np.inf)
+        r3 = L2 + r1 + n_speed
+        a6 = np.nan_to_num(sig[:, I_Q6], nan=0.0)
+        lo6 = np.clip(a6 - r6 * R, 0.0, np.pi)
+        hi6 = np.clip(a6 + r6 * R, 0.0, np.pi)
+        cot6 = np.maximum(np.abs(1.0 / np.tan(np.maximum(lo6, 1e-300))),
+                          np.abs(1.0 / np.tan(np.minimum(hi6, np.pi - 1e-15))))
+        r5 = np.where(s6 > 0.0, n_speed + L6 * cot6, np.inf)
+        r7 = np.where(s6 > 0.0, L6 / s6, np.inf)
+    out = np.column_stack([r1, r2, r3, r4, r5, r6, r7])
+    out[~ok] = np.inf
+    out[~np.isfinite(out)] = np.inf
+    return out
+
+
+def limit_margins(arm: SrsArm, q: np.ndarray) -> np.ndarray:
+    """(N, 7) how deep each joint angle lies OUTSIDE its limits, on the circle
+    (radians; <= 0 when within limits). Every joint's range is shorter than a
+    full turn, so a joint angle in the forbidden arc has no admissible
+    spelling at all."""
+    q = np.atleast_2d(q)
+    lo, hi = np.asarray(arm.q_min, dtype=float), np.asarray(arm.q_max, dtype=float)
+    a = lo[None, :] + np.mod(q - lo[None, :], 2.0 * np.pi)          # in [lo, lo + 2pi)
+    inside = a <= hi[None, :]
+    deep = np.minimum(a - hi[None, :], lo[None, :] + 2.0 * np.pi - a)
+    return np.where(inside, -np.minimum(a - lo[None, :], hi[None, :] - a), deep)
+
+
+def limit_certified(chart: SrsChart, C: np.ndarray, R, signs: tuple,
+                    joints: tuple) -> tuple:
+    """(certified (N,), joint (N,)): True where, on page `signs`, one of
+    `joints` is beyond its limit at EVERY state of B(C_i, R_i):
+    margin(c) > rate * R. joint = the 0-based index that certifies (or -1).
+
+    A joint value is a fact of the PAGE's spelling (the pages differ only in
+    their limits, invariant 49), so unlike collision this holds for one page."""
+    from .batch import ik_batch
+    C = np.atleast_2d(np.asarray(C, dtype=float))
+    R = np.broadcast_to(np.asarray(R, dtype=float), (len(C),)).astype(float)
+    n = chart.task.n
+    pos = chart.task.position(C[:, :n])
+    ok, q = ik_batch(chart.arm, pos, chart.task.rot, C[:, -1], tuple(signs))
+    rates = joint_rates(chart, C, R)
+    marg = limit_margins(chart.arm, np.where(ok[:, None], q, 0.0))
+    js = np.asarray(joints, dtype=int)
+    with np.errstate(invalid="ignore"):
+        good = (marg[:, js] > rates[:, js] * R[:, None]) & ok[:, None]
+    cert = good.any(axis=1)
+    which = np.where(cert, js[np.argmax(good, axis=1)], -1)
+    return cert, which
+
+
+# --------------------------------------------------------------------------
 # the general singularity function (detection only: no certified bound yet)
 # --------------------------------------------------------------------------
 

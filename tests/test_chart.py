@@ -20,6 +20,11 @@ What is pinned:
     2x smaller than the first ("triangle") bound on the same balls.
   * COLLISION CERTIFICATE IS SOUND: every posture sampled in a ball that
     collision_certified accepts collides.
+  * JOINT-ANGLE BOUNDS ARE GUARANTEED (chart.joint_rates): for every joint,
+    on every page, no random pair in a ball moves a joint angle faster than
+    its bound (the certified joint-limit discharge rests on this).
+  * THE LIMIT CERTIFICATE IS SOUND: every posture sampled in a ball that
+    limit_certified accepts has that joint beyond its limit on that page.
   * THE GENERAL SIGMA (smallest singular value of d(pose, theta)/dq) vanishes
     at every door point and at the fold, and nowhere near zero elsewhere --
     without being told which joints make doors.
@@ -291,6 +296,59 @@ def test_general_sigma() -> dict:
     return dict(at_doors=float(at.max()), median=float(np.median(rnd)), fold=fold)
 
 
+def test_joint_rates_are_guaranteed() -> dict:
+    from zzy_rss.batch import ik_batch
+    from zzy_rss.chart import joint_rates
+    rng = np.random.default_rng(31)
+    viol = pairs = 0
+    worst = np.zeros(7)
+    for sp in (PATCHES["exp2"], surface(0.40, 0.21, 45, 305)):
+        ch = SrsChart.for_surface(ARM, WeldSurface(sp), P3)
+        n = 1500
+        C = rng.uniform(ch.lo, ch.hi, (n, 3))
+        R = rng.choice([0.002, 0.01, 0.03], n)
+        rates = joint_rates(ch, C, R)
+        d = rng.normal(size=(n, 3))
+        d *= (R * rng.uniform(0, 1, n) / np.linalg.norm(d, axis=1))[:, None]
+        Z2 = C + d / ch.scale[None, :]
+        dist = np.linalg.norm((Z2 - C) * ch.scale, axis=1)
+        for sg in SIGN_BRANCHES:
+            ok1, q1 = ik_batch(ARM, ch.task.position(C[:, :2]), ch.task.rot, C[:, 2], sg)
+            ok2, q2 = ik_batch(ARM, ch.task.position(Z2[:, :2]), ch.task.rot, Z2[:, 2], sg)
+            dq = np.abs(np.angle(np.exp(1j * (q2 - q1))))
+            for j in range(7):
+                m = ok1 & ok2 & np.isfinite(rates[:, j]) & (dist > 0)
+                pairs += int(m.sum())
+                viol += int(np.sum(dq[m, j] > rates[m, j] * dist[m] + 1e-12))
+                if m.any():
+                    worst[j] = max(worst[j], float((dq[m, j] / (rates[m, j] * dist[m])).max()))
+    assert viol == 0 and pairs > 100_000, (viol, pairs)
+    return dict(pairs=pairs, worst=worst)
+
+
+def test_limit_certificate_is_sound() -> dict:
+    from zzy_rss.batch import ik_batch
+    from zzy_rss.chart import CONSTANT_JOINTS, I_Q2, limit_certified, limit_margins
+    ch = SrsChart.for_surface(ARM, WeldSurface(PATCHES["exp2"]), P3)
+    rng = np.random.default_rng(32)
+    balls = postures = 0
+    for sg in SIGN_BRANCHES:
+        C = rng.uniform(ch.lo, ch.hi, (4000, 3))
+        R = np.full(len(C), 0.004)
+        cert, which = limit_certified(ch, C, R, sg, CONSTANT_JOINTS[I_Q2])
+        for c, r, j in zip(C[cert][:40], R[cert][:40], which[cert][:40]):
+            d = rng.normal(size=(30, 3))
+            d *= (r * rng.uniform(0, 1, 30) / np.linalg.norm(d, axis=1))[:, None]
+            Z = c[None, :] + d / ch.scale[None, :]
+            ok, q = ik_batch(ARM, ch.task.position(Z[:, :2]), ch.task.rot, Z[:, 2], sg)
+            m = limit_margins(ARM, q[ok])[:, j]
+            assert np.all(m > 0.0), (sg, c, j, m.min())
+            balls += 1
+            postures += int(ok.sum())
+    assert balls > 0
+    return dict(balls=balls, postures=postures)
+
+
 if __name__ == "__main__":
     r = test_sigma_is_the_chart_singularity()
     print(f"[chart] sigma = chart singularity: {r['n']} IK solutions, max error "
@@ -314,6 +372,12 @@ if __name__ == "__main__":
     r = test_collision_certificate_is_sound()
     print(f"[chart] collision certificate: {r['balls']} certified balls, {r['postures']} "
           f"sampled postures inside them, all in collision")
+    r = test_joint_rates_are_guaranteed()
+    print(f"[chart] joint-angle bounds guaranteed: {r['pairs']} random pairs x 8 pages, "
+          f"0 violations (worst observed/bound per joint {np.round(r['worst'], 2).tolist()})")
+    r = test_limit_certificate_is_sound()
+    print(f"[chart] limit certificate: {r['balls']} certified balls, {r['postures']} sampled "
+          f"postures inside them, all beyond the limit")
     r = test_general_sigma()
     print(f"[chart] general sigma: <= {r['at_doors']:.1e} at door points, {r['fold']:.1e} at "
           f"the fold, median {r['median']:.3f} elsewhere")

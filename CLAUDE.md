@@ -24,7 +24,11 @@
 > 于是证 `门 ↛ 终点`(两页两面墙),共三面墙(旧泛洪四面)。
 > **§10.3**:σ 的界收紧 ~2.9×(门区域格数 ÷7–10);**碰撞卸载已认证**(区域上,八页通用);
 > 通用 σ = σ_min(∂(pose,θ)/∂q) 能找门,但**没有保证界**,还不能进证明。图 `docs/fig_sigma_doors.png`。
-> **找门只用方法 2**(σ + 手推的保证界 L,`chart.py` + `interior.py` + `doorset.py`)。
+> **主方法(2026-11-15 软切换)**:递归证明 `scripts/run_recursive.py`;**找门只用方法 2**(σ + 手推的保证界 L,
+> `chart.py` + `interior.py` + `doorset.py`);**卸载门只认证书**:整区域碰撞,或**沿自旋不动的关节整区域越限**
+> (§10.7,`chart.joint_rates` / `limit_certified`,逐页)。旧的证据卸载(`certify_curve`)默认关
+> (`Page3Params.discharge_evidence=False`)。旧泛洪流水线(`flood*.py`、`run_3d.py`、`run_three.py` 等)保留为 **legacy**,
+> 启动时打印 `[legacy]`,闭式找门只作测试里的独立答案。
 > 其余找门方法的代码已于 2026-11-15 **全部删除**(不再需要;结论留在设计文档里):
 > §10.4 方法 4(Krawczyk,认证半径 ~ σ_min²、不实用)、§10.5 方法 5(姿态变量代数路线,
 > 逐切片与闭式解一致但只适用 S-R-S、未接入证明)、§10.6 方法 6(关节变量代数路线,迹检验未通过)。
@@ -334,10 +338,15 @@ y=0.088,几乎贴着起点,而 `ZGAP` 正压在它的纤维上——**所以原�
 pip install numpy scipy scikit-learn matplotlib   # 另需 ffmpeg 出视频
 export PYTHONPATH=src
 
+# ── 主方法(2026-11-15 起):递归证明 + 方法 2(σ + L 找门)+ 认证卸载(碰撞 / 关节限位) ──
 python3 tests/test_ik.py                                   # IK 验收(必须全过)
-python3 tests/test_chart.py                                # 递归证明步骤 1/2a:σ = 页坐标奇异、保证界、墙内门搜索完备
-python3 tests/test_recursive.py                            # 递归逻辑、无门列表找门、检查 (ii)、端到端 EXP 2(约 70 s)
-python3 scripts/run_recursive.py --case two-wall --save out/rec_two_wall.json   # 在门处分裂的证明(§46 场景,约 210 s)
+python3 tests/test_chart.py                                # σ = 页坐标奇异、σ/关节角保证界、墙内门搜索完备、碰撞/限位证书可靠
+python3 tests/test_recursive.py                            # 递归逻辑、无门列表找门、检查 (ii)、卸载全是证书、端到端 EXP 2(约 70 s)
+python3 scripts/run_recursive.py --case {exp2-none,exp2-zgap,exp3-new,two-wall} \
+    --save out/x.json --save-geometry out/x.pkl            # 证明(two-wall 约 110 s);--also-prove 在可行任务上强制跑证明
+python3 scripts/fig_eight_pages.py --case two-wall --geometry out/x.pkl --out docs/fig_eight_pages_two_wall.png   # 八页图 + 墙 + 3-D 墙
+
+# ── 以下是旧流水线(legacy:闭式找门 + 证据卸载)。仍可运行,启动时打印 [legacy],结果不再用于新结论 ──
 python3 tests/test_witness.py                              # 门的闭式判据 + 路径验证器(§37)
 python3 tests/test_tdc.py                                  # 墙的 TDC 重建:已知拓扑 + 必须拒绝的情形(§39)
 python3 tests/test_facets.py                               # Alg 3 的三角形面:球壳合成页 + 门的管守卫(§41)

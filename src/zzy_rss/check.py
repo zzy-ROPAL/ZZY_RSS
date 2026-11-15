@@ -134,6 +134,7 @@ class World:
         self.pages: dict = {}
         self._discharge: dict = {}
         self._collision: dict = {}
+        self._posture: dict = {}
         self._live_index: dict = {}
         self.walls_built = 0
 
@@ -162,22 +163,25 @@ class World:
 
     def discharged(self, signs: tuple, k: int) -> tuple:
         """(blocked, reason) of door k as seen from page `signs`. Only a
-        posture fact discharges (invariant 41). First the CERTIFIED route:
-        every posture at the door collides (collision_blocked, rigorous, all
-        pages). Otherwise the EVIDENCE route of findings 42/43: every curve
-        blocked by certify_curve (joint limits allowed), on a door whose
-        curves cover its region (Door.check_coverage)."""
+        posture fact discharges (invariant 41), and by default only a
+        CERTIFIED one (posture_certified): every cell of the door region is
+        free of doors, or in collision throughout, or has a joint that does
+        not move along the spin beyond its limit throughout. The old EVIDENCE
+        route (certify_curve on sampled curves, findings 42/43) runs only with
+        Page3Params.discharge_evidence."""
         key = (tuple(signs), k)
         if key in self._discharge:
             return self._discharge[key]
         d = self.door(k)
-        cert = self.collision_blocked(k)
+        cert = self.posture_certified(k, signs)
         if cert[0]:
             out = (True, cert[1])
+        elif not self.p3.discharge_evidence:
+            out = (False, f"live: {cert[1]}")
         elif not d.supported or not d.curves:
             out = (False, "unsupported or no curve: live")
         else:
-            why = []
+            why = [f"[evidence route] {cert[1]}"]
             blocked = True
             for c in d.curves:
                 cc = type(c)(sign_index=c.sign_index, pts=c.pts, closed=c.closed, tube=c.tube)
@@ -194,46 +198,114 @@ class World:
 
     def collision_blocked(self, k: int) -> tuple:
         """(certified, reason): is EVERY posture at door k in collision?
+        The page-independent part of posture_certified (no limits)."""
+        if k not in self._collision:
+            self._collision[k] = self._certify_cells(k, None)
+        return self._collision[k]
+
+    def posture_certified(self, k: int, signs: tuple) -> tuple:
+        """(certified, reason): is door k PROVABLY unusable from page `signs`?
 
         Rigorous, from the door REGION (not its sampled curves): each cell is
-        either certified free of zeros of sigma (no door there) or certified
-        in collision throughout (chart.collision_certified); cells that are
-        neither are split down to `door_cert_tol`. Collision is a posture
-        fact, so the answer holds on every page -- only for rotationally
-        symmetric link geometry, which is checked."""
-        if k in self._collision:
-            return self._collision[k]
-        from .chart import collision_certified
+        certified free of zeros of sigma (no door there), or in collision
+        throughout (chart.collision_certified; a posture fact, so every page),
+        or -- with Page3Params.discharge_limits -- beyond the limit of a joint
+        that does not move along the door's spin, throughout
+        (chart.limit_certified; a fact of this page's spelling). Cells that are
+        none of these are split down to door_cert_tol; then the door stays live."""
+        signs = tuple(signs)
+        key = (k, signs)
+        if key not in self._posture:
+            if not self.p3.discharge_limits or self.door(k).sign_index is None:
+                self._posture[key] = self.collision_blocked(k)
+            else:
+                self._posture[key] = self._certify_cells(k, signs)
+        return self._posture[key]
+
+    def _valid_centre(self, C: np.ndarray, signs: tuple, joints: tuple):
+        """The first cell centre whose posture is valid on page `signs` as far
+        as a discharge can see (IK exists, the constant joints are within
+        limits, no collision), or None. Used only to give up early."""
+        from .batch import collision_batch, ik_batch
+        from .chart import limit_margins
+        n = self.chart.task.n
+        ok, q = ik_batch(self.arm, self.chart.task.position(C[:, :n]), self.chart.task.rot,
+                         C[:, -1], tuple(signs))
+        if not ok.any():
+            return None
+        m = limit_margins(self.arm, q[ok])[:, list(joints)]
+        cand = np.flatnonzero(ok)[np.all(m <= 0.0, axis=1)]
+        if not len(cand):
+            return None
+        coll = collision_batch(self.arm, self.scene, q[cand])
+        free = cand[~np.asarray(coll, dtype=bool)]
+        return None if not len(free) else C[free[0]]
+
+    def _certify_cells(self, k: int, signs) -> tuple:
+        """The cell loop behind collision_blocked (signs None) and
+        posture_certified (limits on page `signs` too)."""
+        from .chart import CONSTANT_JOINTS, I_Q2, I_Q6, collision_certified, limit_certified
         from .source import geometry_is_page_dependent
-        if geometry_is_page_dependent(self.cfg):
-            self._collision[k] = (False, "off-axis link geometry: collision is page-dependent")
-            return self._collision[k]
-        r = self.door(k).region
+        use_coll = not geometry_is_page_dependent(self.cfg)
+        d = self.door(k)
+        joints = None
+        if signs is not None and d.sign_index is not None:
+            joints = CONSTANT_JOINTS[I_Q2 if d.sign_index == 0 else I_Q6]
+        if not use_coll and joints is None:
+            return (False, "off-axis link geometry: collision is page-dependent")
+        r = d.region
         C, H = r.centres.copy(), r.half.copy()
-        d = C.shape[1]
-        signs = np.array(list(__import__("itertools").product((-1.0, 1.0), repeat=d)))
+        dim = C.shape[1]
+        corners = np.array(list(__import__("itertools").product((-1.0, 1.0), repeat=dim)))
         tol = float(self.p3.door_cert_tol)
-        n_eval = 0
+        n_eval = n_coll = n_lim = 0
+        by_joint: dict = {}
+        fine = float(self.p3.door_cert_tol_fine) if joints is not None else tol
         while len(C):
             R = np.linalg.norm(H * self.scale, axis=1)
             n_eval += len(C)
             done = self.chart.ball_test(C, R).clear
-            rest = ~done
-            if rest.any():
-                done[rest] = collision_certified(self.chart, self.scene, C[rest], R[rest])
+            rest = np.flatnonzero(~done)
+            # Limits first: vectorised, so the per-cell collision loop only
+            # sees what the limits could not certify.
+            if len(rest) and joints is not None:
+                hit, which = limit_certified(self.chart, C[rest], R[rest], signs, joints)
+                done[rest[hit]] = True
+                n_lim += int(hit.sum())
+                for j in which[hit]:
+                    by_joint[int(j) + 1] = by_joint.get(int(j) + 1, 0) + 1
+                rest = rest[~hit]
+            if len(rest) and use_coll:
+                hit = collision_certified(self.chart, self.scene, C[rest], R[rest])
+                done[rest[hit]] = True
+                n_coll += int(hit.sum())
+                rest = rest[~hit]
             C, H, R = C[~done], H[~done], R[~done]
             if not len(C):
                 break
-            if np.any(R <= tol) or n_eval > 200_000:
-                self._collision[k] = (False, f"not certified in collision ({len(C)} cell(s) "
-                                             f"open at radius {float(R.max()):.4f})")
-                return self._collision[k]
+            what = "in collision" if joints is None else "in collision or beyond a limit"
+            if np.any(R <= fine) or n_eval > 200_000:
+                return (False, f"not certified {what} ({len(C)} cell(s) open at radius "
+                               f"{float(R.max()):.4f})")
+            if np.any(R <= tol):
+                if joints is None:
+                    return (False, f"not certified {what} ({len(C)} cell(s) open at radius "
+                                   f"{float(R.max()):.4f})")
+                wit = self._valid_centre(C, signs, joints)
+                if wit is not None:
+                    return (False, f"not certified {what}: an open cell's centre is a valid "
+                                   f"posture on {page_name(signs)} (u={wit[0]:.3f}, "
+                                   f"v={wit[1]:.3f}, theta={np.degrees(wit[2]):.1f} deg)")
             Hc = H / 2.0
-            C = (C[:, None, :] + signs[None] * Hc[:, None, :]).reshape(-1, d)
-            H = np.repeat(Hc, len(signs), axis=0)
-        self._collision[k] = (True, f"CERTIFIED: every posture at the door collides "
-                                    f"({n_eval} cell tests, all pages)")
-        return self._collision[k]
+            C = (C[:, None, :] + corners[None] * Hc[:, None, :]).reshape(-1, dim)
+            H = np.repeat(Hc, len(corners), axis=0)
+        if joints is None or n_lim == 0:
+            return (True, f"CERTIFIED: every posture at the door collides "
+                          f"({n_eval} cell tests, all pages)")
+        lims = ", ".join(f"q{j} x{n}" for j, n in sorted(by_joint.items()))
+        return (True, f"CERTIFIED on page {page_name(signs)}: every door posture collides or "
+                      f"has a constant joint beyond its limit ({n_eval} cell tests; "
+                      f"{n_coll} by collision, {n_lim} by limits: {lims})")
 
     def live_doors(self, signs: tuple) -> list:
         return [d.index for d in self.doorset.doors if not self.discharged(signs, d.index)[0]]
