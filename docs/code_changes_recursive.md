@@ -139,3 +139,15 @@
 | `tests/test_algebraic_joint.py`(新) | 缓存真实性、q2/q6 各一个切片与闭式解一致、FK 复查 |
 
 **未接入证明**(见设计文档 §10.6)。
+
+### 6.6 删除方法 4 与方法 6 的代码(2026-11-15)
+
+找门只用**方法 2**(σ + 手推的保证界 L)。以下文件删除,证明里没有任何地方用到它们:
+
+| 方法 | 删除的文件 |
+|---|---|
+| 方法 4(Krawczyk,§10.4) | `src/zzy_rss/interval.py`、`src/zzy_rss/krawczyk.py`、`tests/test_krawczyk.py` |
+| 方法 6(关节变量代数路线,§10.6) | `src/zzy_rss/algebraic_joint.py`、`tests/test_algebraic_joint.py`、`scripts/joint_monodromy.py` |
+
+保留:方法 5(`src/zzy_rss/algebraic.py`,姿态变量的代数找门,只作对照,未接入证明)。
+结论与实测数字留在设计文档 §10.4 / §10.6。代码可从提交 `7c00d48` 取回。
