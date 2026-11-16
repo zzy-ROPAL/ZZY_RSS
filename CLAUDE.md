@@ -31,6 +31,8 @@
 > 启动时打印 `[legacy]`,闭式找门只作测试里的独立答案。
 > **墙的复用(§10.8,2026-11-16)**:新命题先试该页已验证的墙(同一个 `_verify`),不行才训练 ⇒
 > 两页实验 **每页一面墙**(2 面训练 + 1 次复用),**116.3 s → 64.2 s**,判定不变;`Page3Params.reuse_walls`。
+> **提速(§10.9)**:路图边按层批量二分、起始页与伙伴页并行建、墙的卷绕数自检与难面并行(`parallel.py`)⇒
+> two-wall **64.2 → 35.4 s**、EXP 3 **72.0 → 32.5 s**,四个案例的每轮面数与判定**逐行相同**。
 > 其余找门方法的代码已于 2026-11-15 **全部删除**(不再需要;结论留在设计文档里):
 > §10.4 方法 4(Krawczyk,认证半径 ~ σ_min²、不实用)、§10.5 方法 5(姿态变量代数路线,
 > 逐切片与闭式解一致但只适用 S-R-S、未接入证明)、§10.6 方法 6(关节变量代数路线,迹检验未通过)。
@@ -345,7 +347,7 @@ python3 tests/test_ik.py                                   # IK 验收(必须全
 python3 tests/test_chart.py                                # σ = 页坐标奇异、σ/关节角保证界、墙内门搜索完备、碰撞/限位证书可靠
 python3 tests/test_recursive.py                            # 递归逻辑、无门列表找门、检查 (ii)、卸载全是证书、端到端 EXP 2(约 70 s)
 python3 scripts/run_recursive.py --case {exp2-none,exp2-zgap,exp3-new,two-wall} \
-    --save out/x.json --save-geometry out/x.pkl            # 证明(two-wall 约 110 s);--also-prove 在可行任务上强制跑证明
+    --save out/x.json --save-geometry out/x.pkl            # 证明(two-wall 约 35 s);--also-prove 在可行任务上强制跑证明
 python3 scripts/fig_eight_pages.py --case two-wall --geometry out/x.pkl --out docs/fig_eight_pages_two_wall.png   # 八页图 + 墙 + 3-D 墙
 
 # ── 以下是旧流水线(legacy:闭式找门 + 证据卸载)。仍可运行,启动时打印 [legacy],结果不再用于新结论 ──

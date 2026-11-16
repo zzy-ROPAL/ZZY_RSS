@@ -179,3 +179,17 @@
 | `tests/test_recursive.py` | `test_wall_reuse` |
 
 结果见设计文档 §10.8。
+
+### 6.9 提速(2026-11-16)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/page3.py` | `_edge`:按层批量二分(结果逐边相同) |
+| `src/zzy_rss/check.py` | `_build_page`(模块级,可在子进程跑)、`World.prefetch`、`_add_page`;`World` 设置并行进程数 |
+| `src/zzy_rss/proof.py` | `prove_task` 开始时预建起始页与活门伙伴页 |
+| `src/zzy_rss/parallel.py`(新) | `fork_map`:fork 子进程跑互相独立的项,载荷在 fork 前放进模块全局 |
+| `src/zzy_rss/tangential.py` | `inside`(k=2)按查询点分块并行;`_winding` 抽出 |
+| `src/zzy_rss/facets.py` | `check_many`:需要细分的难面并行(`_check_one`) |
+| `src/zzy_rss/params.py` | `Page3Params.parallel_pages = 2`、`parallel_workers = 4` |
+
+结果见设计文档 §10.9。
