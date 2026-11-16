@@ -167,3 +167,15 @@
 | `CLAUDE.md` | 主方法说明;命令区分"主方法 / legacy" |
 
 结果见设计文档 §10.7。
+
+### 6.8 墙的复用(2026-11-16)
+
+| 文件 | 改动 |
+|---|---|
+| `src/zzy_rss/check.py` | `World.wall_cache`、`walls_reused`;`reuse_wall()`(缓存的墙走同一个 `_verify`);`check()` 先复用后训练;`page_wall` 把闭合且面全过的墙存入缓存 |
+| `src/zzy_rss/params.py` | `Page3Params.reuse_walls = True` |
+| `src/zzy_rss/proof.py` | 证明树/证书记录 `reused_from`;`count_walls(distinct=True)`;统计 `walls_reused`;判定写明 distinct/reused |
+| `scripts/fig_eight_pages.py` | 复用的墙画虚线、图例与 3-D 标题注明 |
+| `tests/test_recursive.py` | `test_wall_reuse` |
+
+结果见设计文档 §10.8。

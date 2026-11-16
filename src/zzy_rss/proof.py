@@ -75,8 +75,11 @@ class ProofNode:
             out += c["node"].wall_meshes()
         return out
 
-    def count_walls(self) -> int:
-        return len(self.walls) + sum(c["node"].count_walls() for c in self.children)
+    def count_walls(self, distinct: bool = False) -> int:
+        """Wall entries of the tree; distinct=True skips reused ones (a reused
+        wall is the same mesh as one already counted)."""
+        own = sum(1 for w in self.walls if not (distinct and w.get("reused_from")))
+        return own + sum(c["node"].count_walls(distinct) for c in self.children)
 
     def lines(self, indent: str = "") -> list:
         w = ", ".join(f"{x['page']} {x['facets']}" + (" (reused)" if x.get("reused_from") else "")
@@ -314,8 +317,10 @@ def prove_task(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
                       walls_built=world.walls_built, walls_reused=world.walls_reused,
                       pages_built=[page_name(s) for s in world.pages])
             if tree.status == PROVEN:
-                return TaskResult(INFEASIBLE, f"proof tree with {tree.count_walls()} verified "
-                                              f"wall(s)", tree=tree, stats=st)
+                n, nd = tree.count_walls(), tree.count_walls(distinct=True)
+                reuse = f" ({nd} distinct, {n - nd} reused)" if n != nd else ""
+                return TaskResult(INFEASIBLE, f"proof tree with {n} verified wall(s){reuse}",
+                                  tree=tree, stats=st)
             return TaskResult(INCONCLUSIVE, tree.reason, tree=tree, stats=st)
     except _budget.BudgetExceeded as e:
         if verbose:
