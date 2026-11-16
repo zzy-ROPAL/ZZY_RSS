@@ -79,7 +79,8 @@ class ProofNode:
         return len(self.walls) + sum(c["node"].count_walls() for c in self.children)
 
     def lines(self, indent: str = "") -> list:
-        w = ", ".join(f"{x['page']} {x['facets']}" for x in self.walls)
+        w = ", ".join(f"{x['page']} {x['facets']}" + (" (reused)" if x.get("reused_from") else "")
+                      for x in self.walls)
         out = [f"{indent}{self.status:10s} {self.A} -/-> {self.B}"
                + (f"   walls: {w}" if w else "") + f"   ({self.reason})"]
         for c in self.children:
@@ -128,12 +129,13 @@ class Prover:
         r = check(self.world, A, B, verbose=self.verbose)
         walls = [dict(page=page_name(w.signs), ok=w.ok, reason=w.reason,
                       facets=w.info.get("facets"), gamma=w.info.get("gamma"),
-                      u_max=w.info.get("u_max"), doors_inside=w.info.get("doors_inside", []))
+                      u_max=w.info.get("u_max"), doors_inside=w.info.get("doors_inside", []),
+                      reused_from=w.info.get("reused_from"))
                  for w in r.walls]
         if self.verbose:
             print(f"[proof]{pad}   -> {r.kind}: {r.reason}"
                   + (f"; doors inside: {[d.label() for d in r.doors]}" if r.doors else ""))
-        geom = [dict(page=page_name(w.signs), ok=w.ok,
+        geom = [dict(page=page_name(w.signs), ok=w.ok, reused_from=w.info.get("reused_from"),
                      vertices=np.asarray(w.poly.vertices, dtype=float),
                      simplices=np.asarray(w.poly.simplices, dtype=int))
                 for w in r.walls if w.poly is not None and w.poly.vertices is not None]
@@ -290,7 +292,8 @@ def prove_task(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
                     if also_prove:
                         prover = Prover(world, max_checks=max_checks, verbose=verbose)
                         tree = prover.inf_proof(StartSet(world.start_signs), GoalSet())
-                        st.update(checks=prover.checks, walls_built=world.walls_built)
+                        st.update(checks=prover.checks, walls_built=world.walls_built,
+                                  walls_reused=world.walls_reused)
                         if tree.status == PROVEN:
                             raise AssertionError("a proof tree next to a verified path: "
                                                  "one of them is wrong")
@@ -308,7 +311,7 @@ def prove_task(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
             prover = Prover(world, max_checks=max_checks, verbose=verbose)
             tree = prover.inf_proof(StartSet(world.start_signs), GoalSet())
             st.update(seconds=round(time.time() - t0, 1), checks=prover.checks,
-                      walls_built=world.walls_built,
+                      walls_built=world.walls_built, walls_reused=world.walls_reused,
                       pages_built=[page_name(s) for s in world.pages])
             if tree.status == PROVEN:
                 return TaskResult(INFEASIBLE, f"proof tree with {tree.count_walls()} verified "

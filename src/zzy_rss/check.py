@@ -137,6 +137,8 @@ class World:
         self._posture: dict = {}
         self._live_index: dict = {}
         self.walls_built = 0
+        self.walls_reused = 0
+        self.wall_cache: dict = {}     # signs -> [(poly, info)]: closed, facet-verified walls
 
     # -- pages -------------------------------------------------------------
 
@@ -421,7 +423,9 @@ def check(world: World, A, B, verbose: bool = True) -> CheckResult:
                                connected_on=tuple(signs))
     walls, doors = [], []
     for signs in pages:
-        w = page_wall(world, signs, A, B, verbose=verbose)
+        w = reuse_wall(world, signs, A, B, verbose=verbose) if world.p3.reuse_walls else None
+        if w is None:
+            w = page_wall(world, signs, A, B, verbose=verbose)
         walls.append(w)
         if not w.ok:
             return CheckResult(FAILED, f"{page_name(signs)}: {w.reason}", walls=walls)
@@ -479,6 +483,24 @@ def _face_anchors(page: Page3, lab: _SetLabeller, rng) -> tuple:
         elif lb < 0:
             rest.append(x)
     return np.asarray(seed).reshape(-1, 3), np.asarray(rest).reshape(-1, 3)
+
+
+def reuse_wall(world: World, signs: tuple, A, B, verbose: bool = True):
+    """A verified wall already built on page `signs` that also proves
+    A -/-> B, or None. A cached wall is closed and every facet passed tests
+    (i) and (ii) on this page (both depend only on the page and its live
+    doors, which do not change); _verify then decides THIS claim exactly as
+    for a new wall: A inside, B outside, the live doors inside listed."""
+    for poly, info in world.wall_cache.get(tuple(signs), []):
+        w = _verify(world, signs, A, B, poly, dict(info))
+        if w.ok:
+            world.walls_reused += 1
+            w.info["reused_from"] = info.get("built_for")
+            if verbose:
+                print(f"[check] {page_name(signs)}: reusing the verified wall built for "
+                      f"{info.get('built_for')} ({info.get('facets')} facets)")
+            return w
+    return None
 
 
 def page_wall(world: World, signs: tuple, A, B, verbose: bool = True) -> PageWall:
@@ -592,6 +614,10 @@ def page_wall(world: World, signs: tuple, A, B, verbose: bool = True) -> PageWal
         why = rep.failures[0][1] if rep.failures else (poly.note or "not closed")
         return PageWall(tuple(signs), False, f"no verified wall ({info['facets']}; {why})",
                         poly=poly, info=info)
+    # Closed and every facet verified: a wall in C_obs on this page, whatever
+    # this claim's _verify says -- keep it for later claims.
+    info["built_for"] = f"{A.label()} -/-> {B.label()}"
+    world.wall_cache.setdefault(tuple(signs), []).append((poly, dict(info)))
     return _verify(world, signs, A, B, poly, info)
 
 

@@ -263,6 +263,12 @@ class Page3Params:
     # guard, invariant 40). Off by default since 2026-11-15: every discharge
     # in the proof is now certified. On only to reproduce older runs.
     discharge_evidence: bool = False
+    # Wall reuse (check.check): before training a wall for "A cannot reach B"
+    # on a page, try every closed, fully facet-verified wall already built on
+    # that page; one passes if A is inside, B outside and no other live door is
+    # inside (the same _verify every new wall goes through). Otherwise train a
+    # new wall as before -- reuse can only save work.
+    reuse_walls: bool = True
 
 
 @dataclass(frozen=True)

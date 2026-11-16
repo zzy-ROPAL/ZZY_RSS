@@ -171,6 +171,31 @@ def test_discharge_is_certified() -> dict:
     return out
 
 
+def test_wall_reuse() -> dict:
+    """A verified wall serves a second claim it already proves: no new training,
+    the same mesh, the same _verify verdict; reuse_walls=False trains again."""
+    import dataclasses
+    from run_recursive import CASES
+    from zzy_rss.check import check
+    from zzy_rss.params import SceneParams
+    sp, obs, signs, _ = CASES["exp2-zgap"]
+    cfg = Config(scene=SceneParams(gap_open=True, obstacles=tuple(obs)))
+    w = World(cfg, ARM, WeldSurface(sp), Scene(cfg.arm, cfg.scene), signs, P3,
+              start_theta=None, verbose=False)
+    r1 = check(w, StartSet(signs), GoalSet(), verbose=False)
+    r2 = check(w, StartSet(signs), GoalSet(), verbose=False)
+    assert r1.kind == WALLED and r2.kind == WALLED, (r1.reason, r2.reason)
+    assert w.walls_built == 1 and w.walls_reused == 1, (w.walls_built, w.walls_reused)
+    assert r2.walls[0].poly is r1.walls[0].poly and r2.walls[0].info["reused_from"]
+    assert r2.walls[0].info["facets"] == r1.walls[0].info["facets"]
+    w2 = World(cfg, ARM, WeldSurface(sp), Scene(cfg.arm, cfg.scene), signs,
+               dataclasses.replace(P3, reuse_walls=False), start_theta=None, verbose=False)
+    w2.pages = w.pages                       # same roadmaps, no resampling
+    check(w2, StartSet(signs), GoalSet(), verbose=False)
+    assert w2.walls_reused == 0 and w2.walls_built == 1
+    return dict(facets=r1.walls[0].info["facets"])
+
+
 def test_end_to_end() -> dict:
     import dataclasses
     from run_3d import ZGAP
@@ -204,6 +229,9 @@ if __name__ == "__main__":
           f"discharged={r['on_door_discharged']}; far ball passes both")
     for k, v in test_discharge_is_certified().items():
         print(f"[recursive] certified discharge {k:9s}: {v[0]} ({v[1]}...)")
+    r = test_wall_reuse()
+    print(f"[recursive] wall reuse: the second claim reuses the verified wall "
+          f"({r['facets']} facets), 1 wall trained; reuse off trains again")
     for k, v in test_end_to_end().items():
         print(f"[recursive] end to end exp2/{k}: {v[0]} -- {v[1]} ({v[2]} s)")
     print("[recursive] ALL TESTS PASSED")

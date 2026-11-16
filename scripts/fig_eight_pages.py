@@ -168,8 +168,9 @@ def main() -> None:
             if w["page"] != page_name(sg):
                 continue
             col = WALL_COLORS[nodes.index(w["node"]) % len(WALL_COLORS)]
+            ls, lw = ("--", 1.4) if w.get("reused_from") else ("-", 1.8)
             for a, b in slice_mesh(w["vertices"], w["simplices"], v0):
-                ax.plot([a[0], b[0]], np.degrees([a[2], b[2]]), "-", c=col, lw=1.8)
+                ax.plot([a[0], b[0]], np.degrees([a[2], b[2]]), ls, c=col, lw=lw)
         if path is not None:
             on = path["page"] == page_name(sg)
             if on.any():
@@ -195,6 +196,11 @@ def main() -> None:
     for k, nd in enumerate(nodes):
         handles.append(plt.Line2D([], [], c=WALL_COLORS[k % len(WALL_COLORS)], lw=1.8,
                                   label=f"wall for {nd} (cut at v)"))
+        for w in walls:
+            if w["node"] == nd and w.get("reused_from"):
+                handles.append(plt.Line2D([], [], c=WALL_COLORS[k % len(WALL_COLORS)], lw=1.4,
+                                          ls="--", label=f"page {w['page']}: REUSED wall of "
+                                                         f"{w['reused_from']}"))
     if path is not None:
         handles.append(plt.Line2D([], [], ls="", marker=".", c="#1d3557", ms=6,
                                   label="verified path (all v, projected)"))
@@ -240,7 +246,8 @@ def wall_3d(walls, path, ds, p3, th0, start_signs, out):
         ax.set_ylabel("v")
         ax.set_zlabel("theta (deg)")
         ax.view_init(elev=22, azim=-60)
-        ax.set_title(f"wall on page {w['page']} ({'verified' if w['ok'] else 'FAILED'}): "
+        reuse = f" -- REUSED (built for {w['reused_from']})" if w.get("reused_from") else ""
+        ax.set_title(f"wall on page {w['page']} ({'verified' if w['ok'] else 'FAILED'}){reuse}: "
                      f"{len(w['simplices'])} triangles\n{w['node']}\n"
                      f"red: door curves (sigma = 0), dots: verified path on this page, star: start",
                      fontsize=8)
