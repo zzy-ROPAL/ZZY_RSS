@@ -55,6 +55,9 @@ NAMES = ["valid", "collision (box)", "q7 beyond limit", "q2/q4/q6 limit or no IK
          "q1/q3/q5 limit only"]
 FLIP = {"q2": 0, "q4": 1, "q6": 2}
 WALL_COLORS = ["#000000", "#1d4ed8", "#be185d"]
+# --merge-invalid (default): one colour for every reason a state is invalid
+MERGED_COLORS = ["#f4f4f4", "#9aa5b1"]
+MERGED_NAMES = ["valid", "invalid (collision, joint limit, or no IK)"]
 
 
 def page_name(sg) -> str:
@@ -114,6 +117,8 @@ def main() -> None:
     ap.add_argument("--v0", type=float, default=None, help="slice (default: the start's v)")
     ap.add_argument("--grid", type=int, default=241)
     ap.add_argument("--out", default="docs/fig_eight_pages_exp3.png")
+    ap.add_argument("--split-invalid", action="store_true",
+                    help="colour each invalidity reason separately (default: one colour)")
     ap.add_argument("--geometry", default=None,
                     help="pickle from run_recursive.py --save-geometry: draws the walls and the path")
     args = ap.parse_args()
@@ -143,10 +148,13 @@ def main() -> None:
     nodes = list(dict.fromkeys(w["node"] for w in walls))
     U, T = np.meshgrid(np.linspace(0, 1, args.grid), np.linspace(-np.pi, np.pi, args.grid))
     fig, axs = plt.subplots(2, 4, figsize=(19, 9.6), sharex=True, sharey=True)
-    cmap = ListedColormap(COLORS)
+    colors, names = (COLORS, NAMES) if args.split_invalid else (MERGED_COLORS, MERGED_NAMES)
+    cmap = ListedColormap(colors)
     for ax, sg in zip(axs.ravel(), SIGN_BRANCHES):
         code = classify_slice(cfg, arm, scene, surf, sg, U, T, v0)
-        ax.pcolormesh(U, np.degrees(T), code, cmap=cmap, vmin=-0.5, vmax=4.5, shading="auto",
+        shown = code if args.split_invalid else (code > 0).astype(int)
+        ax.pcolormesh(U, np.degrees(T), shown, cmap=cmap, vmin=-0.5, vmax=len(colors) - 0.5,
+                      shading="auto",
                       rasterized=True)
         partners = []
         for i, d in enumerate(ds.doors):
@@ -188,7 +196,7 @@ def main() -> None:
         ax.set_xlabel("u (along the weld)")
     for ax in axs[:, 0]:
         ax.set_ylabel("arm angle theta (deg)")
-    handles = [Patch(fc=c, ec="k", lw=0.3, label=n) for c, n in zip(COLORS, NAMES)]
+    handles = [Patch(fc=c, ec="k", lw=0.3, label=n) for c, n in zip(colors, names)]
     handles += [Patch(fill=False, ec="#e6550d", label="certified door region (sigma + L)"),
                 plt.Line2D([], [], ls="", marker=".", c="#c1121f", ms=8, label="door curve (sigma = 0)"),
                 plt.Line2D([], [], ls="", marker="*", mfc="#ffd60a", mec="k", ms=12, label="start"),
