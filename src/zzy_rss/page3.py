@@ -199,19 +199,26 @@ class Page3:
         ok, qs = self.states_many(a[None, :] + ts[:, None] * (b - a)[None, :])
         if not ok.all():
             return False
-        stack = [(ts[i], qs[i], ts[i + 1], qs[i + 1], 0) for i in range(m)]
-        while stack:
-            t0, q0, t1, q1, depth = stack.pop()
-            if float(np.abs(q1 - q0).max()) <= jmax:
-                continue
+        # Bisect LEVEL BY LEVEL: every gap still too large in joint space gets
+        # its midpoint, and all midpoints of a level are checked in ONE batched
+        # call. The gaps and midpoints are exactly those of the depth-first
+        # version (it is the same binary tree), so the answer is identical:
+        # False iff some midpoint is invalid or a gap is still too large at
+        # depth 14. (Depth-first did ~26 scalar IK + collision calls per edge.)
+        t0, q0, t1, q1 = ts[:-1], qs[:-1], ts[1:], qs[1:]
+        for depth in range(15):
+            big = np.abs(q1 - q0).max(axis=1) > jmax
+            if not big.any():
+                return True
             if depth >= 14:
                 return False
+            t0, q0, t1, q1 = t0[big], q0[big], t1[big], q1[big]
             tm = 0.5 * (t0 + t1)
-            ok, qm = self._state(a + tm * (b - a))
-            if not ok:
+            ok, qm = self.states_many(a[None, :] + tm[:, None] * (b - a)[None, :])
+            if not ok.all():
                 return False
-            stack.append((t0, q0, tm, qm, depth + 1))
-            stack.append((tm, qm, t1, q1, depth + 1))
+            t0, q0, t1, q1 = (np.concatenate([t0, tm]), np.concatenate([q0, qm]),
+                              np.concatenate([tm, t1]), np.concatenate([qm, q1]))
         return True
 
     def _build_graph(self) -> None:

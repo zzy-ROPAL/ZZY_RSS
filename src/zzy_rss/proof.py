@@ -284,6 +284,13 @@ def prove_task(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene,
                 return TaskResult(INCONCLUSIVE, "sigma search did not finish", stats=st)
             if world.start_theta is None:
                 return TaskResult(INCONCLUSIVE, "no valid start posture", stats=st)
+            # Build the start page and the partner pages of its live doors at
+            # once (World.prefetch); identical to building them on demand.
+            first = [tuple(world.start_signs)]
+            for d in world.doorset.doors:
+                if d.sign_index is not None and not world.discharged(world.start_signs, d.index)[0]:
+                    first.append(flip(tuple(world.start_signs), d.sign_index))
+            world.prefetch(first)
             if not world.page(world.start_signs).cut_ok:
                 return TaskResult(INCONCLUSIVE, "bounded theta not justified on the start page",
                                   stats=st)

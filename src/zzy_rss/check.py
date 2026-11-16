@@ -138,6 +138,8 @@ class World:
         self._live_index: dict = {}
         self.walls_built = 0
         self.walls_reused = 0
+        from . import parallel
+        parallel.set_workers(p3.parallel_workers)
         self.wall_cache: dict = {}     # signs -> [(poly, info)]: closed, facet-verified walls
 
     # -- pages -------------------------------------------------------------
@@ -145,18 +147,45 @@ class World:
     def page(self, signs: tuple) -> Page3:
         signs = tuple(signs)
         if signs not in self.pages:
-            t = time.time()
-            pg = Page3(self.cfg, self.arm, self.surf, self.scene, signs, self.p3,
-                       self.start_theta if signs == self.start_signs else None,
-                       inject=self.ds.pts)
-            cut = theta_cut_check(pg)
-            pg.cut_ok, pg.cut_reason = cut["ok"], cut["reason"]
-            self.pages[signs] = pg
-            if self.verbose:
-                print(f"[world] page {page_name(signs)}: {len(pg.valid)} valid vertices, "
-                      f"{int((pg.inject_index >= 0).sum())}/{len(self.ds.pts)} crossing "
-                      f"states valid ({time.time() - t:.1f} s)")
+            st = self.start_theta if signs == self.start_signs else None
+            pg, dt = _build_page(self.cfg, self.arm, self.surf, self.scene, signs, self.p3,
+                                 st, self.ds.pts)
+            self._add_page(signs, pg, dt)
         return self.pages[signs]
+
+    def _add_page(self, signs: tuple, pg: Page3, dt: float) -> None:
+        self.pages[signs] = pg
+        if self.verbose:
+            print(f"[world] page {page_name(signs)}: {len(pg.valid)} valid vertices, "
+                  f"{int((pg.inject_index >= 0).sum())}/{len(self.ds.pts)} crossing "
+                  f"states valid ({dt:.1f} s)")
+
+    def prefetch(self, pages) -> None:
+        """Build several pages AT ONCE in worker processes
+        (Page3Params.parallel_pages). Identical to building them here: each
+        page's sampling is seeded independently of the order of construction.
+        Falls back to building them one by one where fork is unavailable."""
+        todo = [s for s in dict.fromkeys(tuple(p) for p in pages) if s not in self.pages]
+        n = min(int(self.p3.parallel_pages), len(todo))
+        if n <= 1:
+            return
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        try:
+            ctx = mp.get_context("fork")
+        except ValueError:
+            return
+        t = time.time()
+        with ProcessPoolExecutor(max_workers=n, mp_context=ctx) as ex:
+            futs = {s: ex.submit(_build_page, self.cfg, self.arm, self.surf, self.scene, s,
+                                 self.p3, self.start_theta if s == self.start_signs else None,
+                                 self.ds.pts) for s in todo}
+            for s, f in futs.items():
+                pg, dt = f.result()
+                self._add_page(s, pg, dt)
+        if self.verbose:
+            print(f"[world] {len(todo)} pages built in parallel ({n} workers, "
+                  f"{time.time() - t:.1f} s wall clock)")
 
     # -- doors -------------------------------------------------------------
 
@@ -436,6 +465,15 @@ def check(world: World, A, B, verbose: bool = True) -> CheckResult:
                 doors.append(dn)
     return CheckResult(WALLED, "verified wall(s): A inside, B outside", walls=walls,
                        doors=doors)
+
+
+def _build_page(cfg, arm, surf, scene, signs, p3, start_theta, inject) -> tuple:
+    """One page with its theta-cut check (module level: runs in a worker)."""
+    t = time.time()
+    pg = Page3(cfg, arm, surf, scene, tuple(signs), p3, start_theta, inject=inject)
+    cut = theta_cut_check(pg)
+    pg.cut_ok, pg.cut_reason = cut["ok"], cut["reason"]
+    return pg, time.time() - t
 
 
 # --------------------------------------------------------------------------

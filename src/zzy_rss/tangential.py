@@ -461,6 +461,29 @@ def inside(query: np.ndarray, pts: np.ndarray, simplices: np.ndarray,
         hits = straddle & (xint > tx)
         return (np.sum(hits, axis=1) % 2) == 1
     if k == 2:
+        from . import parallel
+        nw = parallel.workers()
+        if nw > 1 and len(q) >= 64 and len(q) * len(simplices) > 2_000_000:
+            # Split by QUERY point: each point's sum is computed exactly as in
+            # one process (same triangle chunks, same order), so bit-identical.
+            bounds = np.linspace(0, len(q), nw + 1).astype(int)
+            parts = parallel.fork_map(_winding_part, list(zip(bounds[:-1], bounds[1:])),
+                                      (q, pts, simplices))
+            wn = np.concatenate(parts)
+            return np.rint(wn / (4.0 * np.pi)).astype(int) % 2 == 1
+        wn = _winding(q, pts, simplices)
+        return np.rint(wn / (4.0 * np.pi)).astype(int) % 2 == 1
+    raise NotImplementedError(f"inside test for k={k}")
+
+
+def _winding_part(shared, span) -> np.ndarray:
+    q, pts, simplices = shared
+    return _winding(q[span[0]:span[1]], pts, simplices)
+
+
+def _winding(q, pts, simplices) -> np.ndarray:
+    """Generalised winding number (x 4 pi) of every query point."""
+    if True:
         wn = np.zeros(len(q))
         for chunk in range(0, len(simplices), 4096):
             t = simplices[chunk:chunk + 4096]
@@ -473,8 +496,7 @@ def inside(query: np.ndarray, pts: np.ndarray, simplices: np.ndarray,
                    + np.einsum("qtd,qtd->qt", B, C) * la
                    + np.einsum("qtd,qtd->qt", C, A) * lb)
             wn += np.sum(2.0 * np.arctan2(det, den), axis=1)
-        return np.rint(wn / (4.0 * np.pi)).astype(int) % 2 == 1
-    raise NotImplementedError(f"inside test for k={k}")
+        return wn
 
 
 # --------------------------------------------------------------------------

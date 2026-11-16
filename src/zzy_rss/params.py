@@ -269,6 +269,16 @@ class Page3Params:
     # inside (the same _verify every new wall goes through). Otherwise train a
     # new wall as before -- reuse can only save work.
     reuse_walls: bool = True
+    # Worker processes for building pages at once (World.prefetch: the start
+    # page and the partner pages of the live doors on it). Each page's
+    # sampling is seeded independently of build order, so the pages are
+    # identical to building them one by one. 1 = sequential.
+    parallel_pages: int = 2
+    # Worker processes for the wall's two heaviest independent loops: the
+    # winding-number self-check of the rebuilt mesh (tangential.inside) and
+    # the facets needing a full Algorithm-3 subdivision (facets.check_many).
+    # Bit-identical to one process (zzy_rss/parallel.py). 1 = sequential.
+    parallel_workers: int = 4
 
 
 @dataclass(frozen=True)

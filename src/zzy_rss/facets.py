@@ -403,12 +403,26 @@ def check_many(oracle: FacetOracle, simplices: list, max_depth: int) -> list:
                 pd[cand] = oracle.depth_many(C[cand], R[cand])
             else:
                 pd[cand] = [oracle.depth(C[j], R[j])[0] for j in cand]
+        hard = []
         for j, i in enumerate(todo):
             if not ok[j] and pd[j] >= R[j]:
                 out[i] = FacetResult(True, "IJRR march (batched)",
                                      depth_used=float(pd[j]), radius=float(R[j]))
             else:
-                _budget.check_time()
-                out[i] = check_simplex(oracle, np.asarray(simplices[i], dtype=float),
-                                       max_depth, sigma_done=True)
+                hard.append(i)
+        # The facets that need the full subdivision are independent of one
+        # another: check them in worker processes (parallel.fork_map), each
+        # exactly as here.
+        _budget.check_time()
+        from . import parallel
+        res = parallel.fork_map(_check_one, hard, (oracle, simplices, max_depth))
+        for i, r in zip(hard, res):
+            out[i] = r
     return out
+
+
+def _check_one(shared, i) -> "FacetResult":
+    oracle, simplices, max_depth = shared
+    _budget.check_time()
+    return check_simplex(oracle, np.asarray(simplices[i], dtype=float), max_depth,
+                         sigma_done=True)
