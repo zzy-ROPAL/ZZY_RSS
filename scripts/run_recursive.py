@@ -7,6 +7,7 @@ Doors come from the chart's singularity function sigma (no door list):
     python3 scripts/run_recursive.py --case exp2-zgap     # INFEASIBLE, one leaf
     python3 scripts/run_recursive.py --case exp3-new      # FEASIBLE through the q6 door
     python3 scripts/run_recursive.py --case two-wall      # INFEASIBLE, the proof splits at the door
+    python3 scripts/run_recursive.py --case fold          # the q4 fold as a door (goal out of reach)
 
 Prints the proof tree and one JSON line; --save writes the certificate.
 """
@@ -28,7 +29,7 @@ from run_3d import PATCHES, ZGAP  # noqa: E402
 from search_scene3 import surface  # noqa: E402
 from zzy_rss.arm import SrsArm  # noqa: E402
 from zzy_rss.params import (BoxObstacle, Config, Page3Params, PageMapParams,  # noqa: E402
-                            SceneParams)
+                            SceneParams, SurfaceParams)
 from zzy_rss.proof import prove_task, write_certificate, write_geometry  # noqa: E402
 from zzy_rss.scene import Scene  # noqa: E402
 from zzy_rss.weld import WeldSurface  # noqa: E402
@@ -49,6 +50,11 @@ CASES = {
                  "FEASIBLE across the q6 door (run_flood3, findings 45)"),
     "two-wall": (surface(0.40, 0.21, 45, 305), (BOX45, BOX46), (1, 1, 1),
                  "INFEASIBLE, four walls (run_flood3, findings 46)"),
+    # EXP 2's patch stretched to y = 0.70: the wrist passes full reach at
+    # u ~ 0.8, so the q4 fold crosses the patch and the goal edge is out of
+    # reach. Old rule (fold unsupported): INCONCLUSIVE.
+    "fold": (SurfaceParams(p0=(0.28, -0.26, 0.41), p1=(0.28, 0.70, 0.41)), (), (1, 1, -1),
+             "INCONCLUSIVE (the fold was unsupported before 2026-11-17)"),
 }
 
 
