@@ -129,6 +129,15 @@ class World:
                 self.curve_door.append(d.index)
         self.curve_door = np.asarray(self.curve_door, dtype=int)
         self.ds = door_samples(self.curves, self.scale, float(p3.cross_eps), int(p3.cert_stride))
+        # Fold-door states are never crossing legs (proof.connect); they only
+        # seed roadmaps and training. Offsets from fold points at the page
+        # edge (theta = +/-pi, v = 0 / 1) can land a hair outside the box and
+        # so outside the region's cells: clamp them in. q2 / q6 states are
+        # left exactly as they were.
+        if len(self.ds.pts):
+            fold = self.ds.sign == 1
+            if fold.any():
+                self.ds.pts[fold] = np.clip(self.ds.pts[fold], self.chart.lo, self.chart.hi)
         self.sample_door = (self.curve_door[[k[0] for k in self.ds.key]]
                             if len(self.ds.key) else np.zeros(0, dtype=int))
         if start_theta is None:
