@@ -16,7 +16,7 @@
 > `inf(A, door) or inf(door, B)`(多道门之间是 AND)。空间是八页在门处**粘合**的 `Y⁺`。
 > `check` 三项:(i) 面在 `C_obs`;(ii) 面离 `σ=0` 有认证余量;(iii) 墙内无 `σ` 的活零点(否则返回分裂点)。
 > **`σ` 是页坐标的奇异,不是任务的奇异**:q2/q6 门处 6×7 雅可比满秩,`det(JJᵀ)` 找不到它们。
-> 开发在 `claude/focused-ramanujan-w0714i` 上进行,**不直接推 main**。
+> 开发在 `claude/focused-ramanujan-w0714i` 上进行,**2026-11-17 已合入 main**。全部改动的英文总结见 `docs/summary_recursive_proof.md`。
 >
 > **已实现并复现(§10.2)**:`doorset.py`(门只从 σ 找,不用门列表)、`check.py`、`proof.py`。
 > 3 维 EXP 2 无障碍 FEASIBLE / ZGAP INFEASIBLE(一个叶 2006/2006,7.8 s)/ 新 EXP 3 FEASIBLE /
