@@ -531,9 +531,9 @@ class _SetLabeller:
     """SDCL's connectivity rule with explicit seed / rest components.
 
     A point that connects to a component that is neither (it reaches neither
-    A nor B) gets `unlabeled` (Page3Params.unlabeled_inside: +1, inside --
-    invariant 15: enclosing what cannot reach B costs nothing; else 0, the
-    caller's nearest-class fallback). Labels only aim the wall."""
+    A nor B) gets `unlabeled`: +1 inside (invariant 15: enclosing what cannot
+    reach B costs nothing) or 0, the caller's nearest-class fallback
+    (Page3Params.unlabeled, page_wall). Labels only aim the wall."""
 
     def __init__(self, page: Page3, seed_comps: set, rest_comps: set, unlabeled: int = 0):
         self.page, self.S, self.R = page, seed_comps, rest_comps
@@ -594,7 +594,29 @@ def reuse_wall(world: World, signs: tuple, A, B, verbose: bool = True):
 
 
 def page_wall(world: World, signs: tuple, A, B, verbose: bool = True) -> PageWall:
-    """The wall on page `signs` around A's components, excluding B; verified."""
+    """The wall on page `signs` around A's components, excluding B; verified.
+
+    Labels for components that reach neither A nor B (Page3Params.unlabeled):
+    "nearest" (the nearest training class), "inside" (invariant 15: enclosing
+    them is free), or "retry" (default): nearest first, and only if that wall
+    fails, once more with them inside. A retry only ever replaces a failure;
+    every wall is verified the same way."""
+    mode = world.p3.unlabeled
+    if mode not in ("nearest", "inside", "retry"):
+        raise ValueError(f"unknown Page3Params.unlabeled {mode!r}")
+    w = _page_wall(world, signs, A, B, verbose, unlabeled=1 if mode == "inside" else 0)
+    if mode == "retry" and not w.ok and w.info.get("unlabeled_components", 0) > 0:
+        if verbose:
+            print(f"[check] {page_name(signs)}: wall failed ({w.reason}); retrying with the "
+                  f"components that reach neither side inside")
+        w2 = _page_wall(world, signs, A, B, verbose, unlabeled=1)
+        w2.info["retry_of"] = w.reason
+        if w2.ok or w2.poly is not None:
+            return w2
+    return w
+
+
+def _page_wall(world: World, signs: tuple, A, B, verbose: bool, unlabeled: int) -> PageWall:
     cfg, p3 = world.cfg, world.p3
     page = world.page(signs)
     scale = page.scale
@@ -668,7 +690,8 @@ def page_wall(world: World, signs: tuple, A, B, verbose: bool = True) -> PageWal
                     S.add(cj)
     st["seed_components"] = len(S)
     st["curves_in"] = len(curves_in)
-    lab = _SetLabeller(page, S, R, unlabeled=1 if p3.unlabeled_inside else 0)
+    n_unl = len(set(int(c) for c in np.unique(page.comp)) - S - R)
+    lab = _SetLabeller(page, S, R, unlabeled=unlabeled)
 
     # ---- training set (the wall's AIM; verification decides) -------------
     seed = page.valid[np.isin(page.comp, sorted(S))] if S else np.zeros((0, 3))
@@ -712,10 +735,11 @@ def page_wall(world: World, signs: tuple, A, B, verbose: bool = True) -> PageWal
     except _budget.BudgetExceeded as e:
         if e.scope != "wall":
             raise
-        return PageWall(tuple(signs), False, e.reason, info=dict(budget_stop=e.reason))
+        return PageWall(tuple(signs), False, e.reason,
+                        info=dict(budget_stop=e.reason, unlabeled_components=n_unl))
     st["alg4"] = log
     info = dict(closed=poly.closed, facets=f"{rep.n_passed}/{rep.n_facets}",
-                gamma=round(float(wall.gamma), 2), stats=st)
+                gamma=round(float(wall.gamma), 2), stats=st, unlabeled_components=n_unl)
     if not (poly.closed and rep.ok):
         why = rep.failures[0][1] if rep.failures else (poly.note or "not closed")
         return PageWall(tuple(signs), False, f"no verified wall ({info['facets']}; {why})",
