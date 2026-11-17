@@ -102,7 +102,10 @@ def test_recursion_logic() -> dict:
     n, _, pr = _run(loop)
     assert n.status == P.PROVEN, n.reason
     assert not n.assumes and (S0, G) in pr.cache and (d1, G) in pr.cache
-    assert (d2, G) not in pr.cache, "a result resting on an open assumption is never cached"
+    # (d2, G) rested on (d1, G) while it was open; it becomes final only when
+    # the loop closes, and nothing is left pending.
+    assert (d2, G) in pr.cache and not pr.provisional
+    assert all(not v.assumes for v in pr.cache.values())
     # A loop with one uncut door (d3 inside d2's walls, nothing cuts it): the
     # assumption is dropped with the loop, nothing provisional survives.
     d3 = _door(3)
@@ -112,7 +115,7 @@ def test_recursion_logic() -> dict:
     bad[(d3, G)] = (FAILED, [])
     n, _, pr = _run(bad)
     assert n.status == P.NOT_PROVEN, n.reason
-    assert all(not v.assumes for v in pr.cache.values())
+    assert all(not v.assumes for v in pr.cache.values()) and not pr.provisional
     assert (d1, G) not in pr.cache and (d2, G) not in pr.cache
     # A wall that failed for another reason is not a split point.
     n, _, _ = _run({(S0, G): (FAILED, [1])})

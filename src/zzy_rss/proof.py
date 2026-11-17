@@ -134,12 +134,16 @@ class Prover:
         self.coinduction = coinduction
         self.cache: dict = {}
         self.active: set = set()          # claims being proved on the current path
+        self.provisional: dict = {}       # PROVEN results resting on open assumptions
         self.checks = 0
 
     def inf_proof(self, A, B, branch: frozenset = frozenset(), depth: int = 0) -> ProofNode:
         key = (A, B)
         if key in self.cache:
             return self.cache[key]
+        pv = self.provisional.get(key)
+        if pv is not None and pv.assumes <= self.active:
+            return pv                     # its assumptions are all still open above
         if self.coinduction and key in self.active:
             if self.verbose:
                 print(f"[proof]{'  ' * depth} inf({A.label()} -> {B.label()}): in progress "
@@ -149,9 +153,28 @@ class Prover:
                              assumes=frozenset({key}))
         self.active.add(key)
         try:
-            return self._inf_proof(A, B, branch, depth)
+            node = self._inf_proof(A, B, branch, depth)
         finally:
             self.active.discard(key)
+        self._close(key, node.status == PROVEN)
+        if node.status == PROVEN and node.assumes:
+            self.provisional[key] = node
+        return node
+
+    def _close(self, key, proven: bool) -> None:
+        """Claim `key` is no longer in progress. PROVEN: results that assumed
+        it lose that assumption (and become final when none is left). Not
+        proven: every result that assumed it is dropped."""
+        for k, nd in list(self.provisional.items()):
+            if key not in nd.assumes:
+                continue
+            if not proven:
+                del self.provisional[k]
+                continue
+            nd.assumes = nd.assumes - {key}
+            if not nd.assumes:
+                del self.provisional[k]
+                self.cache[k] = nd
 
     def _inf_proof(self, A, B, branch: frozenset, depth: int) -> ProofNode:
         key = (A, B)
