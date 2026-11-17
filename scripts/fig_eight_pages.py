@@ -142,7 +142,9 @@ def main() -> None:
     if args.geometry:
         import pickle
         g = pickle.load(open(args.geometry, "rb"))
-        walls = g["walls"]
+        # One entry per (node, page): older pickles repeat the subtrees that
+        # coinduction reuses.
+        walls = list({(w["node"], w["page"]): w for w in g["walls"]}.values())
         if g.get("path_q") is not None:
             path = path_page_coords(arm, surf, g["path_q"])
     nodes = list(dict.fromkeys(w["node"] for w in walls))
@@ -222,7 +224,9 @@ def main() -> None:
     print(f"[fig8] saved {args.out} ({time.time() - t0:.1f} s)")
     if walls:
         out3 = str(Path(args.out).with_name(Path(args.out).stem + "_wall3d.png"))
-        wall_3d(walls, path, ds, p3, th0, start_signs, out3)
+        # Distinct meshes only: a reused wall is the same mesh as its original.
+        wall_3d([w for w in walls if not w.get("reused_from")] or walls, path, ds, p3, th0,
+                start_signs, out3)
         print(f"[fig8] saved {out3}")
 
 
@@ -249,7 +253,9 @@ def wall_3d(walls, path, ds, p3, th0, start_signs, out):
                        c="#ffd60a", edgecolors="k")
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
-        ax.set_zlim(-180, 180)
+        # A wall around a door that spans every theta (the q4 fold) closes
+        # beyond +/-180: show it.
+        ax.set_zlim(min(-180.0, float(V[:, 2].min())), max(180.0, float(V[:, 2].max())))
         ax.set_xlabel("u")
         ax.set_ylabel("v")
         ax.set_zlabel("theta (deg)")

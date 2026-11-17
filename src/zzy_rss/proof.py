@@ -80,19 +80,29 @@ class ProofNode:
                     children=[dict(door=c["door"], cut=c["cut"], node=c["node"].as_dict())
                               for c in self.children])
 
-    def wall_meshes(self) -> list:
-        """Every wall mesh of the tree: dict(node, page, ok, vertices, simplices),
-        vertices in page coordinates (u, v, theta)."""
-        out = [dict(node=f"{self.A} -/-> {self.B}", **g) for g in self.geometry]
-        for c in self.children:
-            out += c["node"].wall_meshes()
+    def nodes(self) -> list:
+        """Every node of the tree once (a result reused under coinduction is
+        the same object in several places)."""
+        seen, out, stack = set(), [], [self]
+        while stack:
+            n = stack.pop()
+            if id(n) in seen:
+                continue
+            seen.add(id(n))
+            out.append(n)
+            stack.extend(c["node"] for c in reversed(n.children))
         return out
 
+    def wall_meshes(self) -> list:
+        """Every wall mesh of the tree once: dict(node, page, ok, vertices,
+        simplices), vertices in page coordinates (u, v, theta)."""
+        return [dict(node=f"{n.A} -/-> {n.B}", **g) for n in self.nodes() for g in n.geometry]
+
     def count_walls(self, distinct: bool = False) -> int:
-        """Wall entries of the tree; distinct=True skips reused ones (a reused
-        wall is the same mesh as one already counted)."""
-        own = sum(1 for w in self.walls if not (distinct and w.get("reused_from")))
-        return own + sum(c["node"].count_walls(distinct) for c in self.children)
+        """Wall entries of the tree, each node once; distinct=True skips reused
+        ones (a reused wall is the same mesh as one already counted)."""
+        return sum(1 for n in self.nodes() for w in n.walls
+                   if not (distinct and w.get("reused_from")))
 
     def lines(self, indent: str = "") -> list:
         w = ", ".join(f"{x['page']} {x['facets']}" + (" (reused)" if x.get("reused_from") else "")
@@ -172,6 +182,9 @@ class Prover:
                 del self.provisional[k]
                 continue
             nd.assumes = nd.assumes - {key}
+            nd.reason = nd.reason.split(" (rests on ")[0] + (
+                f" (rests on {len(nd.assumes)} claim(s) still being proved above)"
+                if nd.assumes else " (loop closed)")
             if not nd.assumes:
                 del self.provisional[k]
                 self.cache[k] = nd
