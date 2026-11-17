@@ -21,9 +21,21 @@ Two products, with two different jobs:
 No closed form is used anywhere here. doors3.door_curves (the sphere-plane
 circle) appears only in tests, as an independent cross-check.
 
-Only the q2 and q6 components produce crossable point/curve doors. A region
-whose cells could not exclude the q4 fold or Sigma_coord is kept and marked
-UNSUPPORTED: a wall that has one inside is not a proof (check.py refuses it).
+Every sign component of sigma glues pages: q2 = 0 flips s2, q6 = 0 flips s6,
+and the q4 fold (full stretch, sigma's reach slack = 0) flips s4. A region
+whose cells could not exclude one or more of them is a door that joins every
+page reached by flipping those signs (Door.flips). Near the fold the bounds
+of the q2 / q6 components diverge, so a fold region usually also carries
+q2 and q6 and joins all eight pages: conservative, never unsound.
+
+Only the q2 and q6 doors are CROSSABLE (a matched crossing leg, flood3) and
+can be discharged by joint limits (Door.sign_index). A fold door is never
+crossed by a path and only discharged by a collision certificate, so it is
+always live in practice: the recursion splits at it or walls go around it.
+
+A region whose cells could not exclude Sigma_coord (the arm angle's
+reference plane is undefined) is kept and marked UNSUPPORTED: a wall that
+has one inside is not a proof (check.py refuses it).
 """
 
 from __future__ import annotations
@@ -34,13 +46,21 @@ import numpy as np
 from scipy.optimize import minimize
 from scipy.spatial import cKDTree
 
-from .chart import I_Q2, I_Q6, SrsChart
+from .chart import I_Q2, I_Q4, I_Q6, SIGMA_NAMES, SrsChart
 from .doors3 import DoorCurve
 from .facets import SigmaTube
 from .interior import DoorRegion, find_doors
 
-SIGN_OF = {I_Q2: 0, I_Q6: 2}          # sigma component -> sign index it flips
-COMP_OF = {0: I_Q2, 2: I_Q6}
+SIGN_OF = {I_Q2: 0, I_Q4: 1, I_Q6: 2}  # sigma component -> sign index it flips
+COMP_OF = {0: I_Q2, 1: I_Q4, 2: I_Q6}
+
+
+def door_pages(signs: tuple, flips) -> frozenset:
+    """Every page reached from `signs` by flipping any subset of `flips`."""
+    out = {tuple(signs)}
+    for i in flips:
+        out |= {tuple(-x if j == i else x for j, x in enumerate(p)) for p in out}
+    return frozenset(out)
 
 
 @dataclass
@@ -49,11 +69,12 @@ class Door:
 
     index: int
     region: DoorRegion
-    sign_index: int | None            # 0 (q2) / 2 (q6); None: unsupported kind
+    sign_index: int | None            # 0 (q2) / 2 (q6): a single crossable door; else None
     curves: list = field(default_factory=list)      # doors3.DoorCurve
     covered: bool | None = None       # None: not yet checked (check_coverage)
     note: str = ""
     cover_far: float = float("nan")
+    flips: tuple = ()                 # sign indices that may flip in the region; () unsupported
 
     def check_coverage(self, chart: SrsChart, cover_tol: float = 0.004,
                        cover_slack: float = 0.06, max_cells: int = 3_000_000) -> bool:
@@ -85,7 +106,7 @@ class Door:
 
     @property
     def supported(self) -> bool:
-        return self.sign_index is not None
+        return bool(self.flips)
 
     @property
     def joint(self) -> int | None:
@@ -98,7 +119,11 @@ class Door:
         return np.vstack([c.pts for c in self.curves])
 
     def label(self) -> str:
-        return f"D{self.index}:{'q' + str(self.joint) if self.supported else self.region.label()}"
+        if self.sign_index is not None:
+            return f"D{self.index}:q{self.joint}"
+        what = "+".join(f"q{(2, 4, 6)[i]}" for i in self.flips) if self.supported else \
+            self.region.label() + "(unsupported)"
+        return f"D{self.index}:{what}"
 
 
 @dataclass
@@ -108,7 +133,7 @@ class DoorSet:
     stats: dict = field(default_factory=dict)
 
     def curves(self) -> list:
-        """Every curve of every supported door, with its door index."""
+        """Every curve of every door, with its door index."""
         return [(d.index, c) for d in self.doors for c in d.curves]
 
 
@@ -237,9 +262,12 @@ def chain(points: np.ndarray, scale: np.ndarray, gap: float) -> list:
 
 
 def find_doorset(chart: SrsChart, tube_radius, tol: float = 0.01, spacing: float = 0.01,
-                 max_cells: int = 3_000_000) -> DoorSet:
+                 max_cells: int = 3_000_000, fold_doors: bool = True,
+                 max_fold_points: int = 600, fold_spacing: float = 0.05) -> DoorSet:
     """Certified door regions of the whole page box, and the curves on them.
-    Coverage (Door.check_coverage) is computed only when a discharge needs it."""
+    Coverage (Door.check_coverage) is computed only when a discharge needs it.
+    fold_doors=False restores the old rule: a region that may hold the q4
+    fold is unsupported (a wall enclosing it is refused)."""
     scale = chart.scale
     res = find_doors(chart, tol=tol, max_cells=max_cells)
     doors = []
@@ -247,27 +275,39 @@ def find_doorset(chart: SrsChart, tube_radius, tol: float = 0.01, spacing: float
         return DoorSet(doors=[], complete=False, stats=dict(search=res.stats))
     for k, reg in enumerate(res.doors):
         kinds = set(reg.kinds)
-        comps = [c for c in (I_Q2, I_Q6) if ("q2" if c == I_Q2 else "q6") in kinds]
-        if kinds - {"q2", "q6"} or len(comps) != 1:
+        if "coord" in kinds or (fold_doors is False and "q4" in kinds):
             doors.append(Door(index=k, region=reg, sign_index=None,
                               note=f"unsupported sigma kinds {sorted(kinds)}"))
             continue
-        comp = comps[0]
-        P = refine_points(chart, reg, comp, spacing)
-        curves = []
-        for seq in chain(P, scale, gap=4.0 * spacing):
-            if len(seq) < 2:
-                continue
-            pts = P[seq]
-            closed = bool(np.linalg.norm((pts[0] - pts[-1]) * scale) <= 4.0 * spacing
-                          and len(seq) > 8)
-            c = DoorCurve(sign_index=SIGN_OF[comp], pts=pts, closed=closed)
-            poly = np.vstack([pts, pts[:1]]) if closed else pts
-            c.tube = SigmaTube(polyline=poly, radii=np.asarray(tube_radius, dtype=float),
-                               kind=f"q{2 if comp == I_Q2 else 6} door curve (sigma)")
-            curves.append(c)
-        door = Door(index=k, region=reg, sign_index=SIGN_OF[comp], curves=curves,
-                    note=(f"{len(curves)} curve(s), {len(P)} points" if curves else
-                          "no point with sigma = 0 found in the region"))
-        doors.append(door)
+        comps = [c for c in (I_Q2, I_Q4, I_Q6) if SIGMA_NAMES[c] in kinds]
+        flips = tuple(sorted(SIGN_OF[c] for c in comps))
+        curves, notes = [], []
+        for comp in comps:
+            P = refine_points(chart, reg, comp, spacing)
+            if comp == I_Q4 and len(P) > max_fold_points:
+                # The fold is a surface (a curve in (u, v) times every theta):
+                # thin it to a cover of the requested spacing (points only feed
+                # crossing-state injection and training; regions decide).
+                keys = np.floor(P * scale / fold_spacing).astype(np.int64)
+                _, first = np.unique(keys, axis=0, return_index=True)
+                P = P[np.sort(first)]
+            n_c = 0
+            gap = max(4.0 * spacing, 2.5 * fold_spacing) if comp == I_Q4 else 4.0 * spacing
+            for seq in chain(P, scale, gap=gap):
+                if len(seq) < 2:
+                    continue
+                pts = P[seq]
+                closed = bool(np.linalg.norm((pts[0] - pts[-1]) * scale) <= 4.0 * spacing
+                              and len(seq) > 8)
+                c = DoorCurve(sign_index=SIGN_OF[comp], pts=pts, closed=closed)
+                poly = np.vstack([pts, pts[:1]]) if closed else pts
+                c.tube = SigmaTube(polyline=poly, radii=np.asarray(tube_radius, dtype=float),
+                                   kind=f"{SIGMA_NAMES[comp]} door points (sigma)")
+                curves.append(c)
+                n_c += 1
+            notes.append(f"{SIGMA_NAMES[comp]}: {n_c} curve(s), {len(P)} points")
+        single = flips[0] if len(flips) == 1 and flips[0] in (0, 2) else None
+        doors.append(Door(index=k, region=reg, sign_index=single, curves=curves, flips=flips,
+                          note="; ".join(notes) + ("" if single is not None else
+                                                   f"; joins {2 ** len(flips)} pages")))
     return DoorSet(doors=doors, complete=True, stats=dict(search=res.stats))

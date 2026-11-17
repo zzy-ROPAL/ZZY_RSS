@@ -142,9 +142,12 @@ class SrsChart:
     units the walls and facets live in (Page3Params.scale at d = 3)."""
 
     def __init__(self, arm: SrsArm, task: AffineTask, scale, theta_range=(-np.pi, np.pi),
-                 bound: str = "frame"):
+                 bound: str = "frame", fold_modulus: bool = True):
         """bound: "frame" (default, the arm-angle frame's rotation bounded
-        exactly) or "triangle" (the first version, every term separately)."""
+        exactly) or "triangle" (the first version, every term separately).
+        fold_modulus: where a ball reaches the q4 fold (no Lipschitz bound
+        exists), also try the square-root modulus of fold_modulus()."""
+        self.fold_modulus_on = bool(fold_modulus)
         if bound not in ("frame", "triangle"):
             raise ValueError(f"unknown bound {bound!r}")
         self.bound = bound
@@ -326,6 +329,141 @@ class SrsChart:
         out[idx, I_Q6] = L6
         return out
 
+    def fold_modulus(self, C: np.ndarray, R) -> np.ndarray:
+        """(N, 2) guaranteed bounds on |sigma_k(z) - sigma_k(c)| for k = q2, q6,
+        over the states z of B(c, R) that have a configuration; inf where the
+        bound does not apply. Unlike lipschitz(), it holds up to and across
+        the q4 fold, where the elbow-circle radius r = sqrt(d_se^2 - h^2) is
+        not Lipschitz but is 1/2-Hoelder:
+
+            |r1 - r2| <= sqrt(|h1^2 - h2^2|) <= sqrt(2 |h|max |h'|max |dL|).
+
+        With E = S + h u + r rho (rho = cos(theta) v0 + sin(theta) w0, the
+        arm-angle frame of lipschitz()):
+            |dE| <= |dh| + |h|max |du| + |dr| + r_max |drho|,
+            |du| <= G R / L_lo,   |drho| <= R / s_th + |du| / sin(alpha)_min,
+        the last two along the segment c -> z (it stays within reach: |W - S|
+        is convex along it, so it is at most its value at an end) and off the
+        shoulder axis (required). The upper arm is (E - S) / d_se and the
+        forearm (W - E) / d_ew, both unit, and |q2|, |q6| are angles to fixed
+        directions, so |d sigma| <= 2 asin(|d direction| / 2)."""
+        C = np.atleast_2d(np.asarray(C, dtype=float))
+        R = np.broadcast_to(np.asarray(R, dtype=float), (len(C),))
+        out = np.full((len(C), 2), np.inf)
+        G, Gc = self.G, self.G_c
+        x = self.wrist(C) - self.S[None, :]
+        Lc = np.linalg.norm(x, axis=1)
+        hc = np.linalg.norm(x[:, :2], axis=1)
+        L_lo = Lc - G * R
+        L_top = np.minimum(Lc + G * R, self.reach_max)
+        ok = (L_lo > self.reach_min) & (L_lo <= self.reach_max) & (hc - Gc * R > 0.0)
+        if not ok.any():
+            return out
+        R, L_lo, L_top = R[ok], L_lo[ok], L_top[ok]
+        c = self.d_se ** 2 - self.d_ew ** 2
+
+        def h_of(L):
+            return (c + L ** 2) / (2.0 * L)
+
+        ha, hb = h_of(L_lo), h_of(L_top)
+        hmax = np.maximum(np.abs(ha), np.abs(hb))
+        hmin = np.minimum(np.abs(ha), np.abs(hb))
+        if c > 0.0:
+            Ls = np.sqrt(c)
+            hmin = np.where((L_lo <= Ls) & (Ls <= L_top), np.minimum(hmin, abs(h_of(Ls))), hmin)
+        else:
+            hmin = np.where(ha * hb <= 0.0, 0.0, hmin)
+        hmax = np.minimum(hmax, self.d_se)
+        r_max = np.sqrt(np.maximum(0.0, self.d_se ** 2 - hmin ** 2))
+        hp = 0.5 + abs(c) / (2.0 * L_lo ** 2)                   # max |dh/dL|
+        dL = G * R
+        du = dL / L_lo
+        sin_min = (hc[ok] - Gc * R) / L_top
+        drho = R / self.s_th + du / sin_min
+        dr = np.minimum(r_max, np.sqrt(2.0 * hmax * hp * dL))
+        dE = hp * dL + hmax * du + dr + r_max * drho
+        out[ok, 0] = 2.0 * np.arcsin(np.minimum(1.0, dE / (2.0 * self.d_se)))
+        out[ok, 1] = 2.0 * np.arcsin(np.minimum(1.0, (dL + dE) / (2.0 * self.d_ew)))
+        return out
+
+    def reach_lower(self, C: np.ndarray, R) -> np.ndarray:
+        """A rigorous lower bound of |W - S| over B(C_i, R_i).
+
+        W - S = x0 + A d over the ball's task part |d| <= R (theta does not
+        move W), so min |W - S|^2 is a trust-region problem. Its Lagrangian
+        dual is a lower bound for EVERY lambda >= 0,
+            g(lambda) = |x0|^2 - b^T (A^T A + lambda I)^-1 b - lambda R^2,
+        b = A^T x0 (exact at the best lambda: strong duality). We take the
+        best of a fixed lambda grid, and of the first-order bound
+        L(c) - |grad L(c)| R (L is convex)."""
+        C = np.atleast_2d(np.asarray(C, dtype=float))
+        R = np.broadcast_to(np.asarray(R, dtype=float), (len(C),))
+        n = self.task.n
+        Ax = self.task.A / self.scale[None, :n]
+        x = self.wrist(C) - self.S[None, :]
+        L = np.linalg.norm(x, axis=1)
+        gn = np.linalg.norm((x / L[:, None]) @ Ax, axis=1)
+        best = L - gn * R
+        mu, V = np.linalg.eigh(Ax.T @ Ax)
+        bt = (x @ Ax) @ V                                       # b in the eigenbasis
+        x2 = L ** 2
+
+        def dual(lam):
+            lam = np.asarray(lam, dtype=float)
+            g = x2 - np.sum(bt ** 2 / (mu[None, :] + lam[:, None]), axis=1) - lam * R ** 2
+            return np.sqrt(np.maximum(g, 0.0))
+
+        for lam in np.logspace(-8, 3, 23):
+            best = np.maximum(best, dual(np.full(len(C), lam)))
+        # The optimal lambda makes |d(lambda)| = R (when the free minimiser is
+        # outside the ball): bisect for it; the dual is exact there.
+        lo, hi = np.full(len(C), -12.0), np.full(len(C), 6.0)
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            dn = np.linalg.norm(bt / (mu[None, :] + 10.0 ** mid[:, None]), axis=1)
+            lo, hi = np.where(dn > R, mid, lo), np.where(dn > R, hi, mid)
+        for lam in (10.0 ** lo, 10.0 ** hi):
+            best = np.maximum(best, dual(lam))
+        return best
+
+    def reach_reference(self, C: np.ndarray, R) -> tuple:
+        """For balls whose CENTRE is beyond full reach (sigma undefined there)
+        but which reach back within it: a centre c' within reach and a radius
+        R' = R + |c - c'| with B(c, R) inside B(c', R'). c' = c + d along the
+        trust-region path d(lambda) = -(A^T A + lambda I)^-1 A^T x0 (the
+        minimiser of |W - S| over the ball lies on it), the shortest step on a
+        lambda grid that lands within reach and within the ball.
+        Returns (C', R', found)."""
+        C = np.atleast_2d(np.asarray(C, dtype=float))
+        R = np.broadcast_to(np.asarray(R, dtype=float), (len(C),)).astype(float)
+        n = self.task.n
+        Ax = self.task.A / self.scale[None, :n]
+        x = self.wrist(C) - self.S[None, :]
+        mu, V = np.linalg.eigh(Ax.T @ Ax)
+        bt = (x @ Ax) @ V
+        def step(lam):
+            lam = np.asarray(lam, dtype=float)[:, None]
+            return -(bt / (mu[None, :] + lam)) @ V.T              # scaled task step
+
+        # |d(lambda)| decreases in lambda: bisect (in log lambda) for the step
+        # of length 0.999 R -- the trust-region minimiser, just inside the ball.
+        lo = np.full(len(C), -12.0)
+        hi = np.full(len(C), 6.0)
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            long_ = np.linalg.norm(step(10.0 ** mid), axis=1) > 0.999 * R
+            lo = np.where(long_, mid, lo)
+            hi = np.where(long_, hi, mid)
+        d = step(10.0 ** hi)
+        dn = np.linalg.norm(d, axis=1)
+        Z = C.copy()
+        Z[:, :n] += d / self.scale[None, :n]
+        L = np.linalg.norm(self.wrist(Z) - self.S[None, :], axis=1)
+        found = (dn <= R) & (L <= self.reach_max - 1e-9)
+        Cp, Rp = C.copy(), R.copy()
+        Cp[found], Rp[found] = Z[found], R[found] + dn[found]
+        return Cp, Rp, found
+
     # -- the predicate the proof uses --------------------------------------
 
     def off_task(self, C: np.ndarray, R) -> np.ndarray:
@@ -349,8 +487,31 @@ class SrsChart:
         slack = self.reach_slack(C)
         off = self.off_task(C, R)
         no_ik = (slack < 0.0) & (-slack > self.G * R)
+        if self.fold_modulus_on:
+            # |W - S| is convex in z (the norm of an affine map), so over the
+            # ball it is at least L(c) - |grad L(c)| R: a tighter "beyond full
+            # reach everywhere" than the global G R.
+            no_ik |= self.reach_lower(C, R) > self.reach_max
         with np.errstate(invalid="ignore"):
             may = ~(sig > lip * R[:, None])        # nan or inf -> may vanish
+            if self.fold_modulus_on:
+                # Only where no Lipschitz bound exists (the ball reaches the
+                # fold or Sigma_coord): elsewhere the result is unchanged.
+                for j, k in enumerate((I_Q2, I_Q6)):
+                    idx = np.flatnonzero(may[:, k] & np.isinf(lip[:, k]))
+                    if len(idx):
+                        w = self.fold_modulus(C[idx], R[idx])[:, j]
+                        may[idx, k] = ~(sig[idx, k] > w)
+                    # A centre beyond full reach has no sigma: test a ball
+                    # around an in-reach point that contains this one.
+                    idx = np.flatnonzero(may[:, k] & np.isinf(lip[:, k]) & np.isnan(sig[:, k]))
+                    if len(idx):
+                        Cp, Rp, f = self.reach_reference(C[idx], R[idx])
+                        if f.any():
+                            i2 = idx[f]
+                            sp = self.sigma(Cp[f])[:, k]
+                            w = self.fold_modulus(Cp[f], Rp[f])[:, j]
+                            may[i2, k] = ~(sp > w)
         # With no IK anywhere in the ball, q2 / q6 have no states to vanish at.
         may[no_ik] = False
         may[off] = False

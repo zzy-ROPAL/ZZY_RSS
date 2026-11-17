@@ -195,11 +195,20 @@ class DoorRegion:
         return (self.centres + self.half).max(axis=0)
 
     def contains(self, P, slack: float = 1e-9) -> np.ndarray:
-        """Which points lie in the union of the cells (unscaled)."""
+        """Which points lie in the union of the cells (unscaled).
+        Exact: a KD-tree (max-norm, per-axis normalised by the largest cell)
+        only narrows the candidate cells; each is tested by its own box."""
         P = np.atleast_2d(np.asarray(P, dtype=float))
         inn = np.zeros(len(P), dtype=bool)
-        for c, h in zip(self.centres, self.half):
-            inn |= np.all(np.abs(P - c[None, :]) <= h[None, :] + slack, axis=1)
+        if not len(P) or not len(self.centres):
+            return inn
+        hmax = self.half.max(axis=0) + slack
+        tree = cKDTree(self.centres / hmax)
+        for i, js in enumerate(tree.query_ball_point(P / hmax, r=1.0 + 1e-9, p=np.inf)):
+            if js:
+                js = np.asarray(js)
+                inn[i] = bool(np.any(np.all(np.abs(P[i] - self.centres[js])
+                                            <= self.half[js] + slack, axis=1)))
         return inn
 
     def label(self) -> str:

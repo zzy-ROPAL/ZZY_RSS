@@ -53,7 +53,7 @@ def _door(k):
     return DoorNode(door=k, pages=frozenset({(1, 1, 1), (1, 1, -1)}))
 
 
-def _run(script: dict, A=S0, B=G):
+def _run(script: dict, A=S0, B=G, coinduction: bool = True):
     """inf_proof on a scripted check: script[(A, B)] = (kind, [door ids])."""
     calls = []
 
@@ -67,7 +67,7 @@ def _run(script: dict, A=S0, B=G):
     real = P.check
     P.check = fake_check
     try:
-        pr = P.Prover(world=None, max_checks=50, verbose=False)
+        pr = P.Prover(world=None, max_checks=50, verbose=False, coinduction=coinduction)
         node = pr.inf_proof(A, B)
     finally:
         P.check = real
@@ -91,17 +91,36 @@ def test_recursion_logic() -> dict:
                     (S0, d2): (CONNECTED, []), (d2, G): (FAILED, [])})
     assert n.status == P.NOT_PROVEN and "D2" in n.reason
     # Cycle: cutting d1 -> goal finds d2 inside, and d2's halves need d1 again.
-    n, _, _ = _run({(S0, G): (WALLED, [1]), (S0, d1): (CONNECTED, []),
-                    (d1, G): (WALLED, [2]), (d1, d2): (CONNECTED, []),
-                    (d2, G): (WALLED, [1])})
-    assert n.status == P.NOT_PROVEN, "a cycle must never be read as proven"
+    loop = {(S0, G): (WALLED, [1]), (S0, d1): (CONNECTED, []),
+            (d1, G): (WALLED, [2]), (d1, d2): (CONNECTED, []),
+            (d2, G): (WALLED, [1])}
+    # Old rule: a door already on the branch fails the call.
+    n, _, _ = _run(loop, coinduction=False)
+    assert n.status == P.NOT_PROVEN, "without coinduction a cycle is never proven"
+    # Coinduction: d1's walls exclude the goal and hold only d2, d2's hold only
+    # d1 -- a path can only bounce between them. The loop closes: PROVEN.
+    n, _, pr = _run(loop)
+    assert n.status == P.PROVEN, n.reason
+    assert not n.assumes and (S0, G) in pr.cache and (d1, G) in pr.cache
+    assert (d2, G) not in pr.cache, "a result resting on an open assumption is never cached"
+    # A loop with one uncut door (d3 inside d2's walls, nothing cuts it): the
+    # assumption is dropped with the loop, nothing provisional survives.
+    d3 = _door(3)
+    bad = dict(loop)
+    bad[(d2, G)] = (WALLED, [1, 3])
+    bad[(d2, d3)] = (CONNECTED, [])
+    bad[(d3, G)] = (FAILED, [])
+    n, _, pr = _run(bad)
+    assert n.status == P.NOT_PROVEN, n.reason
+    assert all(not v.assumes for v in pr.cache.values())
+    assert (d1, G) not in pr.cache and (d2, G) not in pr.cache
     # A wall that failed for another reason is not a split point.
     n, _, _ = _run({(S0, G): (FAILED, [1])})
     assert n.status == P.NOT_PROVEN and not n.children
     # Cache: PROVEN results only.
     _, _, pr = _run({(S0, G): (WALLED, [1]), (S0, d1): (WALLED, [])})
     assert all(v.status == P.PROVEN for v in pr.cache.values()) and (S0, d1) in pr.cache
-    return dict(cases=6)
+    return dict(cases=8)
 
 
 def test_doors_without_a_door_list() -> dict:

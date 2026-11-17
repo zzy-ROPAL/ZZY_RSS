@@ -14,18 +14,30 @@
         FAILED             -> NOT PROVEN (reason)
         WALLED, no doors   -> PROVEN, a leaf
         WALLED with doors  -> for EVERY door d inside (AND):
-                                  d on the branch already  -> NOT PROVEN (cycle)
                                   inf(A, d) proven, or else inf(d, B) proven (OR)
                               all doors cut -> PROVEN, a node with one child per door
+    a claim (A, B) still IN PROGRESS above -> ASSUMED (coinduction, below);
+        with coinduction off: a door already on the branch -> NOT PROVEN (cycle)
 
 Why it is sound: the walls of check(A, B) enclose A, exclude B and touch no
 live door, so a path from A to B must leave through a door d inside them;
 it then reaches d from A and B from d. Cutting either half for every such d
-leaves no path. A call still on the branch is never assumed proven
-(that would be circular), so a cycle can only cost a verdict.
+leaves no path.
 
-PROVEN results are cached by (A, B): they rest on no assumption. NOT PROVEN
-ones are not (a cycle verdict depends on the branch).
+Coinduction (Page3Params.coinduction). Doors that reach each other across
+pages form loops (a fold door, then q2 doors on the flipped pages, back to
+the first). A claim met again while it is still being proved is ASSUMED. The
+result is kept only if the call that started the loop itself comes out
+PROVEN; then every claim P in the loop has a node whose walls were verified
+and each of whose inner doors is cut by a claim in P, and all of P is true:
+a counterexample path for (X, T) first meets an inner door d (it cannot
+cross the walls), so (X, d) or (d, T) is false on a piece of it that visits
+fewer distinct door regions in a row (regions are disjoint compact sets, so
+a path visits finitely many in a row); at one region the walls contain the
+path. Results resting on an open assumption are never cached and are
+dropped with the loop if it fails.
+
+PROVEN results are cached by (A, B) only when they rest on no assumption.
 """
 
 from __future__ import annotations
@@ -60,6 +72,7 @@ class ProofNode:
     walls: list = field(default_factory=list)       # one dict per page
     children: list = field(default_factory=list)    # dict(door, cut, node)
     geometry: list = field(default_factory=list, repr=False)   # wall meshes (not in the JSON)
+    assumes: frozenset = frozenset()   # claims (A, B) assumed in progress, not yet closed
 
     def as_dict(self) -> dict:
         return dict(A=self.A, B=self.B, status=self.status, reason=self.reason,
@@ -113,15 +126,35 @@ class TaskResult:
 
 
 class Prover:
-    def __init__(self, world: World, max_checks: int = 24, verbose: bool = True):
+    def __init__(self, world: World, max_checks: int = 24, verbose: bool = True,
+                 coinduction: bool | None = None):
         self.world, self.max_checks, self.verbose = world, max_checks, verbose
+        if coinduction is None:
+            coinduction = bool(getattr(getattr(world, "p3", None), "coinduction", True))
+        self.coinduction = coinduction
         self.cache: dict = {}
+        self.active: set = set()          # claims being proved on the current path
         self.checks = 0
 
     def inf_proof(self, A, B, branch: frozenset = frozenset(), depth: int = 0) -> ProofNode:
         key = (A, B)
         if key in self.cache:
             return self.cache[key]
+        if self.coinduction and key in self.active:
+            if self.verbose:
+                print(f"[proof]{'  ' * depth} inf({A.label()} -> {B.label()}): in progress "
+                      f"above -> assumed (coinduction)")
+            return ProofNode(A.label(), B.label(), PROVEN,
+                             "assumed: being proved above (coinduction)",
+                             assumes=frozenset({key}))
+        self.active.add(key)
+        try:
+            return self._inf_proof(A, B, branch, depth)
+        finally:
+            self.active.discard(key)
+
+    def _inf_proof(self, A, B, branch: frozenset, depth: int) -> ProofNode:
+        key = (A, B)
         pad = "  " * depth
         if self.checks >= self.max_checks:
             return ProofNode(A.label(), B.label(), NOT_PROVEN,
@@ -151,7 +184,7 @@ class Prover:
             self.cache[key] = node
             return node
         for d in r.doors:
-            if d in branch:
+            if not self.coinduction and d in branch:
                 return ProofNode(A.label(), B.label(), NOT_PROVEN,
                                  f"cycle: {d.label()} is already being cut on this branch",
                                  walls, geometry=geom)
@@ -170,7 +203,12 @@ class Prover:
                              f"nor door -/-> {B.label()} ({right.reason})", walls,
                              geometry=geom)
         node.reason = f"walls verified; all {len(r.doors)} door(s) inside cut"
-        self.cache[key] = node
+        assumes = frozenset().union(*(c["node"].assumes for c in node.children)) - {key}
+        node.assumes = assumes
+        if assumes:
+            node.reason += f" (rests on {len(assumes)} claim(s) still being proved above)"
+        else:
+            self.cache[key] = node
         return node
 
 
@@ -211,6 +249,8 @@ def connect(world: World, verbose: bool = True) -> tuple:
         for n in np.flatnonzero(page.inject_index >= 0):
             if int(page.comp[page.inject_index[n]]) != comp:
                 continue
+            if int(ds.sign[n]) not in FIBER_PAIR:
+                continue            # a fold-door state: no crossing leg (never crossed)
             k = int(world.sample_door[n])
             if world.discharged(signs, k)[0]:
                 continue

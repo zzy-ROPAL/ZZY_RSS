@@ -364,7 +364,7 @@ def choose_start_theta(cfg: Config, arm: SrsArm, surf: WeldSurface, scene: Scene
     return None if best is None else float(th[best[len(best) // 2]])
 
 
-def theta_cut_check(page: Page3) -> dict:
+def theta_cut_check(page: Page3, exempt=None) -> dict:
     """The bounded-theta decision, checked: no valid state near the cut.
 
     The page is the rectangle theta in [theta_min, theta_max], but theta is an
@@ -372,6 +372,10 @@ def theta_cut_check(page: Page3) -> dict:
     a wall the robot cannot cross is exact only if nothing valid touches the
     cut. Sampled: seam_samples random states within seam_eps of the cut,
     plus every roadmap vertex there.
+
+    exempt(points) -> bool mask: states the caller accounts for otherwise
+    (check.py: inside a door region, where a theta wrap is a move AT that
+    door). Exempted states are counted but do not fail the check.
     """
     p3 = page.p3
     rng = np.random.default_rng(p3.rng_seed + 1)
@@ -380,15 +384,24 @@ def theta_cut_check(page: Page3) -> dict:
     th = np.where(side == 0, p3.theta_min + rng.uniform(0, p3.seam_eps, m),
                   p3.theta_max - rng.uniform(0, p3.seam_eps, m))
     pts = np.column_stack([rng.uniform(0, 1, m), rng.uniform(0, 1, m), th])
-    hits = list(pts[page.valid_many(pts)])
+    hits = pts[page.valid_many(pts)]
     near = ((page.valid[:, 2] <= p3.theta_min + p3.seam_eps)
             | (page.valid[:, 2] >= p3.theta_max - p3.seam_eps))
-    n_v = int(near.sum())
-    ok = not hits and n_v == 0
+    vnear = page.valid[near]
+    n_exempt = 0
+    if exempt is not None:
+        eh = exempt(hits) if len(hits) else np.zeros(0, dtype=bool)
+        ev = exempt(vnear) if len(vnear) else np.zeros(0, dtype=bool)
+        n_exempt = int(eh.sum() + ev.sum())
+        hits, vnear = hits[~eh], vnear[~ev]
+    n_v = len(vnear)
+    ok = not len(hits) and n_v == 0
+    extra = f" ({n_exempt} more inside door regions)" if n_exempt else ""
     return dict(ok=ok, n_checked=m, n_valid=len(hits), n_roadmap_near=n_v,
-                reason=("theta cut is clear" if ok else
+                n_exempt=n_exempt,
+                reason=(("theta cut is clear" + extra) if ok else
                         f"{len(hits)} sampled + {n_v} roadmap valid state(s) within "
-                        f"{p3.seam_eps} rad of the theta cut"))
+                        f"{p3.seam_eps} rad of the theta cut{extra}"))
 
 
 # --------------------------------------------------------------------------

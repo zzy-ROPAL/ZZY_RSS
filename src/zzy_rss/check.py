@@ -5,9 +5,11 @@ at the doors. A and B are SETS:
 
     StartSet(signs)          the start posture, on its page
     GoalSet()                every state with u >= 1 - goal_tol, on every page
-    DoorNode(door, pages)    the door region `door` as the place where the
-                             two pages {P, flip(P)} meet; the robot standing
-                             in it may continue on either page
+    DoorNode(door, pages)    the door region `door` as the place where its
+                             pages meet: {P, flip(P)} for a q2 / q6 door, every
+                             page reached by flipping the signs that may vanish
+                             there for a fold or mixed region (doorset.door_pages);
+                             the robot standing in it may continue on any of them
 
 check(A, B) builds, on EVERY page A lives on, a wall that encloses A and
 excludes B, and returns one of
@@ -52,9 +54,9 @@ from . import budget as _budget
 from .arm import SrsArm
 from .chart import SrsChart
 from .doors3 import certify_curve
-from .doorset import DoorSet, find_doorset
+from .doorset import DoorSet, door_pages, find_doorset
 from .facets import FacetOracle
-from .flood3 import door_samples, flip, page_name
+from .flood3 import door_samples, page_name
 from .interior import OUT, polytope_region
 from .page3 import (Page3, choose_start_theta, clip_to_box, robot_oracle3,
                     theta_cut_check, tube_samples, virtual_ring3)
@@ -112,7 +114,8 @@ class World:
         self.chart = SrsChart.for_surface(arm, surf, p3)
         self.scale = self.chart.scale
         t = time.time()
-        self.doorset: DoorSet = find_doorset(self.chart, p3.tube_radius)
+        self.doorset: DoorSet = find_doorset(self.chart, p3.tube_radius,
+                                             fold_doors=bool(p3.fold_doors))
         self.door_seconds = round(time.time() - t, 1)
         if verbose:
             print(f"[doors] sigma search: {len(self.doorset.doors)} door region(s), "
@@ -149,7 +152,7 @@ class World:
         if signs not in self.pages:
             st = self.start_theta if signs == self.start_signs else None
             pg, dt = _build_page(self.cfg, self.arm, self.surf, self.scene, signs, self.p3,
-                                 st, self.ds.pts)
+                                 st, self.ds.pts, self.cut_regions())
             self._add_page(signs, pg, dt)
         return self.pages[signs]
 
@@ -179,7 +182,7 @@ class World:
         with ProcessPoolExecutor(max_workers=n, mp_context=ctx) as ex:
             futs = {s: ex.submit(_build_page, self.cfg, self.arm, self.surf, self.scene, s,
                                  self.p3, self.start_theta if s == self.start_signs else None,
-                                 self.ds.pts) for s in todo}
+                                 self.ds.pts, self.cut_regions()) for s in todo}
             for s, f in futs.items():
                 pg, dt = f.result()
                 self._add_page(s, pg, dt)
@@ -191,6 +194,16 @@ class World:
 
     def door(self, k: int):
         return self.doorset.doors[k]
+
+    def door_node_pages(self, signs: tuple, k: int) -> frozenset:
+        """The pages door k joins, seen from page `signs`: every sign that may
+        vanish in its region may flip (doorset.door_pages)."""
+        return door_pages(tuple(signs), self.door(k).flips)
+
+    def cut_regions(self) -> list:
+        """Door regions inside which the theta cut may be touched
+        (Page3Params.cut_exempt_doors; theta_cut_check's `exempt`)."""
+        return [d.region for d in self.doorset.doors] if self.p3.cut_exempt_doors else []
 
     def discharged(self, signs: tuple, k: int) -> tuple:
         """(blocked, reason) of door k as seen from page `signs`. Only a
@@ -341,26 +354,40 @@ class World:
     def live_doors(self, signs: tuple) -> list:
         return [d.index for d in self.doorset.doors if not self.discharged(signs, d.index)[0]]
 
-    def live_cells(self, signs: tuple):
+    def touches_cut(self, k: int) -> bool:
+        """Does door region k reach the theta cut (within seam_eps)? Such a
+        region contains the wrap itself (near the fold every theta is valid):
+        a path wrapping theta there is AT the door, which the recursion
+        handles, so its 2-pi copy beyond the cut need not be avoided."""
+        r = self.door(k).region
+        e = float(self.p3.seam_eps)
+        return bool(r.lo[-1] <= self.p3.theta_min + e or r.hi[-1] >= self.p3.theta_max - e)
+
+    def live_cells(self, signs: tuple, wrap: bool = False):
         """(KD-tree, centres_scaled, half_scaled) over every cell of every
-        live door region, for test (ii)."""
+        live door region, for test (ii). wrap=True: only the regions whose
+        2-pi copies matter (those not reaching the theta cut; touches_cut)."""
         signs = tuple(signs)
-        if signs not in self._live_index:
+        key = (signs, bool(wrap))
+        if key not in self._live_index:
             C, H = [], []
             for k in self.live_doors(signs):
+                if wrap and self.p3.cut_exempt_doors and self.touches_cut(k):
+                    continue
                 r = self.door(k).region
                 C.append(r.centres * self.scale)
                 H.append(r.half * self.scale)
             if C:
                 C, H = np.vstack(C), np.vstack(H)
-                self._live_index[signs] = (cKDTree(C), C, H)
+                self._live_index[key] = (cKDTree(C), C, H)
             else:
-                self._live_index[signs] = (None, np.zeros((0, 3)), np.zeros((0, 3)))
-        return self._live_index[signs]
+                self._live_index[key] = (None, np.zeros((0, 3)), np.zeros((0, 3)))
+        return self._live_index[key]
 
     def sigma_clear(self, signs: tuple):
         """FacetOracle.sigma_many for page `signs` (test ii)."""
         tree, Cl, Hl = self.live_cells(signs)
+        tree_w, Cw, Hw = self.live_cells(signs, wrap=True)
         hmax = float(np.max(np.linalg.norm(Hl, axis=1))) if len(Hl) else 0.0
         period = 2.0 * np.pi * self.scale[-1]
 
@@ -373,12 +400,15 @@ class World:
             for i in np.flatnonzero(~ok):
                 hit = False
                 for sh in (0.0, period, -period):
+                    tr, Cc, Hc = (tree, Cl, Hl) if sh == 0.0 else (tree_w, Cw, Hw)
+                    if tr is None:
+                        continue
                     c = C[i] * self.scale
                     c = c + np.array([0.0, 0.0, sh])
-                    js = tree.query_ball_point(c, float(R[i]) + hmax)
+                    js = tr.query_ball_point(c, float(R[i]) + hmax)
                     if js:
                         js = np.asarray(js)
-                        gap = np.maximum(0.0, np.abs(Cl[js] - c) - Hl[js])
+                        gap = np.maximum(0.0, np.abs(Cc[js] - c) - Hc[js])
                         if np.any(np.linalg.norm(gap, axis=1) <= R[i]):
                             hit = True
                             break
@@ -459,19 +489,26 @@ def check(world: World, A, B, verbose: bool = True) -> CheckResult:
         if not w.ok:
             return CheckResult(FAILED, f"{page_name(signs)}: {w.reason}", walls=walls)
         for k in w.doors_inside:
-            dn = DoorNode(door=k, pages=frozenset({tuple(signs),
-                                                   flip(tuple(signs), world.door(k).sign_index)}))
+            dn = DoorNode(door=k, pages=world.door_node_pages(signs, k))
             if dn not in doors:
                 doors.append(dn)
     return CheckResult(WALLED, "verified wall(s): A inside, B outside", walls=walls,
                        doors=doors)
 
 
-def _build_page(cfg, arm, surf, scene, signs, p3, start_theta, inject) -> tuple:
-    """One page with its theta-cut check (module level: runs in a worker)."""
+def _build_page(cfg, arm, surf, scene, signs, p3, start_theta, inject,
+                regions=()) -> tuple:
+    """One page with its theta-cut check (module level: runs in a worker).
+    `regions`: door regions inside which the cut may be touched."""
     t = time.time()
     pg = Page3(cfg, arm, surf, scene, tuple(signs), p3, start_theta, inject=inject)
-    cut = theta_cut_check(pg)
+
+    def exempt(P):
+        m = np.zeros(len(P), dtype=bool)
+        for r in regions:
+            m |= r.contains(P, slack=1e-9)
+        return m
+    cut = theta_cut_check(pg, exempt if regions else None)
     pg.cut_ok, pg.cut_reason = cut["ok"], cut["reason"]
     return pg, time.time() - t
 
@@ -568,22 +605,38 @@ def page_wall(world: World, signs: tuple, A, B, verbose: bool = True) -> PageWal
     tree0 = cKDTree(region0 * scale) if len(region0) else None
     vtree = cKDTree(page.valid * scale)
     curves_in, curves_out = [], []
+
+    def near_start(c) -> bool | None:
+        pieces = clip_to_box(np.asarray(c.tube.polyline, dtype=float), page.lo, page.hi)
+        if not pieces:
+            return None
+        if tree0 is None:
+            return False
+        P = np.vstack(pieces) * scale
+        r = float(np.max(np.asarray(c.tube.radii) * scale))
+        return float(tree0.query(P, k=1)[0].min()) <= max(0.03, r)
+
     for k in live:
-        for c in world.door(k).curves:
-            if k == a_door:
-                curves_in.append(c)
+        door = world.door(k)
+        if k == a_door:
+            curves_in += door.curves
+            continue
+        if k == b_door:
+            curves_out += door.curves
+            continue
+        if door.sign_index is None:
+            # A fold / mixed door is one surface broken into many short point
+            # chains: decide for the whole door (any piece near A -> all in),
+            # or the two classes would interleave on the same surface.
+            nears = [near_start(c) for c in door.curves]
+            near = any(bool(x) for x in nears)
+            (curves_in if near else curves_out).extend(
+                c for c, x in zip(door.curves, nears) if x is not None)
+            continue
+        for c in door.curves:
+            near = near_start(c)
+            if near is None:
                 continue
-            if k == b_door:
-                curves_out.append(c)
-                continue
-            pieces = clip_to_box(np.asarray(c.tube.polyline, dtype=float), page.lo, page.hi)
-            if not pieces:
-                continue
-            near = False
-            if tree0 is not None:
-                P = np.vstack(pieces) * scale
-                r = float(np.max(np.asarray(c.tube.radii) * scale))
-                near = float(tree0.query(P, k=1)[0].min()) <= max(0.03, r)
             (curves_in if near else curves_out).append(c)
     # Door pockets (invariant 53): non-target components reaching into the
     # tube of an enclosed curve go inside too.

@@ -219,6 +219,21 @@ class Page3Params:
     # no valid configuration lies within seam_eps of theta_min / theta_max.
     seam_eps: float = 0.05
     seam_samples: int = 4000
+    # The q4 fold as a door (recursive proof): a region that may hold the fold
+    # joins the s4-flipped pages instead of making every wall around it fail.
+    # False: the old rule (such a region is unsupported).
+    fold_doors: bool = True
+    # The theta cut may be touched INSIDE a door region (near the fold every
+    # theta is valid, so the cut is reached there). Sound: a path that wraps
+    # theta does so inside the region, so it is at that door -- the recursion
+    # splits at a door region inside a wall, and a region certified outside
+    # every wall puts the wrap outside too. False: the old, strict check.
+    cut_exempt_doors: bool = True
+    # The recursion's loops (proof.py): a claim met again while it is still
+    # being proved is ASSUMED, and kept only if the loop closes PROVEN
+    # (coinduction; the argument is in proof.py). False: the old rule, a door
+    # already on the branch fails the call.
+    coinduction: bool = True
     # Door curves: samples around each sphere-plane circle, tube radii in
     # (u, v, theta) units, and how densely the fiber certificate is sampled
     # along a curve before its Lipschitz guard is applied.
