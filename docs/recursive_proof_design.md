@@ -535,3 +535,11 @@ check 1(起点 ↛ 终点)训练了墙 1(2566 面,内含门 D0、终点在外);c
 
 测试 `test_recursive`、`test_chart`、`test_facets`、`test_tdc`、`test_batch`、`test_page3` 全过。
 **剩下的大头**:two-wall 里约 10 s 未单独计时(场景准备、训练集准备、门的证书、墙的最终检查),下一步要先剖析它。
+
+**补充:路径验证批量化(2026-11-17)。** `verify_witness` 原来逐构型做 FK、位姿误差、限位与**精确**连杆–盒距离
+(粗扫 + 48 步三分),EXP 3 的 3653 个构型 6.75 s。现在每条腿的所有构型一次算完(`witness._verify_leg_batch`:
+批量 FK、批量位姿、批量限位、`_segment_box_distance_many` 对每个构型做**同样的**粗扫、括区间与三分),
+失败按原顺序逐构型报告;`WitnessParams.batch_verify`(默认开,关掉回到原循环)。
+实测与原循环**逐位相同**(max step、位姿误差、最小间隙差 0.0;三种篡改路径的失败列表完全相同),
+**0.10 s vs 4.95 s(48×)**。EXP 3(`--also-prove`)**32.9 → 24.5 s**,日志的每页有效点数与每轮面数与上一轮相同。
+`test_witness`(含五种篡改路径必须全拒)、`test_flood3`、`test_crossing` 全过。

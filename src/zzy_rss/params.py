@@ -741,6 +741,11 @@ class WitnessParams:
     # With 49 samples on a 0.33 m link the error reaches ~3.4 mm. A witness
     # path is a one-off, so it pays for the exact routine instead.
     exact_collision: bool = True
+    # Verify every configuration of a leg AT ONCE (witness._verify_leg_batch):
+    # the same checks and the same exact segment-box distance (coarse sweep +
+    # ternary refinement), vectorised over configurations. False = the
+    # original one-configuration-at-a-time loop (kept for comparison).
+    batch_verify: bool = True
     # A straight-through door crossing switches spelling a hair either side
     # of the door point, as a FRACTION of the crossing half-length (findings
     # 43). The door point itself is never sampled: its IK spelling is an

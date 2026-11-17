@@ -193,3 +193,4 @@
 | `src/zzy_rss/params.py` | `Page3Params.parallel_pages = 2`、`parallel_workers = 4` |
 
 结果见设计文档 §10.9。
+| `src/zzy_rss/witness.py`(2026-11-17) | `_verify_leg_batch`、`_frames_many`、`_capsules_many`、`_segment_box_distance_many`:路径验证按腿批量,逐位等于原循环;`WitnessParams.batch_verify = True` |

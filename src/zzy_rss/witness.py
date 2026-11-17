@@ -194,6 +194,131 @@ def exact_clearance(scene: Scene, frames: dict) -> tuple[float, str]:
     return worst, witness
 
 
+# --------------------------------------------------------------------------
+# the same checks, all configurations of a leg at once
+# --------------------------------------------------------------------------
+
+
+def _frames_many(arm: SrsArm, Q: np.ndarray) -> dict:
+    """arm.frames for N joint vectors (every frame the capsules may use)."""
+    from .batch import _rot_y, _rot_z
+    p = arm.p
+    r02 = _rot_z(Q[:, 0]) @ _rot_y(Q[:, 1])
+    r03 = r02 @ _rot_z(Q[:, 2])
+    r04 = r03 @ _rot_y(Q[:, 3])
+    r07 = r04 @ _rot_z(Q[:, 4]) @ _rot_y(Q[:, 5]) @ _rot_z(Q[:, 6])
+    shoulder = np.broadcast_to(np.asarray(arm.shoulder, dtype=float), (len(Q), 3))
+    elbow = shoulder + p.d_se * r02[:, :, 2]
+    wrist = elbow + p.d_ew * r04[:, :, 2]
+    tool = wrist + p.d_wt * r07[:, :, 2]
+    return {"shoulder": shoulder, "elbow": elbow, "wrist": wrist, "tool": tool,
+            "R02": r02, "R03": r03, "R04": r04, "R07": r07}
+
+
+def _capsules_many(scene: Scene, F: dict) -> list:
+    """scene.capsules for N configurations: [(A (N,3), B (N,3), radius, label)]."""
+    p = scene.arm_params
+    caps = [(F["shoulder"], F["elbow"], p.r_upper_arm, "upper_arm"),
+            (F["elbow"], F["wrist"], p.r_forearm, "forearm"),
+            (F["wrist"], F["tool"], p.r_tool, "tool")]
+    if p.use_off_axis_upper_arm:
+        axis = F["R02"][:, :, 2]
+        base = F["shoulder"] + p.upper_arm_hub_along * p.d_se * axis
+        hub = base + F["R02"] @ np.array([p.upper_arm_hub_offset, 0.0, 0.0])
+        caps.append((hub, hub, p.upper_arm_hub_radius, "upper_arm_hub"))
+    if p.use_off_axis_elbow:
+        hub = F["elbow"] + F["R03"] @ np.array([p.elbow_box_offset, 0.0, 0.0])
+        caps.append((hub, hub, p.elbow_box_radius, "elbow_hub"))
+    return caps
+
+
+def _segment_box_distance_many(A, B, center, half, iters: int = 48,
+                               n_coarse: int = 33) -> np.ndarray:
+    """scene.segment_box_distance for N segments at once: the same coarse
+    sweep, bracket and ternary refinement, per segment."""
+    D = B - A
+    ts = np.linspace(0.0, 1.0, n_coarse)
+    pts = A[:, None, :] + ts[None, :, None] * D[:, None, :]
+    d = np.linalg.norm(np.maximum(np.abs(pts - center) - half, 0.0), axis=2)
+    k = np.argmin(d, axis=1)
+    lo = ts[np.maximum(0, k - 1)]
+    hi = ts[np.minimum(n_coarse - 1, k + 1)]
+
+    def dist(t):
+        x = A + t[:, None] * D
+        return np.linalg.norm(np.maximum(np.abs(x - center) - half, 0.0), axis=1)
+
+    for _ in range(iters):
+        t1 = lo + (hi - lo) / 3.0
+        t2 = hi - (hi - lo) / 3.0
+        left = dist(t1) < dist(t2)
+        hi = np.where(left, t2, hi)
+        lo = np.where(left, lo, t1)
+    return dist(0.5 * (lo + hi))
+
+
+def _verify_leg_batch(arm: SrsArm, weld, scene: Scene, leg, li: int, wp, r_max: float,
+                      rep: "WitnessReport") -> bool:
+    """Checks (1)-(4) of verify_witness for every configuration of one leg at
+    once; failures are reported per configuration in the scalar loop's order.
+    Returns whether every segment of the leg is swept-certified."""
+    Q = np.asarray(leg.q, dtype=float)
+    n = len(Q)
+    if n == 0:
+        return True
+    rep.n_configs += n
+    # (1) on-constraint: the task pose of every sample (affine, cheap)
+    poses = [weld.pose(*np.atleast_1d(np.asarray(leg.y[j], dtype=float))) for j in range(n)]
+    P = np.array([p for p, _ in poses])
+    Rt = np.array([r for _, r in poses])
+    F = _frames_many(arm, Q)
+    e_pos = np.linalg.norm(F["tool"] - P, axis=1)
+    e_rot = np.linalg.norm((F["R07"] - Rt).reshape(n, -1), axis=1)
+    rep.max_tool_pos_err = max(rep.max_tool_pos_err, float(e_pos.max()))
+    rep.max_tool_rot_err = max(rep.max_tool_rot_err, float(e_rot.max()))
+    off = (e_pos > wp.tol_pos) | (e_rot > wp.tol_rot)
+    # (2) joint limits
+    bad_lim = (Q < arm.q_min) | (Q > arm.q_max)
+    # (3) exact clearance: min over capsules x boxes, first minimum wins
+    caps = _capsules_many(scene, F)
+    if scene.boxes and caps:
+        cols, labels = [], []
+        for A, B, radius, label in caps:
+            for center, half, blabel in scene.boxes:
+                cols.append(_segment_box_distance_many(
+                    A, B, np.asarray(center, dtype=float), np.asarray(half, dtype=float)) - radius)
+                labels.append(f"{label}/{blabel}")
+        Cm = np.column_stack(cols)
+        clear = Cm.min(axis=1)
+        who = np.argmin(Cm, axis=1)
+    else:
+        clear = np.full(n, np.inf)
+        who = np.zeros(n, dtype=int)
+        labels = [""]
+    rep.min_clearance = min(rep.min_clearance, float(clear.min()))
+    # (4) step bound + swept certificate
+    dQ = np.diff(Q, axis=0)
+    steps = np.abs(dQ).max(axis=1) if n > 1 else np.zeros(0)
+    if len(steps):
+        rep.max_step = max(rep.max_step, float(steps.max()))
+    swept = bool(np.all(clear[:-1] >= r_max * np.abs(dQ).sum(axis=1))) if n > 1 else True
+    # failures, in the scalar loop's order
+    for j in np.flatnonzero(off | bad_lim.any(axis=1) | (clear < 0.0)
+                            | np.r_[steps > wp.step_max, False]):
+        if off[j]:
+            rep.failures.append((f"leg{li}[{j}]", f"off the constraint: "
+                                 f"{e_pos[j] * 1e3:.4f} mm, rot {e_rot[j]:.2e}"))
+        if bad_lim[j].any():
+            bad = [f"q{m + 1}={np.degrees(Q[j, m]):.2f}" for m in np.flatnonzero(bad_lim[j])]
+            rep.failures.append((f"leg{li}[{j}]", f"joint limit: {', '.join(bad)}"))
+        if clear[j] < 0.0:
+            rep.failures.append((f"leg{li}[{j}]", f"collision: {labels[int(who[j])]}"))
+        if j + 1 < n and steps[j] > wp.step_max:
+            rep.failures.append((f"leg{li}[{j}]", f"step {steps[j]:.4f} rad exceeds "
+                                                  f"step_max {wp.step_max}"))
+    return swept
+
+
 def _motion_radius(arm: SrsArm) -> float:
     """Conservative bound on how far a link point sits from any joint axis.
 
@@ -480,7 +605,11 @@ def verify_witness(
     r_max = _motion_radius(arm)
     swept_ok = True
 
-    for li, leg in enumerate(path.legs):
+    if getattr(wp, "batch_verify", False) and wp.exact_collision:
+        for li, leg in enumerate(path.legs):
+            swept_ok &= _verify_leg_batch(arm, weld, scene, leg, li, wp, r_max, rep)
+    for li, leg in enumerate(path.legs if not (getattr(wp, "batch_verify", False)
+                                               and wp.exact_collision) else []):
         for j in range(len(leg.q)):
             q = leg.q[j]
             rep.n_configs += 1
