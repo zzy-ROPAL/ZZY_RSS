@@ -234,6 +234,11 @@ class Page3Params:
     # (coinduction; the argument is in proof.py). False: the old rule, a door
     # already on the branch fails the call.
     coinduction: bool = True
+    # Training labels (check._SetLabeller): a point connected to a component
+    # that reaches neither A nor B goes INSIDE the wall (invariant 15). False:
+    # the nearest training class, which interleaves the classes where such a
+    # component lies beside A's across a thin limit band (fold patch, -+-).
+    unlabeled_inside: bool = True
     # Door curves: samples around each sphere-plane circle, tube radii in
     # (u, v, theta) units, and how densely the fiber certificate is sampled
     # along a curve before its Lipschitz guard is applied.

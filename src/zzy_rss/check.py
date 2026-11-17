@@ -528,10 +528,16 @@ def _build_page(cfg, arm, surf, scene, signs, p3, start_theta, inject,
 
 
 class _SetLabeller:
-    """SDCL's connectivity rule with explicit seed / rest components."""
+    """SDCL's connectivity rule with explicit seed / rest components.
 
-    def __init__(self, page: Page3, seed_comps: set, rest_comps: set):
+    A point that connects to a component that is neither (it reaches neither
+    A nor B) gets `unlabeled` (Page3Params.unlabeled_inside: +1, inside --
+    invariant 15: enclosing what cannot reach B costs nothing; else 0, the
+    caller's nearest-class fallback). Labels only aim the wall."""
+
+    def __init__(self, page: Page3, seed_comps: set, rest_comps: set, unlabeled: int = 0):
         self.page, self.S, self.R = page, seed_comps, rest_comps
+        self.unlabeled = int(unlabeled)
         self.tree = cKDTree(page.valid * page.scale)
 
     def label(self, x: np.ndarray) -> int:
@@ -541,7 +547,7 @@ class _SetLabeller:
         for j in np.atleast_1d(js):
             if self.page._edge(x, self.page.valid[int(j)]):
                 c = int(self.page.comp[int(j)])
-                return 1 if c in self.S else (-1 if c in self.R else 0)
+                return 1 if c in self.S else (-1 if c in self.R else self.unlabeled)
         return 0
 
 
@@ -662,7 +668,7 @@ def page_wall(world: World, signs: tuple, A, B, verbose: bool = True) -> PageWal
                     S.add(cj)
     st["seed_components"] = len(S)
     st["curves_in"] = len(curves_in)
-    lab = _SetLabeller(page, S, R)
+    lab = _SetLabeller(page, S, R, unlabeled=1 if p3.unlabeled_inside else 0)
 
     # ---- training set (the wall's AIM; verification decides) -------------
     seed = page.valid[np.isin(page.comp, sorted(S))] if S else np.zeros((0, 3))
