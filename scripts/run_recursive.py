@@ -50,6 +50,14 @@ CASES = {
                  "FEASIBLE across the q6 door (run_flood3, findings 45)"),
     "two-wall": (surface(0.40, 0.21, 45, 305), (BOX45, BOX46), (1, 1, 1),
                  "INFEASIBLE, four walls (run_flood3, findings 46)"),
+    # Candidate for a two-branch infeasibility scene (2026-11-21): the second
+    # cube leaves valid goal postures, but the task is FEASIBLE -- at 6000
+    # samples the roadmap misses a narrow passage on (+,+,-) and the proof is
+    # INCONCLUSIVE (wall on ++- not separable); at 15000 samples a verified
+    # path is found. Kept as a test of soundness, not as an infeasible scene.
+    "two-branch": (surface(0.40, 0.21, 45, 305),
+                   (BOX45, _box((0.20, 0.05, 0.30), (0.06, 0.06, 0.06), "box1")), (1, 1, 1),
+                   "FEASIBLE (15000 samples); INCONCLUSIVE at 6000"),
     # EXP 2's patch stretched to y = 0.70: the wrist passes full reach at
     # u ~ 0.8, so the q4 fold crosses the patch and the goal edge is out of
     # reach. Old rule (fold unsupported): INCONCLUSIVE.
